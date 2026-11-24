@@ -148,8 +148,8 @@ func (f *Server) HostCommands() []string {
 	return append([]string(nil), f.hostCmds...)
 }
 
-// termSocket serves /nodes/{node}[/lxc/{vmid}]/vncwebsocket for a termproxy
-// ticket: a real websocket (RFC 6455 framing) speaking PVE's termproxy protocol.
+// termSocket serves /nodes/{node}/vncwebsocket for a termproxy ticket: a real
+// websocket (RFC 6455 framing) speaking PVE's termproxy protocol.
 func (f *Server) termSocket(w http.ResponseWriter, r *http.Request, node, authUser string) {
 	ticket := r.URL.Query().Get("vncticket")
 	f.mu.Lock()
@@ -192,23 +192,6 @@ func (f *Server) termSocket(w http.ResponseWriter, r *http.Request, node, authUs
 	delete(f.termTickets, ticket) // single use
 	run := f.HostRun
 	f.mu.Unlock()
-	if tt.guest != "" { // a container's console: its login prompt
-		send("OK")
-		sh := &TermShell{Node: tt.guest}
-		send(sh.Start())
-		for {
-			m, err := wsRead(rw.Reader)
-			if err != nil {
-				return
-			}
-			if s := string(m); strings.HasPrefix(s, "0:") {
-				if parts := strings.SplitN(s, ":", 3); len(parts) == 3 {
-					out, _ := sh.Input(parts[2])
-					send(out)
-				}
-			}
-		}
-	}
 	sh := &TermShell{Node: node, Root: tt.user == "root@pam", Run: func(cmd string) (string, int) {
 		f.mu.Lock()
 		f.hostCmds = append(f.hostCmds, node+": "+cmd)
