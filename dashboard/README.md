@@ -68,7 +68,7 @@ browser ──HTTPS/SSE──► galley (Go, SQLite) ──HTTPS :8006──► 
 ```
 
 - Per cluster: several API endpoints with automatic failover, and TLS fingerprints pinned on first use and confirmed by the admin.
-- Credentials: a read-only `PVEAuditor` service token per cluster for the shared cache, and each user's own PVE ticket (renewed in the background, encrypted at rest) for everything shown to and done by that user.
+- Credentials: a read-only `PVEAuditor` service token per cluster for the shared cache, and each user's own PVE login (a ticket, or optionally a short-lived personal API token) for everything shown to and done by that user. Stored logins are encrypted with a key that only exists in the user's browser cookie and in memory while they are active, so a stolen database or backup reveals nothing usable; idle logins lapse. Host commands run through PVE's own node terminal as the user by default — galley holds no root credential. See [docs/security.md](docs/security.md).
 - SQLite (versioned migrations): cluster registry, pinned fingerprints, sessions, audit log, per-user preferences. Back up `/var/lib/galley` as a whole: `secret.key` decrypts the stored secrets.
 
 ## v1 features
