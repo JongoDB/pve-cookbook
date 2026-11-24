@@ -34,7 +34,7 @@ import (
 )
 
 // Version is set at build time.
-var Version = "0.1.0-dev"
+var Version = "0.2.0-dev"
 
 const (
 	cookieName    = "galley_session"
@@ -213,6 +213,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/clusters/{id}/hosts/{node}/scan", s.authed(s.scanHost))
 	mux.HandleFunc("PUT /api/clusters/{id}/hosts/{node}", s.authed(s.pinHost))
 	mux.HandleFunc("DELETE /api/clusters/{id}/hosts/{node}", s.authed(s.unpinHost))
+	mux.HandleFunc("GET /api/whats-new", s.authed(s.whatsNew))
+	mux.HandleFunc("GET /api/feedback", s.authed(s.getFeedback))
+	mux.HandleFunc("PUT /api/settings/feedback", s.authed(s.putFeedback))
 	mux.HandleFunc("GET /api/agent-tokens", s.authed(s.listAgentTokens))
 	mux.HandleFunc("POST /api/agent-tokens", s.authed(s.createAgentToken))
 	mux.HandleFunc("DELETE /api/agent-tokens/{id}", s.authed(s.deleteAgentToken))

@@ -69,6 +69,14 @@ func (s *Server) createPlan(w http.ResponseWriter, r *http.Request, ss *session)
 		apiError(w, 409, "cluster_login_required", "log in to this cluster first")
 		return
 	}
+	if req.Action == "host.exec" && plan.IsDraft(ctx) {
+		var prm struct{ Command string }
+		_ = json.Unmarshal(req.Params, &prm)
+		if msg := aiHostCommandProblem(prm.Command); msg != "" {
+			apiError(w, 403, "forbidden", msg)
+			return
+		}
+	}
 	if req.Action == "host.exec" && !hostAdmin(v) {
 		apiError(w, 403, "forbidden", hostAdminMsg)
 		return

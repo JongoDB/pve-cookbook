@@ -14,6 +14,42 @@ import (
 //go:embed all:user
 var files embed.FS
 
+//go:embed changelog.md
+var changelog string
+
+// Release is one version's notes from changelog.md.
+type Release struct {
+	Version  string `json:"version"`
+	Date     string `json:"date"`
+	Markdown string `json:"markdown"`
+}
+
+var releases = parseChangelog(changelog)
+
+// Releases lists release notes, newest first.
+func Releases() []Release { return releases }
+
+var releaseHead = regexp.MustCompile(`^## v?([0-9][0-9A-Za-z.+-]*)\s*(?:—|-|–)?\s*(\d{4}-\d{2}-\d{2})?\s*$`)
+
+func parseChangelog(s string) []Release {
+	var out []Release
+	var cur *Release
+	for _, line := range strings.Split(strings.ReplaceAll(s, "\r\n", "\n"), "\n") {
+		if m := releaseHead.FindStringSubmatch(line); m != nil {
+			out = append(out, Release{Version: m[1], Date: m[2]})
+			cur = &out[len(out)-1]
+			continue
+		}
+		if cur != nil {
+			cur.Markdown += line + "\n"
+		}
+	}
+	for i := range out {
+		out[i].Markdown = strings.TrimSpace(out[i].Markdown)
+	}
+	return out
+}
+
 // Page is one user-guide page.
 type Page struct {
 	Slug     string `json:"slug"`

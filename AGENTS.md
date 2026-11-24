@@ -26,7 +26,8 @@ written to be executed by agents. Read this file first, then only the recipes yo
    or behaviour updates the user guide (`dashboard/docs/user/*.md` — embedded in the binary,
    read by the Help page, the assistant and MCP agents) and `dashboard/docs/api.md` in the same
    change. Every action the UI offers must also be draftable by the assistant and MCP agents
-   (`dashboard/internal/server/tools.go`). Agents can drive galley directly over MCP:
+   (`dashboard/internal/server/tools.go`), and every change users can notice adds a bullet to
+   `dashboard/docs/changelog.md` (shown in galley's "What's new" dialog). Agents can drive galley directly over MCP:
    `dashboard/docs/user/agents-and-mcp.md`.
 
 ## Where to start

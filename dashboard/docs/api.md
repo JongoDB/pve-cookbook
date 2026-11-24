@@ -299,6 +299,23 @@ AI agents and scripts use galley without the browser, as the user who created th
 
 Examples: Claude Code `claude mcp add --transport http galley https://galley:8443/mcp --header "Authorization: Bearer glly_…"`.
 
+## What's new and feedback
+
+- `GET /api/whats-new` → `{"version","releases":[{"version","date","markdown"}]}` — release notes
+  from `docs/changelog.md` (embedded), newest first. The UI shows the dialog once per version
+  (remembered in the `whatsnew` preference).
+- `GET /api/feedback` → `{"enabled","repo"}`; `PUT /api/settings/feedback` (galley admins).
+  Feedback is filed by the user on GitHub through a pre-filled new-issue link; galley holds no
+  GitHub credential and sends nothing itself.
+
+## Assistant safeguards
+
+Tool results that contain data other people can write are prefixed with a note that they are
+data, not instructions, and secret values (passwords, token secrets, tickets, private keys) are
+redacted. The assistant and agents cannot draft host commands that touch secret material
+(`/etc/pve/priv`, `/etc/shadow`, SSH private keys, `/var/lib/galley`, …). Answers end with a
+`<suggestions>` block of follow-ups that the UI shows as buttons.
+
 ## User guide
 
 `GET /api/docs` → `[{"slug","title","summary","order","route"?}]`; `GET /api/docs/{slug}` →

@@ -87,6 +87,12 @@ func WithDraft(ctx context.Context, source, label string) context.Context {
 	return context.WithValue(ctx, draftKey{}, draftLabel{source, label})
 }
 
+// IsDraft reports whether ctx builds AI drafts.
+func IsDraft(ctx context.Context) bool {
+	_, ok := ctx.Value(draftKey{}).(draftLabel)
+	return ok
+}
+
 func applyDraft(ctx context.Context, p *Plan) {
 	if d, ok := ctx.Value(draftKey{}).(draftLabel); ok {
 		MarkDraft(p, d.source, d.label)

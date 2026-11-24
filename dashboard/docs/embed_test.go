@@ -31,3 +31,18 @@ func TestShippedPagesAreWellFormed(t *testing.T) {
 		}
 	}
 }
+
+func TestChangelog(t *testing.T) {
+	rs := Releases()
+	if len(rs) < 2 || rs[0].Version == "" || rs[0].Date == "" || rs[0].Markdown == "" {
+		t.Fatalf("changelog: %+v", rs)
+	}
+	re := regexp.MustCompile(`\]\(/help/([a-z0-9-]+)\)`)
+	for _, r := range rs {
+		for _, m := range re.FindAllStringSubmatch(r.Markdown, -1) {
+			if _, ok := Get(m[1]); !ok {
+				t.Errorf("%s links to missing help page %s", r.Version, m[1])
+			}
+		}
+	}
+}
