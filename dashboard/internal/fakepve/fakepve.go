@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -329,6 +330,9 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 			write(w, 200, map[string]any{"status": "stopped", "exitstatus": t.exit, "upid": upid})
 		}
 		return
+	case strings.HasPrefix(p, "/nodes/") && strings.HasSuffix(p, "/rrddata"):
+		write(w, 200, fakeRRD(p, r.URL.Query().Get("timeframe")))
+		return
 	case p == "/version":
 		write(w, 200, map[string]any{"version": "9.2.32", "release": "9.2"})
 	case p == "/cluster/status":
@@ -494,4 +498,43 @@ func containsInt(xs []int, v any) bool {
 		}
 	}
 	return false
+}
+
+// fakeRRD returns 70 deterministic samples shaped like PVE's rrddata.
+func fakeRRD(path, timeframe string) []map[string]any {
+	step := map[string]int64{"hour": 60, "day": 1200, "week": 8400, "month": 36000, "year": 432000}[timeframe]
+	if step == 0 {
+		step = 1200
+	}
+	now := time.Now().Unix() / step * step
+	guest := strings.Contains(path, "/qemu/") || strings.Contains(path, "/lxc/")
+	storage := strings.Contains(path, "/storage/")
+	out := make([]map[string]any, 0, 70)
+	for i := 0; i < 70; i++ {
+		t := now - int64(69-i)*step
+		x := float64(i)
+		wave := 0.5 + 0.4*math.Sin(x/7)
+		m := map[string]any{"time": t}
+		switch {
+		case storage:
+			m["used"], m["total"] = 1e12+x*1e9, 10e12
+		case guest:
+			m["cpu"], m["maxcpu"] = 0.1*wave, 2.0
+			m["mem"], m["maxmem"] = 1e9+2e8*wave, 4e9
+			m["netin"], m["netout"] = 2e5*wave, 1e5*wave
+			m["diskread"], m["diskwrite"] = 1e6*wave, 5e5*wave
+			m["pressurecpusome"] = 0.3 * wave
+		default:
+			m["cpu"], m["maxcpu"] = 0.2*wave, 40.0
+			m["memused"], m["memtotal"] = 5e10+1e10*wave, 5.4e11
+			m["netin"], m["netout"] = 3e7*wave, 1e7*wave
+			m["iowait"], m["loadavg"] = 0.01*wave, 3*wave
+			m["rootused"], m["roottotal"] = 8e9, 1e11
+		}
+		if i == 69 {
+			delete(m, "cpu") // the newest sample is often incomplete
+		}
+		out = append(out, m)
+	}
+	return out
 }

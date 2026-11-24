@@ -552,3 +552,67 @@ func TestParallelGuessesStayWithinBudget(t *testing.T) {
 		t.Fatalf("parallel guesses not bounded: %v", counts)
 	}
 }
+
+func TestMetricsNormalizedAndFiltered(t *testing.T) {
+	h := newHarness(t)
+	h.setup()
+	root := h.login("root@pam", "secret")
+	var ms struct {
+		T      []int64
+		Series map[string][]*float64
+		Error  string
+	}
+	if code := root.do("GET", "/api/metrics?cluster=pve-lab&kind=node&id=pve1&timeframe=day", nil, &ms); code != 200 || len(ms.T) != 70 {
+		t.Fatalf("node metrics: %d %s %d", code, ms.Error, len(ms.T))
+	}
+	for _, k := range []string{"cpu", "memUsed", "memTotal", "netIn", "netOut", "ioWait", "load"} {
+		if len(ms.Series[k]) != 70 {
+			t.Fatalf("missing series %s", k)
+		}
+	}
+	if ms.Series["cpu"][69] != nil {
+		t.Fatal("missing samples must be null")
+	}
+	var cl struct {
+		Series map[string][]*float64
+		Error  string
+	}
+	root.do("GET", "/api/metrics?cluster=pve-lab&kind=cluster&id=&timeframe=hour", nil, &cl)
+	if cl.Error != "" || cl.Series["memTotal"] == nil || *cl.Series["memTotal"][0] < 1.6e12 {
+		t.Fatalf("cluster sum: %+v", cl.Error)
+	}
+	var batch []struct{ Error string }
+	root.do("POST", "/api/metrics", map[string]any{"queries": []map[string]any{
+		{"cluster": "pve-lab", "kind": "guest", "id": "120", "timeframe": "hour"},
+		{"cluster": "pve-lab", "kind": "storage", "id": "vm-pool", "timeframe": "week"},
+	}}, &batch)
+	if len(batch) != 2 || batch[0].Error != "" || batch[1].Error != "" {
+		t.Fatalf("batch: %+v", batch)
+	}
+	dev := h.login("dev@pve", "devpass")
+	if code := dev.do("GET", "/api/metrics?cluster=pve-lab&kind=guest&id=120&timeframe=day", nil, nil); code != 400 {
+		t.Fatalf("dev reads invisible guest metrics: %d", code)
+	}
+	if code := dev.do("GET", "/api/metrics?cluster=pve-lab&kind=node&id=pve1&timeframe=day", nil, nil); code != 400 {
+		t.Fatalf("dev reads node metrics: %d", code)
+	}
+	if code := dev.do("GET", "/api/metrics?cluster=pve-lab&kind=guest&id=121&timeframe=day", nil, nil); code != 200 {
+		t.Fatalf("dev reads own guest metrics: %d", code)
+	}
+}
+
+func TestPVEReadPassThroughRunsAsUser(t *testing.T) {
+	h := newHarness(t)
+	h.setup()
+	dev := h.login("dev@pve", "devpass")
+	var res struct{ Data []map[string]any }
+	if code := dev.do("GET", "/api/clusters/pve-lab/pve/cluster/resources", nil, &res); code != 200 {
+		t.Fatalf("passthrough: %d", code)
+	}
+	if len(res.Data) != 1 || res.Data[0]["vmid"].(float64) != 121 {
+		t.Fatalf("passthrough not filtered by PVE as the user: %+v", res.Data)
+	}
+	if code := dev.do("GET", "/api/clusters/pve-lab/pve/nodes/../../etc", nil, nil); code == 200 {
+		t.Fatal("path traversal accepted")
+	}
+}
