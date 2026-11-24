@@ -27,3 +27,13 @@ export function setupTokenMessage(e: unknown): string | null {
   if (e.code === 'setup_token_invalid') return `That setup code is not valid. ${SETUP_CODE_HELP}`;
   return null;
 }
+
+const WARN_BEFORE_END_S = 10 * 60;
+
+/** When the session's hard limit (maxExpires) is near; null when not yet. */
+export function sessionEndWarning(maxExpires: number | undefined, now: number): { minutes: number; at: string } | null {
+  if (!maxExpires) return null;
+  const left = maxExpires - now;
+  if (left > WARN_BEFORE_END_S || left <= 0) return null;
+  return { minutes: Math.max(1, Math.ceil(left / 60)), at: new Date(maxExpires * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) };
+}

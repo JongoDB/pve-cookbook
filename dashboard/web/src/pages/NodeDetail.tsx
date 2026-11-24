@@ -6,7 +6,7 @@ import { useApp, useCrumbs } from '../state/app';
 import { usePve } from '../lib/hooks';
 import { pctLabel, uptime } from '../lib/format';
 import { formatBytes, formatPct } from '../lib/units';
-import { guestPath, storagePath } from '../lib/links';
+import { consolePath, guestPath, storagePath } from '../lib/links';
 import { MetricChart } from '../components/MetricChart';
 import { ApiErrorView } from '../components/ClusterLogin';
 import { Badge, Empty, Meter, Status } from '../components/ui';
@@ -48,6 +48,8 @@ export function NodeDetail() {
     <div className="page">
       <div className="page-head">
         <h1>{node}</h1>
+        <Link className="btn" to={consolePath(cluster, 'node', node)} aria-disabled={!authed} onClick={(e) => { if (!authed) e.preventDefault(); }}
+          title={authed ? 'Root shell on this node (needs Sys.Console)' : 'Log in to this cluster first'}>Shell</Link>
         <div className="sub">
           {n ? <Status tone={n.online ? 'ok' : 'crit'}>{n.online ? 'online' : 'offline'}</Status> : null} node of {clusterName(cluster)}
           {n?.online ? `, up ${uptime(s?.uptime ?? n.uptime)}` : ''}

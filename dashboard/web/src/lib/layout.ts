@@ -6,7 +6,7 @@ export type Span = 3 | 4 | 6 | 8 | 12;
 export const SPANS: Span[] = [3, 4, 6, 8, 12];
 
 export type WidgetType =
-  | 'quorum' | 'ceph' | 'backups' | 'guests' | 'attention' | 'metric' | 'storage' | 'topGuests' | 'changes' | 'tasks';
+  | 'quorum' | 'ceph' | 'backups' | 'guests' | 'attention' | 'metric' | 'storage' | 'topGuests' | 'changes' | 'tasks' | 'gpus';
 
 /** A metric preset: which normalized series a chart plots. */
 export type MetricPreset = 'cpu' | 'memory' | 'network' | 'diskIo' | 'load' | 'ioWait' | 'pressure' | 'swap' | 'rootfs' | 'storage';
@@ -49,6 +49,7 @@ export const CATALOG: CatalogEntry[] = [
   { type: 'attention', title: 'Needs attention', description: 'Health and drift findings. Findings with a fix open as a change.', category: 'Health', span: 4 },
   { type: 'backups', title: 'Backup coverage', description: 'Guests in a backup job, and which ones are not.', category: 'Protection', span: 3 },
   { type: 'guests', title: 'Guests', description: 'Running and total guests across clusters.', category: 'Capacity', span: 3 },
+  { type: 'gpus', title: 'GPUs', description: 'PCI-mapped GPUs per cluster: which are free and which VM uses each.', category: 'Capacity', span: 4 },
   { type: 'storage', title: 'Storage capacity', description: 'Used and free space per storage.', category: 'Capacity', span: 6 },
   { type: 'topGuests', title: 'Top guests by CPU', description: 'The busiest guests right now.', category: 'Performance', span: 4 },
   { type: 'changes', title: 'Recent changes', description: 'Latest entries in the audit log, with who ran them.', category: 'Activity', span: 6 },

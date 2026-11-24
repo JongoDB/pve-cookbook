@@ -12,6 +12,8 @@ import type { GuestAction } from '../lib/actions';
 import { MetricChart } from '../components/MetricChart';
 import { ApiErrorView } from '../components/ClusterLogin';
 import { Badge, Empty, Status } from '../components/ui';
+import { ResourceEditor } from '../components/ResourceEditor';
+import { consolePath } from '../lib/links';
 import { TimeRange } from './Overview';
 import type { Timeframe } from '../api/types';
 
@@ -77,6 +79,9 @@ function GuestActions({ g }: { g: Guest }) {
   return (
     <>
       <div className="toolbar" role="toolbar" aria-label={`Actions for ${g.name}`}>
+        <Link className={`btn${!authed || !running ? ' disabled' : ''}`} to={consolePath(g.clusterId, g.type, g.node, g.vmid)}
+          aria-disabled={!authed || !running} onClick={(e) => { if (!authed || !running) e.preventDefault(); }}
+          title={!authed ? why : !running ? 'Start the guest to open its console' : undefined}>Console</Link>
         {!running && <button type="button" className="btn" disabled={!authed || g.template} title={why} onClick={() => plan('guest.start')}>Start</button>}
         {running && <button type="button" className="btn" disabled={!authed} title={why} onClick={() => plan('guest.shutdown')}>Shut down</button>}
         {running && <button type="button" className="btn" disabled={!authed} title={why} onClick={() => plan('guest.reboot')}>Reboot</button>}
@@ -211,43 +216,101 @@ function Summary({ g, tf, setTf, cfg }: { g: Guest; tf: Timeframe; setTf: (t: Ti
   );
 }
 
+type HwRow = { k: string; v: React.ReactNode; n?: string; keys: string[] };
+
 function Hardware({ g, cfg }: { g: Guest; cfg: RawConfig | null }) {
-  const { fleet } = useApp();
+  const { fleet, me } = useApp();
+  const [editing, setEditing] = useState<{ id: string; keys?: string[]; addFamily?: string; heading: string } | null>(null);
   if (!cfg) return <div className="panel"><div className="muted panel-body" role="status">Loading the configuration</div></div>;
+  const authed = !!me.clusters.find((c) => c.id === g.clusterId)?.authed;
   const hw = parseGuestConfig(g.type, cfg);
-  const rows: [string, React.ReactNode, string?][] = [];
+  const rows: HwRow[] = [];
   const cpu = `${hw.cores} core${hw.cores === 1 ? '' : 's'}${g.type === 'qemu' ? `, ${hw.sockets} socket${hw.sockets === 1 ? '' : 's'}, type ${hw.cpuType}` : ''}`;
-  rows.push(['Processors', cpu, hw.vcpus ? `${hw.vcpus} vCPUs hot-plugged` : hw.cpulimit ? `limit ${hw.cpulimit}` : undefined]);
-  rows.push(['Memory', `${formatBytes(hw.memory)}${hw.balloon === 'off' ? ', ballooning off' : hw.balloon ? `, balloon minimum ${formatBytes(hw.balloon)}` : ''}`]);
-  if (g.type === 'lxc') rows.push(['Swap', formatBytes(hw.swap ?? 0)]);
+  rows.push({ k: 'Processors', v: cpu, n: hw.vcpus ? `${hw.vcpus} vCPUs hot-plugged` : hw.cpulimit ? `limit ${hw.cpulimit}` : undefined, keys: g.type === 'qemu' ? ['cores', 'sockets', 'cpu'] : ['cores', 'cpulimit'] });
+  rows.push({ k: 'Memory', v: `${formatBytes(hw.memory)}${hw.balloon === 'off' ? ', ballooning off' : hw.balloon ? `, balloon minimum ${formatBytes(hw.balloon)}` : ''}`, keys: g.type === 'qemu' ? ['memory', 'balloon'] : ['memory'] });
+  if (g.type === 'lxc') rows.push({ k: 'Swap', v: formatBytes(hw.swap ?? 0), keys: ['swap'] });
   if (g.type === 'qemu') {
-    rows.push(['Machine', `${hw.machine ?? 'i440fx (default)'}, ${hw.bios === 'ovmf' ? 'OVMF (UEFI)' : 'SeaBIOS'}`]);
-    if (hw.scsihw) rows.push(['SCSI controller', hw.scsihw]);
+    rows.push({ k: 'Machine', v: `${hw.machine ?? 'i440fx (default)'}, ${hw.bios === 'ovmf' ? 'OVMF (UEFI)' : 'SeaBIOS'}`, keys: ['machine', 'bios'] });
+    if (hw.scsihw) rows.push({ k: 'SCSI controller', v: hw.scsihw, keys: ['scsihw'] });
   }
   for (const d of hw.disks) {
     const storage = d.storage && d.media !== 'cdrom'
       ? <><Link to={storagePath(g.clusterId, d.storage, g.node, !!fleet?.clusters.find((c) => c.id === g.clusterId)?.storage.find((s) => s.id === d.storage)?.shared)}>{d.storage}</Link>{describeDisk(d).slice(d.storage.length)}</>
       : describeDisk(d);
-    rows.push([d.bus === 'rootfs' ? 'Root disk' : d.bus === 'unused' ? `Unused disk ${d.key.slice(6)}` : d.bus === 'efidisk' ? 'EFI disk' : d.bus === 'tpmstate' ? 'TPM state' : `Disk ${d.key}`, storage, d.volume && d.media !== 'cdrom' ? d.volume : undefined]);
+    rows.push({ k: d.bus === 'rootfs' ? 'Root disk' : d.bus === 'unused' ? `Unused disk ${d.key.slice(6)}` : d.bus === 'efidisk' ? 'EFI disk' : d.bus === 'tpmstate' ? 'TPM state' : `Disk ${d.key}`, v: storage, n: d.volume && d.media !== 'cdrom' ? d.volume : undefined, keys: [d.key] });
   }
-  for (const n of hw.nets) rows.push([`Network ${n.key}`, describeNic(n) || 'no details', n.mac]);
-  for (const p of hw.hostpci) rows.push([`PCI ${p.key}`, describePci(p)]);
+  for (const n of hw.nets) rows.push({ k: `Network ${n.key}`, v: describeNic(n) || 'no details', n: n.mac, keys: [n.key] });
+  for (const p of hw.hostpci) rows.push({ k: `PCI ${p.key}`, v: describePci(p), keys: [p.key] });
+  const cfgPath = `/nodes/${g.node}/${g.type}/${g.vmid}/config`;
+  const adds = g.type === 'qemu'
+    ? [{ f: 'net', label: 'Network device' }, { f: 'scsi', label: 'Disk' }, { f: 'hostpci', label: 'PCI device or GPU' }]
+    : [{ f: 'net', label: 'Network device' }, { f: 'mp', label: 'Mount point' }, { f: 'dev', label: 'Device' }];
+  const why = authed ? undefined : 'Log in to this cluster first';
   return (
     <section className="panel" aria-labelledby="hw-h">
-      <div className="panel-head"><h2 id="hw-h">Hardware</h2><span className="muted">Read-only. Editing arrives with the resource editor.</span></div>
-      {rows.map(([k, v, n]) => (
-        <div className="hw-row" key={k}><span className="k">{k}</span><span className="v">{v}</span>{n && <span className="n mono">{n}</span>}</div>
+      <div className="panel-head">
+        <h2 id="hw-h">Hardware</h2>
+        <span className="muted">Changes open in Changes for review.{g.status === 'running' && g.type === 'qemu' ? ' Some apply only after the VM restarts.' : ''}</span>
+        <AddDeviceMenu adds={adds} disabled={!authed} title={why} onPick={(f, label) => setEditing({ id: `add-${f}`, addFamily: f, keys: [], heading: `Add ${label.toLowerCase()}` })} />
+      </div>
+      {editing?.id.startsWith('add-') && (
+        <div className="panel-body editor-wrap">
+          <ResourceEditor clusterId={g.clusterId} path={cfgPath} method="PUT" keys={editing.keys} addFamily={editing.addFamily} heading={editing.heading}
+            title={`${editing.heading} on ${g.name} (${g.vmid})`} onCancel={() => setEditing(null)} onSubmitted={() => setEditing(null)} />
+        </div>
+      )}
+      {rows.map((r) => (
+        <Fragment key={r.k}>
+          <div className="hw-row">
+            <span className="k">{r.k}</span><span className="v">{r.v}</span>{r.n && <span className="n mono">{r.n}</span>}
+            <button type="button" className="link-btn small hw-edit" disabled={!authed} title={why} aria-expanded={editing?.id === r.k}
+              aria-label={`Edit ${r.k}`} onClick={() => setEditing(editing?.id === r.k ? null : { id: r.k, keys: r.keys, heading: `Edit ${r.k.toLowerCase()}` })}>Edit</button>
+          </div>
+          {editing?.id === r.k && (
+            <div className="panel-body editor-wrap">
+              <ResourceEditor clusterId={g.clusterId} path={cfgPath} method="PUT" keys={r.keys} heading={editing.heading}
+                title={`Change ${r.k.toLowerCase()} of ${g.name} (${g.vmid})`} onCancel={() => setEditing(null)} onSubmitted={() => setEditing(null)} />
+            </div>
+          )}
+        </Fragment>
       ))}
     </section>
   );
 }
 
+function AddDeviceMenu({ adds, disabled, title, onPick }: { adds: { f: string; label: string }[]; disabled: boolean; title?: string; onPick: (f: string, label: string) => void }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="user-menu">
+      <button type="button" className="btn btn-sm" aria-haspopup="menu" aria-expanded={open} disabled={disabled} title={title} onClick={() => setOpen((v) => !v)}>Add device</button>
+      {open && (
+        <div className="menu" role="menu" aria-label="Add device" onKeyDown={(e) => { if (e.key === 'Escape') setOpen(false); }}>
+          {adds.map((a) => <button key={a.f} type="button" role="menuitem" onClick={() => { setOpen(false); onPick(a.f, a.label); }}>{a.label}</button>)}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Options({ g, cfg }: { g: Guest; cfg: RawConfig | null }) {
+  const { me } = useApp();
+  const [editing, setEditing] = useState(false);
   if (!cfg) return <div className="panel"><div className="muted panel-body" role="status">Loading the configuration</div></div>;
+  const authed = !!me.clusters.find((c) => c.id === g.clusterId)?.authed;
   const hw = parseGuestConfig(g.type, cfg);
   return (
     <section className="panel" aria-labelledby="opt-h">
-      <div className="panel-head"><h2 id="opt-h">Options</h2><span className="muted">Every other key in the {g.type === 'qemu' ? 'VM' : 'container'} configuration</span></div>
+      <div className="panel-head">
+        <h2 id="opt-h">Options</h2><span className="muted">Every other key in the {g.type === 'qemu' ? 'VM' : 'container'} configuration</span>
+        <button type="button" className="btn btn-sm" disabled={!authed} aria-expanded={editing} onClick={() => setEditing((v) => !v)}>{editing ? 'Close editor' : 'Edit options'}</button>
+      </div>
+      {editing && (
+        <div className="panel-body editor-wrap">
+          <ResourceEditor clusterId={g.clusterId} path={`/nodes/${g.node}/${g.type}/${g.vmid}/config`} method="PUT"
+            keys={hw.options.map(([k]) => k).filter((k) => !/^(vmgenid|smbios1|meta)$/.test(k))}
+            title={`Change options of ${g.name} (${g.vmid})`} onCancel={() => setEditing(false)} onSubmitted={() => setEditing(false)} />
+        </div>
+      )}
       {hw.options.length === 0 ? <Empty title="No other options set" /> : (
         <dl className="kv">
           {hw.options.map(([k, v]) => <Fragment key={k}><dt className="mono">{k}</dt><dd className="mono">{v}</dd></Fragment>)}

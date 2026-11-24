@@ -6,6 +6,7 @@ import { stepStatus } from '../lib/plan';
 import { ApiErrorView } from '../components/ClusterLogin';
 import { CopyButton, Empty } from '../components/ui';
 import { auditBadge } from './overview/Widgets';
+import { StepOutput } from '../components/Drawer';
 
 export function Audit() {
   useCrumbs([{ label: 'Audit log' }]);
@@ -57,6 +58,7 @@ export function Audit() {
                                     <span className={`st ${st === 'ok' ? 'ok' : st === 'error' ? 'err' : 'run'}`}>
                                       {st === 'ok' ? `Done${r.upid ? `, task ${r.upid}` : ''}` : st === 'running' ? 'Running' : st === 'unknown' ? `Unknown: ${r.error ?? 'check the PVE task log'}` : `Failed: ${r.error ?? r.exitstatus ?? 'no reason given'}`}
                                     </span>
+                                    {r.output ? <StepOutput text={r.output} /> : null}
                                   </li>
                                 );
                               })}

@@ -5,7 +5,7 @@ import { ACTION_LABEL } from '../lib/actions';
 import { parseCommand } from '../lib/commands';
 import { rank } from '../lib/fuzzy';
 import { useApp } from '../state/app';
-import { PAGES } from './Layout';
+import { PAGES, visiblePage } from './Layout';
 
 interface Item { key: string; label: string; hint: string; run: () => void }
 
@@ -13,7 +13,7 @@ const storagePath = (clusterId: string, id: string, node: string, shared: boolea
   `/storage/${encodeURIComponent(clusterId)}/${encodeURIComponent(shared ? id : `${id}@${node}`)}`;
 
 export function CommandPalette({ onClose }: { onClose: () => void }) {
-  const { fleet, openPlan, clusterName, guests: shared, guestsError } = useApp();
+  const { fleet, openPlan, clusterName, guests: shared, guestsError, me, openDrawer, chat } = useApp();
   const nav = useNavigate();
   const [q, setQ] = useState('');
   const guests: Guest[] = useMemo(() => shared ?? [], [shared]);
@@ -55,9 +55,9 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
       }];
     }
     if (!q.trim()) {
-      return PAGES.map((p) => ({ key: `p:${p.to}`, label: p.label, hint: 'Page', run: go(p.to) }));
+      return PAGES.filter((p) => visiblePage(p, me)).map((p) => ({ key: `p:${p.to}`, label: p.label, hint: 'Page', run: go(p.to) }));
     }
-    const pageItems = rank(q, PAGES, (p) => p.label, 3)
+    const pageItems = rank(q, PAGES.filter((p) => visiblePage(p, me)), (p) => p.label, 3)
       .map((p) => ({ key: `p:${p.to}`, label: p.label, hint: 'Page', run: go(p.to) }));
     const guestItems = rank(q, guests.filter((g) => !g.template), (g) => `${g.name} ${g.vmid}`, 6)
       .map((g) => ({
@@ -81,8 +81,12 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
         key: `s:${c.id}:${s.id}:${s.shared ? '' : s.node}`, label: s.shared ? s.id : `${s.id} on ${s.node}`,
         hint: `Storage on ${c.name}, ${s.type}`, run: go(storagePath(c.id, s.id, s.node, s.shared)),
       }));
-    return [...guestItems, ...nodeItems, ...storeItems, ...pageItems];
-  }, [parsed, q, guests, fleet, nav, onClose, openPlan, clusterName]);
+    // Anything that reads like a question goes to the assistant (it answers in the drawer).
+    const ask = { key: 'ask', label: `Ask the assistant: ${q.trim()}`, hint: 'Assistant', run: () => { openDrawer('assistant'); void chat.send(q); onClose(); } };
+    const question = /\?\s*$|^(why|what|how|which|is|are|can|does|do|when|where|show|list|explain)\b/i.test(q.trim()) || q.trim().split(/\s+/).length > 3;
+    const found = [...guestItems, ...nodeItems, ...storeItems, ...pageItems];
+    return question ? [ask, ...found] : [...found, ask];
+  }, [parsed, q, guests, fleet, nav, onClose, openPlan, clusterName, me, openDrawer, chat]);
 
   useEffect(() => { setSel(0); }, [q]);
 

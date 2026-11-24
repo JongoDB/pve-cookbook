@@ -100,6 +100,7 @@ export function Login({ api, onLogin, notice }: { api: Api; onLogin: (m: Me) => 
     const until = rateLimitedUntil(e2);
     if (until) { setLockedUntil(until); setErr(null); return; }
     if (e2 instanceof ApiError && e2.code === 'otp_required') setErr('This account needs a one-time code. Enter it and log in again.');
+    else if (e2 instanceof ApiError && e2.code === 'credential_failed') setErr(`Your password was accepted, but the cluster refused to create galley's session token: ${e2.message}`);
     else if (e2 instanceof ApiError && (e2.status === 401 || e2.code === 'login_failed')) setErr('Wrong user name, realm or password. Check them and try again.');
     else setErr(`Could not log in: ${errMsg(e2)}`);
   };

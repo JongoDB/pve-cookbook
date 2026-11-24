@@ -5,3 +5,6 @@ export const nodePath = (clusterId: string, node: string) => `/nodes/${e(cluster
 /** Shared storage is one resource per cluster; local storage is per node (id@node). */
 export const storageKey = (id: string, node: string, shared: boolean) => (shared ? id : `${id}@${node}`);
 export const storagePath = (clusterId: string, id: string, node: string, shared: boolean) => `/storage/${e(clusterId)}/${e(storageKey(id, node, shared))}`;
+/** Full-page console: a guest's VNC/terminal, or a node shell (type "node", no vmid). */
+export const consolePath = (clusterId: string, type: 'qemu' | 'lxc' | 'node', node: string, vmid?: number | string) =>
+  `/console/${e(clusterId)}/${type}/${e(node)}${vmid !== undefined ? `/${e(String(vmid))}` : ''}`;

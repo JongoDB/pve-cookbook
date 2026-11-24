@@ -95,3 +95,107 @@ describe('MockApi (demo backend honours the api.md contract)', () => {
     await expect(api.pve('edge-01', 'nodes/edge1/status')).rejects.toMatchObject({ status: 409, code: 'cluster_login_required' });
   });
 });
+
+describe('MockApi: assistant, api.call, hosts', () => {
+  const login = async () => {
+    const api = new MockApi({ stepDelayMs: 0 });
+    await api.login({ clusterId: 'pve-lab', username: 'root', realm: 'pam', password: 'x' });
+    return api;
+  };
+
+  it('streams a GPU answer with tool lines and a draft change that runs by its own id', async () => {
+    const api = await login();
+    const events: string[] = [];
+    let draft: import('./types').Plan | null = null;
+    await api.chat({ message: 'Attach the second GPU to llm-vllm' }, (e) => {
+      events.push(e.type);
+      if (e.type === 'change') draft = e.plan;
+    });
+    expect(events[0]).toBe('tool');
+    expect(events).toContain('text');
+    expect(events.at(-1)).toBe('done');
+    expect(draft!.source).toBe('assistant');
+    expect(draft!.title).toMatch(/^Assistant draft: /);
+    expect(draft!.confirmText).toBe('apply 2 steps');
+    await expect(api.runPlan(draft!.id)).rejects.toMatchObject({ code: 'confirm_mismatch' });
+    await api.whenSettled((await api.runPlan(draft!.id, 'apply 2 steps')).auditId);
+    const cfg = await api.pve<Record<string, string>>('pve-lab', 'nodes/pve1/qemu/300/config');
+    expect(cfg.hostpci1).toBe('mapping=gpu-a2-1,pcie=1');
+    expect((await api.pve<{ id: string }[]>('pve-lab', 'cluster/mapping/pci')).map((m) => m.id)).toEqual(['gpu-a2-0', 'gpu-a2-1']);
+  });
+
+  it('refuses chat when the assistant is off, and keeps the API key write-only', async () => {
+    const api = await login();
+    const s = await api.assistantSettings();
+    expect(s.hasApiKey).toBe(true);
+    expect(JSON.stringify(s)).not.toContain('demo-key');
+    await api.putAssistantSettings({ ...s.config, enabled: false });
+    expect((await api.assistantStatus()).enabled).toBe(false);
+    await expect(api.chat({ message: 'hi' }, () => undefined)).rejects.toMatchObject({ code: 'assistant_disabled' });
+    // switching to another destination drops the stored key
+    await api.putAssistantSettings({ ...s.config, enabled: true, provider: 'openai', baseUrl: 'http://gpu-host:8000/v1', model: 'qwen' });
+    expect((await api.assistantSettings()).hasApiKey).toBe(false);
+  });
+
+  it('validates api.call against the schema and applies config edits', async () => {
+    const api = await login();
+    await expect(api.createPlan({ action: 'api.call', clusterId: 'pve-lab', params: { calls: [{ method: 'PUT', path: '/nodes/pve1/qemu/120/config', body: { bogus: '1' } }] } }))
+      .rejects.toMatchObject({ message: expect.stringContaining('bogus: not a parameter') });
+    const p = await api.createPlan({ action: 'api.call', clusterId: 'pve-lab', params: { calls: [{ method: 'PUT', path: '/nodes/pve1/qemu/120/config', body: { cores: '6', net2: 'virtio,bridge=vmbr1', delete: 'tags', digest: 'beef' } }] } });
+    expect(p.steps[0].cli).toBe('pvesh set /nodes/pve1/qemu/120/config --cores 6 --delete tags --digest beef --net2 virtio,bridge=vmbr1');
+    expect(p.confirmText).toBe('confirm 120/config'); // deleting options needs typed confirmation
+    await api.whenSettled((await api.runPlan(p.id, 'confirm 120/config')).auditId);
+    const cfg = await api.pve<Record<string, string | number>>('pve-lab', 'nodes/pve1/qemu/120/config');
+    expect(cfg).toMatchObject({ cores: '6', net2: 'virtio,bridge=vmbr1' });
+    expect(cfg.tags).toBeUndefined();
+  });
+
+  it('serves schema lookups for concrete paths', async () => {
+    const api = await login();
+    const s = await api.schema('pve-lab', '/nodes/pve1/qemu/300/config');
+    expect(s.path).toBe('/nodes/{node}/qemu/{vmid}/config');
+    expect(s.vars).toEqual({ node: 'pve1', vmid: '300' });
+    expect(Object.keys(s.info).sort()).toEqual(['GET', 'POST', 'PUT']);
+    expect((await api.schemaPaths('pve-lab')).some((p) => p.path === '/cluster/mapping/pci')).toBe(true);
+  });
+
+  it('pins a host only with the fingerprint the node presents, then allows host.exec', async () => {
+    const api = await login();
+    const scan = await api.scanHost('pve-lab', 'pve2');
+    await expect(api.pinHost('pve-lab', 'pve2', `SHA256:${'A'.repeat(43)}`)).rejects.toMatchObject({ code: 'fingerprint_mismatch' });
+    await expect(api.createPlan({ action: 'host.exec', clusterId: 'pve-lab', params: { node: 'pve2', command: 'uptime' } })).rejects.toMatchObject({ status: 400 });
+    await api.pinHost('pve-lab', 'pve2', scan.fingerprint);
+    const h = await api.hosts('pve-lab');
+    expect(h.transport).toBe('ssh');
+    expect(h.nodes.find((n) => n.node === 'pve2')?.pin?.fingerprint).toBe(scan.fingerprint);
+    const p = await api.createPlan({ action: 'host.exec', clusterId: 'pve-lab', params: { node: 'pve2', command: 'ethtool -a enp65s0f0' } });
+    expect(p.confirmText).toBe('run on pve2');
+    const done = await api.whenSettled((await api.runPlan(p.id, 'run on pve2')).auditId);
+    expect(done.results[0].output).toContain('Pause parameters');
+  });
+});
+
+describe('MockApi: host transports and credential modes', () => {
+  it('pve transport needs no pin or key, and runs only for root@pam', async () => {
+    const api = new MockApi({ stepDelayMs: 0 });
+    await api.login({ clusterId: 'pve-lab', username: 'admin', realm: 'pve', password: 'x' });
+    await api.updateCluster('pve-lab', { hostTransport: 'pve' });
+    const h = await api.hosts('pve-lab');
+    expect(h).toMatchObject({ transport: 'pve' });
+    expect(h.authorizedKey).toBeUndefined();
+    expect(h.nodes.every((n) => !n.pin)).toBe(true); // switching to pve deleted the key and pins
+    await expect(api.scanHost('pve-lab', 'pve1')).rejects.toMatchObject({ status: 400 });
+    const p = await api.createPlan({ action: 'host.exec', clusterId: 'pve-lab', params: { node: 'pve1', command: 'uptime' } });
+    const done = await api.whenSettled((await api.runPlan(p.id, 'run on pve1')).auditId);
+    expect(done.results[0].error).toMatch(/only to root@pam/);
+  });
+
+  it('reports credential modes and maxExpires, and token creation failures', async () => {
+    const api = new MockApi({ stepDelayMs: 0 });
+    const me = await api.login({ clusterId: 'pve-lab', username: 'root', realm: 'pam', password: 'x' });
+    expect(me.maxExpires! - me.expires!).toBe(8 * 3600);
+    expect(me.clusters.find((c) => c.id === 'edge-01')).toMatchObject({ credentialMode: 'token', authed: false });
+    await expect(api.clusterLogin('edge-01', { password: 'tokenfail' })).rejects.toMatchObject({ status: 502, code: 'credential_failed' });
+    expect((await api.clusters()).find((c) => c.id === 'pve-lab')).toMatchObject({ credentialMode: 'ticket', hostTransport: 'ssh' });
+  });
+});

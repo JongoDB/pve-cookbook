@@ -32,3 +32,15 @@ describe('setup code errors', () => {
     expect(setupTokenMessage(new ApiError(400, 'invalid', 'x'))).toBeNull();
   });
 });
+
+describe('sessionEndWarning', () => {
+  it('warns only in the last 10 minutes before the hard end', async () => {
+    const { sessionEndWarning } = await import('./auth');
+    const end = 1_800_000_000;
+    expect(sessionEndWarning(undefined, end)).toBeNull();
+    expect(sessionEndWarning(end, end - 601)).toBeNull();
+    expect(sessionEndWarning(end, end - 600)?.minutes).toBe(10);
+    expect(sessionEndWarning(end, end - 30)?.minutes).toBe(1);
+    expect(sessionEndWarning(end, end)).toBeNull();
+  });
+});

@@ -5,17 +5,28 @@ import { CommandPalette } from './CommandPalette';
 import { Drawer } from './Drawer';
 import { IconMenu } from './Icons';
 import { Logo } from './ui';
+import { ClusterLoginForm } from './ClusterLogin';
+import { sessionEndWarning } from '../lib/auth';
 
-export const PAGES: { to: string; label: string }[] = [
+export const PAGES: { to: string; label: string; group?: 'tools' | 'bottom' }[] = [
   { to: '/', label: 'Overview' },
   { to: '/guests', label: 'Guests' },
   { to: '/nodes', label: 'Nodes' },
   { to: '/storage', label: 'Storage' },
+  { to: '/hardware', label: 'Hardware' },
   { to: '/protection', label: 'Protection' },
   { to: '/activity', label: 'Activity' },
   { to: '/audit', label: 'Audit log' },
+  { to: '/create', label: 'Create', group: 'tools' },
+  { to: '/hosts', label: 'Hosts', group: 'tools' },
+  { to: '/api-explorer', label: 'API', group: 'tools' },
   { to: '/clusters', label: 'Clusters' },
+  { to: '/settings', label: 'Settings', group: 'bottom' },
 ];
+
+/** Pages a user can use: Hosts needs admin rights on some cluster, Settings a galley admin. */
+export const visiblePage = (p: { to: string }, me: { galleyAdmin?: boolean; clusters: { admin?: boolean }[] }) =>
+  p.to === '/hosts' ? me.clusters.some((c) => c.admin) : p.to === '/settings' ? !!me.galleyAdmin : true;
 
 const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);
 
@@ -45,6 +56,44 @@ function UserMenu() {
           <button type="button" role="menuitem" onClick={async () => { try { await api.logout(); } finally { setMe(null); } }}>Log out</button>
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * Session-level notices above every page: cluster logins that lapsed (the galley session is
+ * still valid, only that cluster needs its password again) and the approaching hard end of the session.
+ */
+function SessionNotices() {
+  const { me } = useApp();
+  const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
+  const [open, setOpen] = useState<string | null>(null);
+  const [dismissed, setDismissed] = useState<string[]>([]);
+  useEffect(() => {
+    const t = setInterval(() => setNow(Math.floor(Date.now() / 1000)), 30_000);
+    return () => clearInterval(t);
+  }, []);
+  const lapsed = me.clusters.filter((c) => c.loginExpired && !c.authed && !dismissed.includes(c.id));
+  const end = sessionEndWarning(me.maxExpires, now);
+  if (!lapsed.length && !end) return null;
+  return (
+    <div className="session-notices">
+      {end && (
+        <div className="notice notice-warn" role="status">
+          <div className="grow">Your galley session ends at {end.at}, in {end.minutes} minute{end.minutes === 1 ? '' : 's'}, however active you are. Finish what you are doing; changes already running keep going. Then log in again.</div>
+        </div>
+      )}
+      {lapsed.map((c) => (
+        <div key={c.id} className="notice notice-info" role="status">
+          <div className="grow">
+            {open === c.id
+              ? <div style={{ maxWidth: 520 }}><ClusterLoginForm clusterId={c.id} compact onDone={() => setOpen(null)} /></div>
+              : <>Your login to {c.name} lapsed while you were away. Pages for {c.name} stay empty until you log in again; everything else keeps working.</>}
+          </div>
+          {open !== c.id && <button type="button" className="btn btn-sm btn-primary" onClick={() => setOpen(c.id)}>Log in to {c.name}</button>}
+          <button type="button" className="btn btn-sm" onClick={() => setDismissed((d) => [...d, c.id])}>Later</button>
+        </div>
+      ))}
     </div>
   );
 }
@@ -103,12 +152,16 @@ export function Layout({ children }: { children: ReactNode }) {
 
       <div className="shell">
         <nav id="primary-nav" className={`sidenav${navOpen ? ' open' : ''}`} aria-label="Primary">
-          {PAGES.filter((p) => p.to !== '/clusters').map((p) => (
+          {PAGES.filter((p) => p.to !== '/clusters' && !p.group).map((p) => (
             <NavLink key={p.to} to={p.to} end={p.to === '/'} className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`}>
               <span>{p.label}</span>
               {p.to === '/guests' && fleet ? <span className="count">{fleet.totals.guests}</span> : null}
               {p.to === '/protection' && unprotected > 0 ? <span className="count attn"><span className="sr-only">Unprotected guests: </span>{unprotected}</span> : null}
             </NavLink>
+          ))}
+          <div className="nav-gap" aria-hidden="true" />
+          {PAGES.filter((p) => p.group === 'tools' && visiblePage(p, me)).map((p) => (
+            <NavLink key={p.to} to={p.to} className={({ isActive }) => `nav-item${isActive ? ' active' : ''}`}><span>{p.label}</span></NavLink>
           ))}
 
           <div className="nav-section" id="nav-clusters">Clusters</div>
@@ -126,9 +179,12 @@ export function Layout({ children }: { children: ReactNode }) {
             );
           })}
           {me.galleyAdmin && <Link to="/clusters?add=1" className={`nav-item nav-add${loc.search.includes('add=1') ? ' active' : ''}`}>Add cluster</Link>}
+          {PAGES.filter((p) => p.group === 'bottom' && visiblePage(p, me)).map((p) => (
+            <NavLink key={p.to} to={p.to} className={({ isActive }) => `nav-item nav-bottom${isActive ? ' active' : ''}`}><span>{p.label}</span></NavLink>
+          ))}
         </nav>
 
-        <main className="content" id="main" tabIndex={-1}>{children}</main>
+        <main className="content" id="main" tabIndex={-1}><SessionNotices />{children}</main>
         <Drawer />
       </div>
 

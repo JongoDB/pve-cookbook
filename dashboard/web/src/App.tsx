@@ -15,6 +15,12 @@ import { Activity, Nodes, StorageList } from './pages/Lists';
 import { Protection } from './pages/Protection';
 import { Audit } from './pages/Audit';
 import { Clusters } from './pages/Clusters';
+import { Create } from './pages/Create';
+import { Hardware } from './pages/Hardware';
+import { Hosts } from './pages/Hosts';
+import { ApiExplorer } from './pages/ApiExplorer';
+import { Settings } from './pages/Settings';
+import { Console } from './pages/Console';
 import { SESSION_ENDED } from './lib/auth';
 
 type Boot = { phase: 'loading' } | { phase: 'error'; message: string } | { phase: 'setup' } | { phase: 'login'; notice?: string } | { phase: 'ready'; me: Me };
@@ -80,6 +86,12 @@ export function App({ api }: { api: Api }) {
                 <Route path="/operations" element={<Navigate to="/activity" replace />} />
                 <Route path="/audit" element={<Audit />} />
                 <Route path="/clusters" element={<Clusters />} />
+                <Route path="/create" element={<Create />} />
+                <Route path="/hardware" element={<Hardware />} />
+                <Route path="/hosts" element={<Hosts />} />
+                <Route path="/api-explorer" element={<ApiExplorer />} />
+                <Route path="/settings" element={<Settings />} />
+                <Route path="/console/:cluster/:type/:node/:vmid?" element={<Console />} />
                 <Route path="*" element={<Navigate to="/" replace />} />
               </Routes>
             </Layout>

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import type { Cluster, Endpoint } from '../api/types';
+import type { Cluster, CredentialMode, Endpoint, HostTransport } from '../api/types';
 import { errMsg, useApp, useCrumbs } from '../state/app';
 import { AddClusterForm, ProbeEndpoints } from './AddClusterForm';
 import { ClusterLoginForm } from '../components/ClusterLogin';
@@ -63,6 +63,68 @@ function ShareLogin({ c, onDone }: { c: Cluster; onDone: () => void }) {
         }} />
         Share logins with other clusters that have this on (only for clusters on the same realm, such as LDAP or AD)
       </label>
+      <ErrorBox message={err} />
+    </div>
+  );
+}
+
+const MODE_TEXT: Record<CredentialMode, { label: string; trade: string }> = {
+  ticket: { label: 'PVE login tickets', trade: 'galley keeps each user\'s PVE ticket and renews it while their session is in use. Everything PVE allows the user works.' },
+  token: { label: 'Personal API tokens', trade: 'visible and revocable in PVE, expire on their own; root@pam-only operations (raw PCI passthrough, root shell) won\'t work.' },
+};
+const TRANSPORT_TEXT: Record<HostTransport, { label: string; trade: string }> = {
+  pve: { label: 'PVE node terminal', trade: 'Host commands run in PVE\'s node terminal as you — needs a root@pam login; galley stores no SSH key.' },
+  ssh: { label: 'galley SSH key', trade: 'galley keeps an SSH key that is root on the nodes; for non-root administrators.' },
+};
+
+/** Galley-admin choices: how user logins are kept, and how host commands reach the nodes. */
+function Credentials({ c, onDone }: { c: Cluster; onDone: () => void }) {
+  const { api, refreshMe } = useApp();
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [confirmPve, setConfirmPve] = useState(false);
+  const mode: CredentialMode = c.credentialMode ?? 'ticket';
+  const transport = c.hostTransport;
+  const save = async (r: { credentialMode?: CredentialMode; hostTransport?: HostTransport }) => {
+    setBusy(true); setErr(null);
+    try { await api.updateCluster(c.id, r); setConfirmPve(false); await refreshMe(); onDone(); } catch (e) { setErr(`Could not save: ${errMsg(e)}`); } finally { setBusy(false); }
+  };
+  return (
+    <div className="form-stack cred-settings" style={{ flexBasis: '100%', gap: 12 }}>
+      <fieldset className="field fieldset">
+        <legend className="label">How galley keeps user logins to {c.name}</legend>
+        {(['ticket', 'token'] as CredentialMode[]).map((m) => (
+          <label key={m} className="check choice-line">
+            <input type="radio" name={`mode-${c.id}`} checked={mode === m} disabled={busy} onChange={() => void save({ credentialMode: m })} />
+            <span><strong>{MODE_TEXT[m].label}:</strong><span className="ws"> {MODE_TEXT[m].trade}</span></span>
+          </label>
+        ))}
+        <span className="hint">Applies to new logins. Existing sessions keep what they have until they log in again.</span>
+      </fieldset>
+      {transport && (
+        <fieldset className="field fieldset">
+          <legend className="label">How host commands reach the nodes of {c.name}</legend>
+          {(['pve', 'ssh'] as HostTransport[]).map((t) => (
+            <label key={t} className="check choice-line">
+              <input type="radio" name={`transport-${c.id}`} checked={transport === t} disabled={busy}
+                onChange={() => (t === 'pve' && transport === 'ssh' ? setConfirmPve(true) : void save({ hostTransport: t }))} />
+              <span><strong>{TRANSPORT_TEXT[t].label}:</strong><span className="ws"> {TRANSPORT_TEXT[t].trade}</span></span>
+            </label>
+          ))}
+          {confirmPve && (
+            <div className="notice notice-warn">
+              <div className="grow">
+                Switching to the PVE node terminal deletes galley&apos;s SSH key for {c.name} and every pinned host key. Afterwards remove the
+                <code> galley@{c.id}</code> line from <code>/etc/pve/priv/authorized_keys</code> on any node.
+                <div className="row-actions" style={{ marginTop: 8 }}>
+                  <button type="button" className="btn btn-sm btn-danger-outline" disabled={busy} onClick={() => void save({ hostTransport: 'pve' })}>Delete the key and switch</button>
+                  <button type="button" className="btn btn-sm" onClick={() => setConfirmPve(false)}>Keep SSH</button>
+                </div>
+              </div>
+            </div>
+          )}
+        </fieldset>
+      )}
       <ErrorBox message={err} />
     </div>
   );
@@ -136,7 +198,7 @@ export function Clusters() {
             <div className="panel-head">
               <h2 id={`ch-${c.id}`}>{c.name}</h2>
               {badge}
-              <Badge kind={authed ? 'neutral' : 'warn'}>{authed ? (admin ? 'Logged in, admin' : 'Logged in') : 'Not logged in'}</Badge>
+              <Badge kind={authed ? 'neutral' : 'warn'}>{authed ? (admin ? 'Logged in, admin' : 'Logged in') : mine?.loginExpired ? 'Login lapsed' : 'Not logged in'}</Badge>
             </div>
             <div className="panel-body form-stack">
               <div className="text-2">
@@ -168,6 +230,7 @@ export function Clusters() {
                 {(admin || me.galleyAdmin) && <RemoveCluster c={c} onRemoved={async () => { load(); await refreshMe(); }} />}
               </div>
               {me.galleyAdmin && <ShareLogin c={c} onDone={load} />}
+              {me.galleyAdmin && <Credentials c={c} onDone={load} />}
             </div>
           </section>
         );

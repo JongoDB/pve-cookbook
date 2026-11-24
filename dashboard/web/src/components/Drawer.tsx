@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useApp, type DrawerTab } from '../state/app';
+import type { Plan } from '../api/types';
 import { canRun, planCli, runFinished, stepStatus } from '../lib/plan';
 import { ago } from '../lib/format';
 import { ClusterLoginForm } from './ClusterLogin';
 import { IconActivity, IconAssistant, IconChanges, IconFold } from './Icons';
 import { CopyButton } from './ui';
+import { AssistantPanel } from './Assistant';
 
 const TABS: { id: DrawerTab; label: string; icon: () => JSX.Element }[] = [
   { id: 'assistant', label: 'Assistant', icon: IconAssistant },
@@ -84,14 +86,12 @@ export function Drawer() {
   );
 }
 
-function AssistantPanel() {
-  return (
-    <div className="assistant-empty">
-      <h2>Assistant</h2>
-      <p className="text-2">The assistant is not set up yet. A galley admin can connect a model provider in Settings.</p>
-      <p className="explain">When it is connected, it reads with your permissions and anything it proposes waits for you in Changes.</p>
-    </div>
-  );
+/** Why this change needs care, in the admin's terms. */
+function destructiveNote(plan: Plan): string {
+  if (plan.source === 'assistant') return 'Drafted by the assistant from what it read in the cluster. Check every command before you confirm it.';
+  if (plan.action === 'host.exec') return 'Runs as root on the node, outside PVE\'s permission checks. Check the command before you confirm it.';
+  if (plan.action === 'api.call') return 'This deletes settings or data, or interrupts service. Check every command before you confirm it.';
+  return plan.confirmText ? 'This cannot be undone.' : 'Guests lose power without a clean shutdown.';
 }
 
 export function ChangesPanel() {
@@ -148,12 +148,12 @@ export function ChangesPanel() {
     <div className="change" aria-busy={running}>
       <div>
         <div className="change-title" tabIndex={-1} ref={title}>{plan.title}</div>
-        <div className="change-sub">{clusterName(plan.clusterId)}, runs as you ({me.user})</div>
+        <div className="change-sub">{plan.source === 'assistant' && <span className="badge badge-warn" style={{ marginRight: 8 }}>Assistant draft</span>}{clusterName(plan.clusterId)}, runs as you ({me.user})</div>
       </div>
       {plan.summary && <p className="change-summary">{plan.summary}</p>}
       {plan.destructive && (
         <div className="notice notice-warn" role="note">
-          <div className="grow">{plan.confirmText ? 'This cannot be undone.' : 'Guests lose power without a clean shutdown.'}</div>
+          <div className="grow">{destructiveNote(plan)}</div>
         </div>
       )}
       <ol className="change-steps">
@@ -168,6 +168,7 @@ export function ChangesPanel() {
               {r && st === 'error' && <span className="st err">Failed: {r.error ?? r.exitstatus ?? 'no reason given'}</span>}
               {r && st === 'unknown' && <span className="st wait">Unknown: galley stopped following this task. Check the PVE task log.</span>}
               {!r && result && !done && <span className="st wait">Waiting for the previous step</span>}
+              {r?.output ? <StepOutput text={r.output} /> : null}
             </li>
           );
         })}
@@ -207,6 +208,16 @@ export function ChangesPanel() {
         )}
       </div>
       <p className="explain">{EXPLAIN_CHANGES}</p>
+    </div>
+  );
+}
+
+/** Command output of a host step (host.exec), scrollable, with copy. */
+export function StepOutput({ text }: { text: string }) {
+  return (
+    <div className="step-output">
+      <pre className="cli output" tabIndex={0} aria-label="Command output">{text}</pre>
+      <div className="row-actions"><CopyButton text={text} label="Copy output" /></div>
     </div>
   );
 }

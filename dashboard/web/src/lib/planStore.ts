@@ -56,6 +56,17 @@ export class PlanStore {
     }
   }
 
+  /**
+   * Show a change that already exists server-side (an assistant draft): no POST, the plan's own
+   * id is what run() sends. A newer open()/show() or clear() supersedes it like any other plan.
+   */
+  show(plan: Plan): void {
+    if (this.state.plan?.id === plan.id && !this.state.loading) return;
+    ++this.req;
+    this.stopPoll();
+    this.set({ ...EMPTY_PLAN, plan });
+  }
+
   async run(confirm?: string): Promise<void> {
     const plan = this.state.plan;
     if (!plan || this.state.running || this.state.result) return;

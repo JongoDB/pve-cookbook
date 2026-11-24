@@ -11,7 +11,7 @@ import { storageKey } from '../lib/links';
 import { IconClose, IconDown, IconResize, IconSettings, IconUp } from '../components/Icons';
 import {
   AttentionWidget, BackupsWidget, CephWidget, ChangesWidget, GuestsWidget, MetricWidget, QuorumWidget, StorageWidget,
-  TasksWidget, TopGuestsWidget, cephTitle, resolveMetric, uniqueStorage, type WidgetHead,
+  GpuWidget, TasksWidget, TopGuestsWidget, cephTitle, resolveMetric, uniqueStorage, type WidgetHead,
 } from './overview/Widgets';
 
 export function TimeRange({ value, onChange }: { value: Timeframe; onChange: (t: Timeframe) => void }) {
@@ -76,6 +76,7 @@ export function Overview() {
       case 'topGuests': return { title: 'Top guests by CPU', sub: 'now' };
       case 'changes': return { title: 'Recent changes' };
       case 'tasks': return { title: 'Running tasks' };
+      case 'gpus': return { title: 'GPUs', sub: 'PCI mappings' };
       case 'metric': {
         const r = resolveMetric(w.config!, ctx);
         return { title: r.title, sub: r.sub };
@@ -86,6 +87,7 @@ export function Overview() {
   const body = (w: Widget) => {
     if (w.type === 'changes') return <ChangesWidget />;
     if (w.type === 'tasks') return <TasksWidget />;
+    if (w.type === 'gpus') return <GpuWidget />;
     if (w.type === 'topGuests') return <TopGuestsWidget guests={guests} error={guestsError} />;
     if (w.type === 'metric') {
       if (configuring === w.id) return <MetricConfigForm cfg={w.config!} onCancel={() => setConfiguring(null)} onSave={(c) => { dispatch({ type: 'configure', id: w.id, config: c }); setConfiguring(null); }} />;

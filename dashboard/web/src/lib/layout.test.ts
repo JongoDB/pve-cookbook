@@ -53,7 +53,7 @@ describe('sanitizeLayout', () => {
     const l = sanitizeLayout({
       version: 1, timeframe: 'decade',
       widgets: [
-        { id: 'a', type: 'quorum', span: 5 }, { id: 'a', type: 'ceph', span: 3 }, { id: 'x', type: 'gpus', span: 3 },
+        { id: 'a', type: 'quorum', span: 5 }, { id: 'a', type: 'ceph', span: 3 }, { id: 'x', type: 'weather', span: 3 },
         { id: 'm', type: 'metric', span: 8, config: { kind: 'bogus', ids: ['pve1', 3], metric: 'nope' } },
       ],
     })!;

@@ -1,8 +1,9 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ApiError } from '../api/http';
-import type { Api, AuditEntry, Fleet, Guest, Me, PlanRequest, Task } from '../api/types';
+import type { Api, AuditEntry, Fleet, Guest, Me, Plan, PlanRequest, Task } from '../api/types';
 import { EMPTY_PLAN, PlanStore, type PlanState } from '../lib/planStore';
 import { runFinished } from '../lib/plan';
+import { ChatSession } from '../lib/chat';
 
 export type { PlanState } from '../lib/planStore';
 
@@ -24,6 +25,8 @@ interface AppCtx {
   /** the request behind the current change (to retry it after a cluster login) */
   lastPlanRequest: PlanRequest | null;
   openPlan: (req: PlanRequest) => Promise<void>;
+  /** Open a change that already exists (assistant drafts) in Changes, without creating it again. */
+  showPlan: (plan: Plan) => void;
   runPlan: (confirm?: string) => Promise<void>;
   clearPlan: () => void;
   /** true while a change waits for the admin (not yet applied, or still running) */
@@ -40,6 +43,8 @@ interface AppCtx {
   guestsError: string | null;
   refreshGuests: () => void;
   clusterName: (id: string) => string;
+  /** the assistant conversation (lives as long as the session) */
+  chat: ChatSession;
 }
 
 const Ctx = createContext<AppCtx | null>(null);
@@ -82,6 +87,8 @@ export function AppProvider({ api, me, setMe, children }: { api: Api; me: Me; se
   const lastReq = useRef<PlanRequest | null>(null);
   const store = useRef<PlanStore | null>(null);
   if (!store.current || store.current.api !== api) store.current = new PlanStore(api, setPlanState);
+  const chat = useMemo(() => new ChatSession(api), [api]);
+  useEffect(() => () => chat.reset(), [chat]);
 
   useEffect(() => {
     const plans = store.current;
@@ -136,12 +143,24 @@ export function AppProvider({ api, me, setMe, children }: { api: Api; me: Me; se
     openDrawer('changes');
     return store.current!.open(req);
   }, [openDrawer]);
+  const showPlan = useCallback((plan: Plan) => {
+    lastReq.current = null;
+    openDrawer('changes');
+    store.current!.show(plan);
+  }, [openDrawer]);
   const runPlan = useCallback((confirm?: string) => store.current!.run(confirm), []);
   const clearPlan = useCallback(() => { lastReq.current = null; store.current!.clear(); }, []);
 
   const refreshMe = useCallback(async () => {
     try { setMe(await api.me()); } catch { /* a 401 already went through onUnauthorized */ }
   }, [api, setMe]);
+
+  // Coming back to the tab: re-read Me so lapsed cluster logins (loginExpired) show at once.
+  useEffect(() => {
+    const onVis = () => { if (!hidden()) void refreshMe(); };
+    document.addEventListener('visibilitychange', onVis);
+    return () => document.removeEventListener('visibilitychange', onVis);
+  }, [refreshMe]);
 
   const clusterName = useCallback(
     (id: string) => me.clusters.find((c) => c.id === id)?.name ?? fleet?.clusters.find((c) => c.id === id)?.name ?? id,
@@ -153,10 +172,10 @@ export function AppProvider({ api, me, setMe, children }: { api: Api; me: Me; se
 
   const value = useMemo<AppCtx>(() => ({
     api, me, setMe, refreshMe, fleet, tasks, live, lastAudit, runningChanges, planState, lastPlanRequest: lastReq.current,
-    openPlan, runPlan, clearPlan, changePending, paletteOpen, setPaletteOpen,
-    drawerTab, drawerFolded, openDrawer, setDrawerFolded, crumbs, setCrumbs, guests, guestsError, refreshGuests, clusterName,
-  }), [api, me, setMe, refreshMe, fleet, tasks, live, lastAudit, runningChanges, planState, openPlan, runPlan, clearPlan, changePending,
-    paletteOpen, drawerTab, drawerFolded, openDrawer, setDrawerFolded, crumbs, guests, guestsError, refreshGuests, clusterName]);
+    openPlan, showPlan, runPlan, clearPlan, changePending, paletteOpen, setPaletteOpen,
+    drawerTab, drawerFolded, openDrawer, setDrawerFolded, crumbs, setCrumbs, guests, guestsError, refreshGuests, clusterName, chat,
+  }), [api, me, setMe, refreshMe, fleet, tasks, live, lastAudit, runningChanges, planState, openPlan, showPlan, runPlan, clearPlan, changePending,
+    paletteOpen, drawerTab, drawerFolded, openDrawer, setDrawerFolded, crumbs, guests, guestsError, refreshGuests, clusterName, chat]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

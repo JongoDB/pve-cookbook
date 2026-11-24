@@ -16,6 +16,7 @@ export function ClusterLoginForm({ clusterId, onDone, compact = false }: { clust
   const [err, setErr] = useState<string | null>(null);
   const [lockedUntil, setLockedUntil] = useState<number | null>(null);
   const idp = `cl-${clusterId}`;
+  const lapsed = !!me.clusters.find((c) => c.id === clusterId)?.loginExpired;
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -29,6 +30,7 @@ export function ClusterLoginForm({ clusterId, onDone, compact = false }: { clust
       const until = rateLimitedUntil(e2);
       if (until) { setLockedUntil(until); setErr(rateLimitMessage(secondsLeft(until))); }
       else if (e2 instanceof ApiError && e2.code === 'otp_required') setErr('This account needs a one-time code. Enter it and log in again.');
+      else if (e2 instanceof ApiError && e2.code === 'credential_failed') setErr(`Your password was accepted, but ${name} refused to create the session token: ${e2.message}. Ask a galley admin to check the cluster's login mode, or your PVE rights.`);
       else setErr(`Could not log in to ${name}: ${errMsg(e2)}. Check the password for ${me.user}.`);
       setPassword('');
     } finally { setBusy(false); }
@@ -37,7 +39,9 @@ export function ClusterLoginForm({ clusterId, onDone, compact = false }: { clust
   return (
     <form className={compact ? 'form-stack' : 'inline-form'} onSubmit={submit} aria-label={`Log in to ${name}`}>
       <p className="text-2" style={compact ? undefined : { flexBasis: '100%' }}>
-        You are not logged in to {name} in this session. Log in as <strong>{me.user}</strong> to see and change it.
+        {lapsed
+          ? <>Your login to {name} lapsed while you were away. Enter the password for <strong>{me.user}</strong> to continue; nothing else in galley is affected.</>
+          : <>You are not logged in to {name} in this session. Log in as <strong>{me.user}</strong> to see and change it.</>}
       </p>
       <label className="field" htmlFor={`${idp}-pw`}>
         <span className="label">Password</span>

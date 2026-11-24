@@ -2,11 +2,17 @@
 // Generic demo data only: two clusters, ~20 guests, two NVIDIA A2 GPUs on pve1.
 import { ApiError } from './http';
 import type {
-  AddClusterRequest, Api, AuditEntry, Cluster, ClusterLoginRequest, ClusterSummary, EventHandlers, Finding, Fleet,
-  Guest, GuestFilter, GuestTarget, LoginRequest, Me, MetricName, MetricQuery, MetricSeries, Plan, PlanRequest, Probe,
-  Realm, RunResult, Storage, Task, Timeframe, UpdateClusterRequest,
+  AddClusterRequest, Api, AssistantConfig, CredentialMode, HostTransport, AssistantSettingsUpdate, AuditEntry, ChatEvent, ChatRequest, Cluster, ClusterLoginRequest,
+  ClusterSummary, ConsoleRequest, EventHandlers, Finding, Fleet, Guest, GuestFilter, GuestTarget, HostPin, HostsInfo, LoginRequest, Me, MetricName,
+  MetricQuery, MetricSeries, Plan, PlanRequest, Probe, Realm, RunResult, SchemaPathEntry, SchemaPathInfo, Step, Storage, Task, Timeframe,
+  UpdateClusterRequest,
 } from './types';
 import { ACTION_LABEL, confirmTextFor, guestSteps, type GuestAction, type GuestParams } from '../lib/actions';
+import { matchSchema, mockSchema } from './mockSchema';
+import {
+  MOCK_HOST_OUTPUT, assistantScript, hostFingerprint, mockAuthorizedKey, mockPci, mockVnets, seedMappings, type MockMapping,
+} from './mockData';
+import { pveshCli, shellQuote } from '../lib/schemaForm';
 
 const GiB = 1024 ** 3;
 const TiB = 1024 ** 4;
@@ -15,7 +21,10 @@ const wait = (ms = 120) => new Promise((r) => setTimeout(r, ms + Math.random() *
 const rid = () => Math.random().toString(36).slice(2, 10);
 
 interface MockNode { name: string; maxcpu: number; maxmem: number; kernel: string; cpu: number; uptime: number }
-interface MockCluster { id: string; name: string; endpoints: { host: string; fingerprint: string }[]; nodes: MockNode[]; shareLogin?: boolean }
+interface MockCluster {
+  id: string; name: string; endpoints: { host: string; fingerprint: string }[]; nodes: MockNode[]; shareLogin?: boolean;
+  credentialMode?: CredentialMode; hostTransport?: HostTransport;
+}
 
 const fp = (seed: number) =>
   Array.from({ length: 32 }, (_, i) => ((seed * 37 + i * 91) % 256).toString(16).padStart(2, '0').toUpperCase()).join(':');
@@ -23,14 +32,14 @@ const fp = (seed: number) =>
 function seedClusters(): MockCluster[] {
   return [
     {
-      id: 'pve-lab', name: 'pve-lab',
+      id: 'pve-lab', name: 'pve-lab', hostTransport: 'ssh',
       endpoints: [11, 12, 13].map((o) => ({ host: `192.0.2.${o}`, fingerprint: fp(o) })),
       nodes: ['pve1', 'pve2', 'pve3'].map((n, i) => ({
         name: n, maxcpu: 40, maxmem: 503 * GiB, kernel: '7.0.14-30-pve', cpu: [0.18, 0.09, 0.11][i], uptime: 13 * 3600 + i * 400,
       })),
     },
     {
-      id: 'edge-01', name: 'edge-01',
+      id: 'edge-01', name: 'edge-01', credentialMode: 'token',
       endpoints: [{ host: '198.51.100.20', fingerprint: fp(20) }],
       nodes: [{ name: 'edge1', maxcpu: 16, maxmem: 64 * GiB, kernel: '7.0.2-6-pve', cpu: 0.34, uptime: 41 * 86400 }],
     },
@@ -236,6 +245,9 @@ function guestConfig(gx: Guest): Record<string, string | number> {
   };
 }
 
+const tokenFailed = (user: string, realm: string) =>
+  new ApiError(502, 'credential_failed', `PVE refused to create the session token for ${user}@${realm}: 403 Permission check failed (/access/users/${user}@${realm}, User.Modify)`);
+
 export class MockApi implements Api {
   private needsSetup = import.meta.env.VITE_MOCK_SETUP === '1';
   private clustersState: MockCluster[] = this.needsSetup ? [] : seedClusters();
@@ -249,6 +261,14 @@ export class MockApi implements Api {
   private unauthorized: (() => void) | null = null;
   private prefs = new Map<string, unknown>();
   private settled = new Map<string, Promise<AuditEntry>>();
+  private assistantCfg: AssistantConfig = { enabled: true, provider: 'anthropic', model: 'claude-opus-5-5', effort: 'medium', fallback: true, maxTokens: 16000 };
+  private assistantKey = 'demo-key';
+  private conversations = new Map<string, { bytes: number; busy: boolean }>();
+  private pins = new Map<string, HostPin>();
+  private mappings: MockMapping[] = seedMappings();
+  /** config edits applied by api.call changes; null = deleted key */
+  private configEdits = new Map<string, Record<string, string | null>>();
+  private schemaNodes = mockSchema();
   /** The one-time setup code (mock: any non-empty code except "wrong" is accepted). */
   readonly setupToken = 'demo-setup-code';
   private stepDelayMs: number;
@@ -285,6 +305,7 @@ export class MockApi implements Api {
         title: 'Migrate 125 to pve3', cli: ['qm migrate 125 pve3 --online'], ok: true, status: 'ok', results: [{ step: 0, ok: true, status: 'ok', exitstatus: 'OK' }],
       },
     ];
+    this.pins.set('pve-lab/pve1', { addr: '192.0.2.11', fingerprint: hostFingerprint('pve-lab', 'pve1'), pinnedBy: 'root@pam', pinnedAt: t0 - 86400 * 4 });
     if (typeof window !== 'undefined') setInterval(() => this.tick(), 3000);
   }
 
@@ -310,7 +331,7 @@ export class MockApi implements Api {
     const mine = this.session?.clusters.find((x) => x.id === c.id);
     return {
       id: c.id, name: c.name, endpoints: c.endpoints, tokenId: 'galley@pve!poller', shareLogin: !!c.shareLogin,
-      authed: !!mine?.authed, admin: !!mine?.authed,
+      authed: !!mine?.authed, admin: !!mine?.authed, credentialMode: c.credentialMode ?? 'ticket', hostTransport: c.hostTransport ?? 'pve',
       status: {
         reachable: true, quorate: true, nodes: c.nodes.length, nodesOnline: c.nodes.length,
         activeEndpoint: c.endpoints[0]?.host ?? '', lastPoll: now() - 2,
@@ -477,6 +498,18 @@ export class MockApi implements Api {
       c.endpoints = r.endpoints;
     }
     if (r.shareLogin !== undefined) c.shareLogin = r.shareLogin;
+    if ((r.credentialMode !== undefined || r.hostTransport !== undefined) && !this.session!.galleyAdmin) throw new ApiError(403, 'forbidden', 'changing credentialMode or hostTransport needs a galley admin');
+    if (r.credentialMode !== undefined) {
+      if (!['ticket', 'token'].includes(r.credentialMode)) throw new ApiError(400, 'bad_request', 'credentialMode must be ticket or token');
+      c.credentialMode = r.credentialMode;
+      this.session!.clusters = this.session!.clusters.map((x) => (x.id === id ? { ...x, credentialMode: r.credentialMode } : x));
+    }
+    if (r.hostTransport !== undefined) {
+      if (!['pve', 'ssh'].includes(r.hostTransport)) throw new ApiError(400, 'bad_request', 'hostTransport must be pve or ssh');
+      // switching back to PVE's terminal deletes galley's SSH key (and with it every pin)
+      if (r.hostTransport === 'pve') for (const k of [...this.pins.keys()]) if (k.startsWith(`${id}/`)) this.pins.delete(k);
+      c.hostTransport = r.hostTransport;
+    }
     this.emit();
     return this.clusterView(c);
   }
@@ -496,11 +529,16 @@ export class MockApi implements Api {
     }
     if (!r.username || !r.password) throw new ApiError(401, 'auth_failed', 'authentication failure');
     if (r.password === 'wrong') throw new ApiError(401, 'auth_failed', 'authentication failure');
+    const target = this.clustersState.find((c) => c.id === r.clusterId);
+    if (r.password === 'tokenfail' && target?.credentialMode === 'token') throw tokenFailed(r.username, r.realm);
+    // Demo of a lapsed cluster login: set localStorage galley.mock.lapsed=1 before logging in.
+    let lapsed = false;
+    try { lapsed = typeof localStorage !== 'undefined' && localStorage.getItem('galley.mock.lapsed') === '1'; } catch { /* storage blocked */ }
     this.session = {
-      user: `${r.username}@${r.realm}`, csrf: rid(), version: '0.2.0-mock', galleyAdmin: true, expires: now() + 8 * 3600,
+      user: `${r.username}@${r.realm}`, csrf: rid(), version: '0.2.0-mock', galleyAdmin: true, expires: now() + 4 * 3600, maxExpires: now() + 12 * 3600,
       clusters: this.clustersState.map((c) => {
         const authed = c.id === r.clusterId || c.id !== 'edge-01';
-        return { id: c.id, name: c.name, authed, admin: authed };
+        return { id: c.id, name: c.name, authed, admin: authed, credentialMode: c.credentialMode ?? 'ticket', loginExpired: !authed && lapsed };
       }),
     };
     return this.session;
@@ -509,7 +547,9 @@ export class MockApi implements Api {
   async clusterLogin(id: string, r: ClusterLoginRequest): Promise<Me> {
     await wait(300); this.requireAuth();
     if (!r.password || r.password === 'wrong') throw new ApiError(401, 'login_failed', 'authentication failure');
-    this.session = { ...this.session!, clusters: this.session!.clusters.map((c) => (c.id === id ? { ...c, authed: true, admin: true } : c)) };
+    const [u, realm] = this.session!.user.split('@');
+    if (r.password === 'tokenfail' && this.clustersState.find((c) => c.id === id)?.credentialMode === 'token') throw tokenFailed(u, realm);
+    this.session = { ...this.session!, clusters: this.session!.clusters.map((c) => (c.id === id ? { ...c, authed: true, admin: true, loginExpired: false } : c)) };
     this.emit();
     return this.session;
   }
@@ -585,11 +625,121 @@ export class MockApi implements Api {
         ...(action === 'guest.destroy' ? { confirmText: confirmTextFor(ids) } : {}),
         steps: targets.flatMap((t) => guestSteps(action, t, p, this.guestsState.find((x) => x.clusterId === r.clusterId && x.vmid === t.vmid)?.status === 'running')),
       };
+    } else if (r.action === 'api.call') {
+      plan = this.apiCallPlan(base, r.params);
+    } else if (r.action === 'host.exec') {
+      if (!this.session!.clusters.find((x) => x.id === r.clusterId)?.admin) throw new ApiError(403, 'forbidden', 'host commands need administrator rights on / (Sys.Modify, Sys.Console and Permissions.Modify)');
+      const nodeName = String(r.params.node ?? '');
+      const command = String(r.params.command ?? '').trim();
+      if (!nodeName || !command) throw new ApiError(400, 'bad_request', 'node and command required');
+      const ssh = this.clustersState.find((c) => c.id === r.clusterId)?.hostTransport === 'ssh';
+      if (ssh && !this.pins.has(`${r.clusterId}/${nodeName}`)) throw new ApiError(400, 'bad_request', `no confirmed SSH host key for ${nodeName}; pin it on the Hosts page first`);
+      const reason = String(r.params.reason ?? '').trim();
+      plan = {
+        ...base, title: `Run a command on ${nodeName}`, destructive: true, confirmText: `run on ${nodeName}`,
+        summary: `${reason ? `${reason}. ` : ''}Runs as root on ${nodeName} ${ssh ? "over galley's SSH key" : "in PVE's node terminal, as you"}, outside PVE's permission checks. Output is kept in the audit log.`,
+        steps: [{ description: `Run on ${nodeName} as root`, method: 'SSH', path: nodeName, body: { command }, cli: `ssh root@${nodeName} ${shellQuote(command)}` }],
+      };
     } else {
       throw new ApiError(400, 'unknown_action', `unknown action ${r.action}`);
     }
     this.plans.set(plan.id, plan);
     return plan;
+  }
+
+  /** api.call: validated against the (mock) schema like internal/plan.buildAPICall. */
+  private apiCallPlan(base: Pick<Plan, 'id' | 'action' | 'clusterId' | 'createdAt' | 'expiresAt'>, params: Record<string, unknown>, source?: string): Plan {
+    const calls = (params.calls as { method: string; path: string; body?: Record<string, unknown> }[]) ?? [];
+    if (!calls.length || calls.length > 20) throw new ApiError(400, 'bad_request', '1–20 calls required');
+    const steps: Step[] = [];
+    let destructive = false;
+    calls.forEach((c, i) => {
+      const method = c.method.toUpperCase();
+      if (!['POST', 'PUT', 'DELETE'].includes(method)) throw new ApiError(400, 'bad_request', `call ${i + 1}: method must be POST, PUT or DELETE (reads need no change)`);
+      if (!/^(\/[A-Za-z0-9_.:@!+=,-]+)+$/.test(c.path)) throw new ApiError(400, 'bad_request', `call ${i + 1}: invalid path (no trailing slash or percent-encoding)`);
+      const hit = matchSchema(this.schemaNodes, c.path);
+      if (!hit) throw new ApiError(400, 'bad_request', `call ${i + 1}: no such API path ${c.path}`);
+      const info = hit.node.info[method];
+      if (!info) throw new ApiError(400, 'bad_request', `call ${i + 1} (${method} ${c.path}): method not allowed on this path`);
+      const props = info.parameters?.properties ?? {};
+      const body: Record<string, string> = {};
+      const problems: string[] = [];
+      for (const [k, v] of Object.entries(c.body ?? {})) {
+        if (typeof v !== 'string') problems.push(`${k}: must be a string`);
+        if (k in hit.vars) { problems.push(`${k}: set in the path, not the body`); continue; }
+        const fam = /^([a-z_-]+?)(\d+)$/.exec(k);
+        if (!props[k] && !(fam && props[`${fam[1]}[n]`])) problems.push(`${k}: not a parameter of ${method} ${hit.node.path}`);
+        body[k] = String(v);
+      }
+      for (const [k, p] of Object.entries(props)) if (!p.optional && !k.endsWith('[n]') && !(k in hit.vars) && !(k in body)) problems.push(`${k}: required`);
+      if (problems.length) throw new ApiError(400, 'bad_request', `call ${i + 1} (${method} ${c.path}): invalid parameters: ${problems.sort().join('; ')}`);
+      if (method === 'DELETE' || /\/status\/(stop|reset)$/.test(c.path) || ('delete' in body && body.delete !== '')) destructive = true;
+      const desc = (info.description ?? '').split('\n')[0] || `${method} ${c.path}`;
+      steps.push({ description: `${desc} (${c.path})`, method, path: c.path, body, cli: pveshCli(method, c.path, body) });
+    });
+    let title = String(params.title ?? '').trim() || (steps.length > 1 ? `${steps.length} API changes` : steps[0].description);
+    let confirmText: string | undefined;
+    if (source === 'assistant') {
+      title = `Assistant draft: ${title}`;
+      confirmText = `apply ${steps.length} step${steps.length === 1 ? '' : 's'}`;
+    } else if (destructive) {
+      const segs = calls[0].path.replace(/^\/|\/$/g, '').split('/').slice(-2).join('/');
+      confirmText = calls.length > 1 ? `apply ${calls.length} changes` : `${calls[0].method.toUpperCase() === 'DELETE' ? 'delete' : 'confirm'} ${segs}`;
+    }
+    return {
+      ...base, title, summary: String(params.summary ?? ''), destructive: destructive || source === 'assistant', steps,
+      ...(confirmText ? { confirmText } : {}), ...(source ? { source } : {}),
+    };
+  }
+
+  private currentConfig(gx: Guest): Record<string, string | number> {
+    const cfg: Record<string, string | number> = guestConfig(gx);
+    for (const [k, v] of Object.entries(this.configEdits.get(`${gx.clusterId}:${gx.vmid}`) ?? {})) {
+      if (v === null) delete cfg[k]; else cfg[k] = v;
+    }
+    return cfg;
+  }
+
+  /** Apply one api.call step to the demo state. Returns command output for host steps. */
+  private applyCall(clusterId: string, s: Step): void {
+    let m: RegExpMatchArray | null;
+    if (s.method === 'POST' && (m = s.path.match(/^\/nodes\/([^/]+)\/(qemu|lxc)$/))) {
+      const vmidN = Number(s.body.vmid);
+      if (this.guestsState.some((x) => x.clusterId === clusterId && x.vmid === vmidN)) throw new Error(`VM ${vmidN} already exists`);
+      const memMiB = Number(String(s.body.memory ?? '2048').replace(/^current=/, ''));
+      const size = Number(/:(\d+)/.exec(String(s.body.scsi0 ?? s.body.rootfs ?? ''))?.[1] ?? 8);
+      const gx = g(clusterId, vmidN, String(s.body.name ?? s.body.hostname ?? `${m[2] === 'qemu' ? 'vm' : 'ct'}-${vmidN}`), m[2] as 'qemu' | 'lxc', m[1],
+        s.body.start === '1' ? 'running' : 'stopped', Number(s.body.cores ?? 1), memMiB / 1024, size, String(s.body.tags ?? '').split(';').filter(Boolean));
+      this.guestsState.push(gx);
+      const edits: Record<string, string | null> = {};
+      for (const [k, v] of Object.entries(s.body)) if (!['vmid', 'start', 'storage', 'pool', 'ssh-public-keys', 'password', 'sshkeys'].includes(k)) edits[k] = v as string;
+      this.configEdits.set(`${clusterId}:${vmidN}`, edits);
+      return;
+    }
+    if ((s.method === 'PUT' || s.method === 'POST') && (m = s.path.match(/^\/nodes\/([^/]+)\/(qemu|lxc)\/(\d+)\/config$/))) {
+      const key = `${clusterId}:${m[3]}`;
+      const edits = { ...(this.configEdits.get(key) ?? {}) };
+      for (const [k, v] of Object.entries(s.body)) {
+        if (k === 'digest') continue;
+        if (k === 'delete') { for (const d of String(v).split(/[,;\s]+/).filter(Boolean)) edits[d] = null; continue; }
+        edits[k] = String(v);
+      }
+      this.configEdits.set(key, edits);
+      const gx = this.guestsState.find((x) => x.clusterId === clusterId && x.vmid === Number(m![3]));
+      if (gx && s.body.cores) gx.maxcpu = Number(s.body.cores);
+      if (gx && s.body.memory) gx.maxmem = Number(String(s.body.memory).replace(/^current=/, '')) * 1024 ** 2;
+      if (gx && s.body.name) gx.name = String(s.body.name);
+      return;
+    }
+    if (s.method === 'POST' && s.path === '/cluster/mapping/pci') {
+      const id = String(s.body.id);
+      if (this.mappings.some((x) => x.id === id)) throw new Error(`mapping '${id}' already exists`);
+      this.mappings.push({ id, ...(s.body.description ? { description: String(s.body.description) } : {}), map: String(s.body.map).split(/\n|;(?=node=)/) });
+      return;
+    }
+    if (s.method === 'DELETE' && (m = s.path.match(/^\/nodes\/([^/]+)\/(qemu|lxc)\/(\d+)$/))) {
+      this.guestsState = this.guestsState.filter((x) => !(x.clusterId === clusterId && x.vmid === Number(m![3])));
+    }
   }
 
   /**
@@ -633,6 +783,13 @@ export class MockApi implements Api {
         try {
           if (plan.action === 'backup.protect') {
             for (const v of (s.body.vmid as string).split(',')) this.backupJob.add(Number(v));
+          } else if (plan.action === 'host.exec') {
+            if (this.clustersState.find((c) => c.id === plan.clusterId)?.hostTransport !== 'ssh' && user !== 'root@pam') {
+              throw new Error(`PVE gives a passwordless root shell only to root@pam; ${user} would get a login prompt. Log in to galley as root@pam, or have a galley admin switch this cluster to the ssh host transport`);
+            }
+            res.output = `${MOCK_HOST_OUTPUT}(demo output: galley's mock mode does not reach any host)\n`;
+          } else if (plan.action === 'api.call') {
+            this.applyCall(plan.clusterId, s);
           } else if (m) {
             const gx = this.findGuest(plan.clusterId, vmid);
             if (op === 'start') { if (gx.status === 'running') throw new Error('already running'); gx.status = 'running'; gx.uptime = 1; }
@@ -717,7 +874,7 @@ export class MockApi implements Api {
     if ((m = p.match(/^nodes\/([^/]+)\/(qemu|lxc)\/(\d+)\/config$/))) {
       const gx = this.guestsState.find((x) => x.clusterId === clusterId && x.vmid === Number(m![3]) && x.type === m![2]);
       if (!gx) throw new ApiError(500, 'pve_error', `Configuration file 'nodes/${m[1]}/${m[2]}/${m[3]}.conf' does not exist`);
-      return guestConfig(gx) as T;
+      return this.currentConfig(gx) as T;
     }
     if ((m = p.match(/^nodes\/([^/]+)\/(qemu|lxc)\/(\d+)\/snapshot$/))) {
       const vmid = Number(m[3]);
@@ -757,6 +914,12 @@ export class MockApi implements Api {
     if ((m = p.match(/^nodes\/([^/]+)\/network$/))) {
       if (!c.nodes.some((x) => x.name === m![1])) throw notFound();
       const i = c.nodes.findIndex((x) => x.name === m![1]);
+      if (query.type === 'any_bridge' || query.type === 'bridge') {
+        return [
+          { iface: 'vmbr0', type: 'bridge', active: 1, cidr: `192.0.2.${11 + i}/24`, bridge_ports: 'eno1', bridge_vlan_aware: 1 },
+          { iface: 'vmbr1', type: 'bridge', active: 1, cidr: `10.10.0.${11 + i}/24`, bridge_ports: 'enp65s0f0', comments: 'Ceph and migration' },
+        ] as T;
+      }
       return [
         { iface: 'eno1', type: 'eth', active: 1, autostart: 1, method: 'manual' },
         { iface: 'enp65s0f0', type: 'eth', active: 1, autostart: 1, method: 'manual', comments: 'SFP-10G-T' },
@@ -790,9 +953,39 @@ export class MockApi implements Api {
         out.push({ volid: `${sid}:iso/ubuntu-24.04.3-live-server-amd64.iso`, content: 'iso', format: 'iso', size: 3.1 * GiB, ctime: now() - 86400 * 60 });
         out.push({ volid: `${sid}:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst`, content: 'vztmpl', format: 'tzst', size: 128 * 1024 ** 2, ctime: now() - 86400 * 20 });
         out.push({ volid: `${sid}:snippets/cloud-init-user.yaml`, content: 'snippets', format: 'snippet', size: 1400, ctime: now() - 86400 * 5 });
+        out.push({ volid: `${sid}:import/debian-13-genericcloud-amd64.qcow2`, content: 'import', format: 'qcow2', size: 412 * 1024 ** 2, ctime: now() - 86400 * 9 });
+        out.push({ volid: `${sid}:import/noble-server-cloudimg-amd64.img`, content: 'import', format: 'qcow2', size: 590 * 1024 ** 2, ctime: now() - 86400 * 9 });
         for (const gx of gs.slice(0, 4)) out.push({ volid: `${sid}:backup/vzdump-${gx.type}-${gx.vmid}-2026_11_23-01_30_00.vma.zst`, content: 'backup', format: 'vma.zst', size: gx.disk * 0.35, vmid: gx.vmid, ctime: now() - 86400 });
       }
-      return out as T;
+      return (query.content ? out.filter((x) => x.content === query.content) : out) as T;
+    }
+    if ((m = p.match(/^nodes\/([^/]+)\/storage$/))) {
+      const nodeName = m[1];
+      if (!c.nodes.some((x) => x.name === nodeName)) throw notFound();
+      const content: Record<string, string> = { rbd: 'images,rootdir', zfspool: 'images,rootdir', cephfs: 'iso,vztmpl,backup,snippets,import', nfs: 'backup,iso', dir: 'iso,vztmpl,backup,images,rootdir' };
+      return mockStorage(c).filter((x) => x.node === nodeName)
+        .map((x) => ({ storage: x.id, type: x.type, content: content[x.type] ?? 'images', shared: x.shared ? 1 : 0, active: x.active ? 1 : 0, enabled: 1, used: x.used, total: x.total, avail: x.total - x.used }))
+        .filter((x) => !query.content || String(query.content).split(',').some((k) => x.content.split(',').includes(k))) as T;
+    }
+    if (p === 'cluster/nextid') {
+      const used = new Set(this.guestsState.filter((x) => x.clusterId === clusterId).map((x) => x.vmid));
+      let id = 100;
+      while (used.has(id)) id++;
+      return id as T;
+    }
+    if (p === 'cluster/sdn/vnets') return (clusterId === 'pve-lab' ? mockVnets() : []) as T;
+    if ((m = p.match(/^nodes\/([^/]+)\/hardware\/pci$/))) {
+      if (!c.nodes.some((x) => x.name === m![1])) throw notFound();
+      const all = clusterId === 'pve-lab' ? mockPci(m[1]) : mockPci('other').slice(0, 4);
+      const black = (query['pci-class-blacklist'] === undefined ? '05;06;0b' : String(query['pci-class-blacklist'])).split(/[;,]/).filter(Boolean);
+      return all.filter((d) => !black.some((b) => d.class.slice(2).startsWith(b))) as T;
+    }
+    if (p === 'cluster/mapping/pci') return (clusterId === 'pve-lab' ? structuredClone(this.mappings) : []) as T;
+    if (p === 'version') return { version: '9.2.32', release: '9.2', repoid: '2a0f1e3c' } as T;
+    if (p === 'access/users') return [{ userid: 'root@pam', enable: 1, expire: 0, firstname: '', comment: 'Built-in superuser' }, { userid: 'galley@pve', enable: 1, comment: 'galley poller' }] as T;
+    if (p === 'cluster/ha/resources') return this.guestsState.filter((x) => x.clusterId === clusterId && x.hastate).map((x) => ({ sid: `${x.type === 'qemu' ? 'vm' : 'ct'}:${x.vmid}`, state: x.hastate, type: x.type === 'qemu' ? 'vm' : 'ct' })) as T;
+    if ((m = p.match(/^nodes\/([^/]+)\/(qemu|lxc)$/))) {
+      return this.guestsState.filter((x) => x.clusterId === clusterId && x.node === m![1] && x.type === m![2]).map((x) => ({ vmid: x.vmid, name: x.name, status: x.status, maxmem: x.maxmem, cpus: x.maxcpu })) as T;
     }
     if (p === 'cluster/backup') {
       if (clusterId !== 'pve-lab') return [] as T;
@@ -802,6 +995,159 @@ export class MockApi implements Api {
       ].map((j) => (j.id === 'nightly-all' ? { ...j, exclude: [...this.guestsState.filter((x) => x.clusterId === clusterId && !this.backupJob.has(x.vmid) && !x.template).map((x) => x.vmid)].join(',') } : j)) as T;
     }
     throw notFound();
+  }
+
+  // ---------- assistant ----------
+  private assistantReady() { return this.assistantCfg.enabled && (this.assistantCfg.provider !== 'anthropic' || !!this.assistantKey); }
+
+  async assistantStatus() {
+    await wait(40); this.requireAuth();
+    const dest = this.assistantCfg.provider === 'openai' ? (() => { try { return new URL(this.assistantCfg.baseUrl ?? '').host; } catch { return 'the configured endpoint'; } })() : 'Anthropic';
+    return {
+      enabled: this.assistantReady(), provider: this.assistantCfg.provider, model: this.assistantCfg.model,
+      dataNotice: `Questions and the cluster data the assistant reads to answer them (names, configuration, health, metrics) are sent to ${dest}.`,
+    };
+  }
+
+  async assistantSettings() {
+    await wait(60); this.requireAuth();
+    if (!this.session!.galleyAdmin) throw new ApiError(403, 'forbidden', 'assistant settings require a galley admin');
+    return { config: structuredClone(this.assistantCfg), hasApiKey: !!this.assistantKey };
+  }
+
+  async putAssistantSettings(u: AssistantSettingsUpdate) {
+    await wait(200); this.requireAuth();
+    if (!this.session!.galleyAdmin) throw new ApiError(403, 'forbidden', 'assistant settings require a galley admin');
+    const { apiKey, clearApiKey, ...cfg } = u;
+    if (cfg.provider === 'openai' && !cfg.baseUrl) throw new ApiError(400, 'bad_request', 'baseUrl is required for OpenAI-compatible providers (e.g. https://api.openai.com/v1 or http://gpu-host:8000/v1)');
+    if (cfg.baseUrl && !/^https?:\/\//.test(cfg.baseUrl)) throw new ApiError(400, 'bad_request', 'baseUrl must start with https:// or http://');
+    if (!cfg.model) throw new ApiError(400, 'bad_request', 'model is required');
+    const sameDest = cfg.provider === this.assistantCfg.provider && (cfg.baseUrl ?? '') === (this.assistantCfg.baseUrl ?? '');
+    if (apiKey) this.assistantKey = apiKey;
+    else if (clearApiKey || !sameDest) this.assistantKey = '';
+    this.assistantCfg = { ...cfg };
+  }
+
+  async chat(r: ChatRequest, onEvent: (e: ChatEvent) => void, signal?: AbortSignal): Promise<void> {
+    await wait(150); this.requireAuth();
+    if (!r.message.trim()) throw new ApiError(400, 'bad_request', 'message required (max 20000 characters)');
+    if (!this.assistantReady()) throw new ApiError(409, 'assistant_disabled', 'the assistant is not set up; a galley admin can connect a model provider in Settings');
+    let id = r.conversationId ?? '';
+    if (id && !this.conversations.has(id)) throw new ApiError(404, 'conversation_not_found', 'that conversation has ended; start a new one');
+    if (!id) { id = rid(); this.conversations.set(id, { bytes: 0, busy: false }); }
+    const conv = this.conversations.get(id)!;
+    if (conv.busy) throw new ApiError(409, 'busy', 'the assistant is still answering in this conversation');
+    if (conv.bytes > 6000 || /fill it up/i.test(r.message)) throw new ApiError(409, 'conversation_full', 'this conversation is too long; start a new one');
+    conv.busy = true;
+    const aborted = () => { if (signal?.aborted) throw new DOMException('The user aborted a request.', 'AbortError'); };
+    const pause = async (ms: number) => { await new Promise((res) => setTimeout(res, ms)); aborted(); };
+    try {
+      const script = assistantScript(r.message);
+      conv.bytes += r.message.length;
+      for (const step of script.steps) {
+        if (step.kind === 'tool') {
+          const tid = rid();
+          onEvent({ type: 'tool', tool: { id: tid, name: step.name, status: 'running', input: step.input } });
+          await pause(350);
+          onEvent({ type: 'tool', tool: step.error ? { id: tid, name: step.name, status: 'error', error: step.error } : { id: tid, name: step.name, status: 'ok' } });
+        } else if (step.kind === 'change') {
+          const t0 = now();
+          const plan = this.apiCallPlan({ id: rid(), action: 'api.call', clusterId: 'pve-lab', createdAt: t0, expiresAt: t0 + 600 }, {
+            title: 'Attach the second GPU to llm-vllm',
+            summary: 'Creates the PCI mapping gpu-a2-1 for the second A2 on pve1 and adds it to VM 300 as hostpci1. The VM sees the card after its next start.',
+            calls: [
+              { method: 'POST', path: '/cluster/mapping/pci', body: { id: 'gpu-a2-1', description: 'NVIDIA A2 in slot 5 of pve1', map: 'node=pve1,path=0000:91:00.0,id=10de:25b6,iommugroup=1,subsystem-id=10de:157e' } },
+              { method: 'PUT', path: '/nodes/pve1/qemu/300/config', body: { hostpci1: 'mapping=gpu-a2-1,pcie=1', digest: 'beef' } },
+            ],
+          }, 'assistant');
+          this.plans.set(plan.id, plan);
+          onEvent({ type: 'change', plan });
+        } else {
+          // stream in small word chunks, like a model would
+          const parts = step.text.match(/\S+\s*|\s+/g) ?? [];
+          for (let i = 0; i < parts.length; i += 3) {
+            onEvent({ type: 'text', delta: parts.slice(i, i + 3).join('') });
+            await pause(28);
+          }
+          conv.bytes += step.text.length;
+        }
+      }
+      onEvent({ type: 'done', conversationId: id });
+    } finally {
+      conv.busy = false;
+    }
+  }
+
+  // ---------- API schema ----------
+  async schemaPaths(clusterId: string): Promise<SchemaPathEntry[]> {
+    await wait(120); this.requireAuth(); this.requireClusterLogin(clusterId);
+    return this.schemaNodes.map((n) => ({
+      path: n.path, text: n.text,
+      methods: Object.fromEntries(Object.entries(n.info).map(([k, v]) => [k, (v.description ?? '').split('\n')[0]])),
+    })).sort((a, b) => a.path.localeCompare(b.path));
+  }
+
+  async schema(clusterId: string, path: string): Promise<SchemaPathInfo> {
+    await wait(80); this.requireAuth(); this.requireClusterLogin(clusterId);
+    const hit = matchSchema(this.schemaNodes, path);
+    if (!hit) throw new ApiError(404, 'not_found', `no such API path ${path}`);
+    return { path: hit.node.path, text: hit.node.text, info: structuredClone(hit.node.info), vars: hit.vars };
+  }
+
+  // ---------- host commands ----------
+  private requireHostAdmin(clusterId: string) {
+    this.requireClusterLogin(clusterId);
+    if (!this.session!.clusters.find((x) => x.id === clusterId)?.admin) throw new ApiError(403, 'forbidden', 'host commands need administrator rights on / (Sys.Modify, Sys.Console and Permissions.Modify)');
+  }
+
+  async hosts(clusterId: string): Promise<HostsInfo> {
+    await wait(100); this.requireAuth(); this.requireHostAdmin(clusterId);
+    const c = this.clustersState.find((x) => x.id === clusterId);
+    if (!c) throw new ApiError(404, 'not_found', 'unknown cluster');
+    const nodes = c.nodes.map((n) => ({ node: n.name, online: true, ...(this.pins.has(`${clusterId}/${n.name}`) ? { pin: { ...this.pins.get(`${clusterId}/${n.name}`)! } } : {}) }));
+    if ((c.hostTransport ?? 'pve') === 'pve') {
+      return { transport: 'pve' as const, nodes: nodes.map(({ node, online }) => ({ node, online })), note: "Host commands run in PVE's node terminal as the acting user; PVE gives a passwordless root shell only to root@pam." };
+    }
+    const key = mockAuthorizedKey(clusterId);
+    return { transport: 'ssh' as const, nodes, authorizedKey: key, install: `echo '${key}' >> /etc/pve/priv/authorized_keys` };
+  }
+
+  private nodeAddr(clusterId: string, nodeName: string) {
+    const c = this.clustersState.find((x) => x.id === clusterId);
+    const i = c?.nodes.findIndex((x) => x.name === nodeName) ?? -1;
+    if (!c || i < 0) throw new ApiError(404, 'not_found', 'node has no address in /cluster/status');
+    return clusterId === 'pve-lab' ? `192.0.2.${11 + i}` : `198.51.100.${20 + i}`;
+  }
+
+  private requireSsh(clusterId: string) {
+    if ((this.clustersState.find((c) => c.id === clusterId)?.hostTransport ?? 'pve') !== 'ssh') throw new ApiError(400, 'bad_request', 'host keys apply only when the cluster uses the ssh host transport');
+  }
+
+  async scanHost(clusterId: string, nodeName: string) {
+    await wait(500); this.requireAuth(); this.requireHostAdmin(clusterId); this.requireSsh(clusterId);
+    const addr = this.nodeAddr(clusterId, nodeName);
+    return { node: nodeName, addr, fingerprint: hostFingerprint(clusterId, nodeName), verify: `On ${nodeName}, run: ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` };
+  }
+
+  async pinHost(clusterId: string, nodeName: string, fingerprint: string) {
+    await wait(500); this.requireAuth(); this.requireHostAdmin(clusterId); this.requireSsh(clusterId);
+    if (!/^SHA256:[A-Za-z0-9+/]{43}$/.test(fingerprint)) throw new ApiError(400, 'bad_request', 'the SHA256:… fingerprint you verified on the node is required');
+    const addr = this.nodeAddr(clusterId, nodeName);
+    const live = hostFingerprint(clusterId, nodeName);
+    if (live !== fingerprint) throw new ApiError(409, 'fingerprint_mismatch', `the node presents ${live}, not the fingerprint you entered`);
+    this.pins.set(`${clusterId}/${nodeName}`, { addr, fingerprint, pinnedBy: this.session!.user, pinnedAt: now() });
+  }
+
+  async unpinHost(clusterId: string, nodeName: string) {
+    await wait(200); this.requireAuth(); this.requireHostAdmin(clusterId);
+    this.pins.delete(`${clusterId}/${nodeName}`);
+  }
+
+  // ---------- consoles ----------
+  async openConsole(clusterId: string, r: ConsoleRequest): Promise<never> {
+    await wait(300); this.requireAuth(); this.requireClusterLogin(clusterId);
+    void r;
+    throw new ApiError(501, 'console_unavailable', 'Consoles need a real cluster: the demo has no VNC server or terminal to connect to');
   }
 
   subscribe(h: EventHandlers): () => void {

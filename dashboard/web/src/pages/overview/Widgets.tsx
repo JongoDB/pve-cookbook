@@ -10,6 +10,8 @@ import { guestPath, storageKey, storagePath } from '../../lib/links';
 import { MetricChart, type MetricResource } from '../../components/MetricChart';
 import { Badge, Level, Meter } from '../../components/ui';
 import { ApiErrorView } from '../../components/ClusterLogin';
+import { useGpuUsage, usersOf } from '../../lib/gpuUsage';
+import { mapEntries } from '../../lib/pci';
 
 export interface WidgetHead { title: string; sub?: React.ReactNode }
 
@@ -288,3 +290,37 @@ export function MetricWidget({ resolved, cfg, timeframe }: { resolved: ResolvedM
   return <MetricChart title={`${resolved.title}${resolved.sub ? `, ${resolved.sub}` : ''}`} resources={resolved.resources} metrics={metrics} timeframe={timeframe} headless height={200} />;
 }
 
+
+// ---------- GPUs ----------
+/** Mapped GPUs: free, or which running VM holds each (from its hostpciN). */
+export function GpuWidget() {
+  const { me, clusterName, lastAudit } = useApp();
+  const ids = me.clusters.filter((c) => c.authed).map((c) => c.id);
+  const data = useGpuUsage(ids, lastAudit?.status === 'running' ? '' : lastAudit?.id ?? '');
+  if (!ids.length) return <div className="ws">Log in to a cluster to see its GPUs.</div>;
+  if (!data) return <div className="ws" role="status">Reading PCI mappings</div>;
+  const rows = data.flatMap((c) => c.mappings.map((m) => ({ c, m, users: usersOf(c, m.id) })));
+  const free = rows.filter((r) => !r.users.length).length;
+  const raw = data.flatMap((c) => c.users.filter((u) => u.host));
+  const multi = data.length > 1;
+  return (
+    <>
+      {rows.length
+        ? <div className="big">{free} <span className="of">of {rows.length} mapped GPU{rows.length === 1 ? '' : 's'} free</span></div>
+        : <div className="ws">No PCI mappings. Map a GPU on the <Link to="/hardware">Hardware</Link> page so VMs can use it.</div>}
+      <ul className="rows">
+        {rows.slice(0, 6).map(({ c, m, users }) => (
+          <li key={`${c.clusterId}/${m.id}`}>
+            <span className="grow"><span className="mono">{m.id}</span><div className="meta">{mapEntries(m).map((e) => e.node).join(', ')}{multi ? `, ${clusterName(c.clusterId)}` : ''}</div></span>
+            {users.length
+              ? <span className="nowrap"><Link to={guestPath(users[0].guest.clusterId, users[0].guest.vmid)}>{users[0].guest.name}</Link>{users.length > 1 ? ` +${users.length - 1}` : ''}</span>
+              : <Badge kind="ok">Free</Badge>}
+          </li>
+        ))}
+      </ul>
+      {raw.length > 0 && <div className="ws">{raw.length} running VM{raw.length === 1 ? ' uses' : 's use'} a raw PCI device without a mapping.</div>}
+      {data.filter((c) => c.error).map((c) => <Unknown key={c.clusterId}>{clusterName(c.clusterId)}: could not read PCI mappings ({c.error})</Unknown>)}
+      <div className="ws"><Link to="/hardware">All PCI devices</Link></div>
+    </>
+  );
+}
