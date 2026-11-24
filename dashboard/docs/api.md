@@ -274,6 +274,37 @@ need typed confirmation (`apply N steps`), so text the model read from the clust
 a one-click change. Conversations are capped (~400 KB); start a new one when told. Default model: `claude-opus-5-5` with Anthropic's server-side refusal fallback;
 OpenAI-compatible endpoints (OpenAI, xAI, OpenRouter, vLLM, Ollama) are supported via `baseUrl`.
 
+## Agents and MCP (agent-first access)
+
+AI agents and scripts use galley without the browser, as the user who created their token.
+
+- `POST /api/agent-tokens {"name","scope":"read"|"draft"|"apply","days":1–90}` (browser session) →
+  `{"token":"glly_…","id","name","scope","expires","clusters","warnings"}` — the token is shown once.
+  galley mints a PVE API token per cluster the user is logged in to (inheriting their permissions,
+  expiring with the agent token) and stores it encrypted under a secret that only the agent token
+  carries. `GET /api/agent-tokens` lists, `DELETE /api/agent-tokens/{id}` revokes (and deletes the PVE tokens).
+- Authenticate with `Authorization: Bearer glly_…` (no CSRF header needed). Agent tokens may read
+  (GET), query metrics, draft changes (scope `draft`: `POST /api/plans`, `DELETE /api/plans/{id}`)
+  and apply them (scope `apply`: `POST /api/plans/{id}/run`). Galley administration — clusters,
+  settings, agent tokens, logins, consoles, the in-app assistant — is never available to them.
+- **MCP:** `POST /mcp` — Model Context Protocol, streamable HTTP transport, stateless, JSON responses
+  (protocol versions 2025-06-18, 2025-03-26, 2024-11-05). Tools (by scope): `list_resources`,
+  `get_findings`, `list_tasks`, `pve_get`, `get_metrics`, `api_schema`, `search_docs`, `read_doc`,
+  `list_changes`, `get_change` (read); `propose_action`, `propose_change`, `propose_host_command`
+  (draft); `apply_change` (apply). The user guide is exposed as resources `galley://docs/<slug>`.
+  Drafts are labelled `"source":"agent:<name>"`, titled "Agent draft (<name>): …" and always need
+  typed confirmation.
+- **stdio bridge:** `GALLEY_TOKEN=glly_… galley mcp --url https://galley:8443 [--fingerprint <SHA-256 of galley's certificate>]`
+  — the galley binary speaks MCP over stdio and forwards to `/mcp`.
+
+Examples: Claude Code `claude mcp add --transport http galley https://galley:8443/mcp --header "Authorization: Bearer glly_…"`.
+
+## User guide
+
+`GET /api/docs` → `[{"slug","title","summary","order","route"?}]`; `GET /api/docs/{slug}` →
+`{…,"markdown"}`. The guide (`docs/user/*.md`) is embedded in the binary; the Help page, the
+assistant and MCP clients read the same text.
+
 ## Plans (every mutation goes through a plan)
 
 `POST /api/plans` `{"action","clusterId","params":{}}` → `Plan`
@@ -292,6 +323,10 @@ MVP actions (`params`):
 | `guest.destroy` | `{"targets":[{"vmid","node","type"}]}` | **yes** — `confirmText` = `destroy <vmid>[,<vmid>…]` |
 | `backup.protect` | `{"vmids":[131],"job":"nightly-all"}` | no |
 | `host.exec` | `{"node","command","reason"?}` | **always** — `run on <node>` (administrators only) |
+| `galley.cluster.update` | `{"name"?,"shareLogin"?,"credentialMode"?,"hostTransport"?}` | no — changes galley only |
+| `galley.cluster.remove` | `{}` | **yes** — `remove <cluster>` |
+| `galley.host.pin` / `galley.host.unpin` | `{"node","fingerprint"}` / `{"node"}` | no |
+| `galley.prefs.set` | `{"key","value":"<JSON>"}` | no |
 | `api.call` | `{"title"?,"summary"?,"calls":[{"method":"POST\|PUT\|DELETE","path":"/nodes/pve1/qemu/300/config","body":{"hostpci1":"mapping=gpu-a2-1,pcie=1"}}]}` (1–20 calls) | DELETEs and destructive paths (`status/stop`, `rollback`, disk wipes…) — `confirmText` = `delete qemu/300`, `confirm …` or `apply N changes` |
 
 `api.call` is the generic create/update/delete: each call is validated against the cluster's
@@ -320,7 +355,9 @@ marked `error` with a note to check the PVE task log.
 request presents the user's current ticket. A running change keeps the session's secret in
 memory until it finishes, so it keeps renewing even if the user closes the tab.
 
-`DELETE /api/plans/{id}` discards a pending plan. Plans expire after 10 minutes, run at most
+`GET /api/plans` lists your pending changes (including drafts by the assistant or agents).
+`DELETE /api/plans/{id}` discards a pending plan. galley.* actions change galley's own
+configuration and are applied through the same handlers (and permission checks) as the UI. Plans expire after 10 minutes, run at most
 once, are visible only to their owner (max 50 pending per user), and only target guests the
 user can see.
 

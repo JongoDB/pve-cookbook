@@ -22,6 +22,12 @@ written to be executed by agents. Read this file first, then only the recipes yo
 7. **Probes that touch `/etc/pve` must be non-blocking** (background + poll). A wedged
    pmxcfs puts writers in uninterruptible sleep; `timeout` cannot kill them.
 8. **Report faithfully.** Quote failing output. Say what you skipped.
+9. **galley: docs and agent tools ship with every change.** Any change to the dashboard's UI
+   or behaviour updates the user guide (`dashboard/docs/user/*.md` — embedded in the binary,
+   read by the Help page, the assistant and MCP agents) and `dashboard/docs/api.md` in the same
+   change. Every action the UI offers must also be draftable by the assistant and MCP agents
+   (`dashboard/internal/server/tools.go`). Agents can drive galley directly over MCP:
+   `dashboard/docs/user/agents-and-mcp.md`.
 
 ## Where to start
 

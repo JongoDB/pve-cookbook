@@ -34,6 +34,9 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "mcp" {
+		os.Exit(runMCPBridge(os.Args[2:]))
+	}
 	listen := flag.String("listen", ":8443", "listen address")
 	data := flag.String("data", "/var/lib/galley", "data directory (database, keys, TLS)")
 	certFile := flag.String("tls-cert", "", "TLS certificate (default: self-signed in data dir)")

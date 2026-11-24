@@ -167,7 +167,8 @@ How to work:
 - Before proposing a change, read the current configuration and, when unsure about parameters, the API schema (api_schema) for the exact path and method. Prefer one proposal containing all calls of a coherent change (for example: attach a GPU, pin the VM with an HA rule, then restart it).
 - For GPU passthrough prefer PCI resource mappings (hostpci with mapping=…) over raw PCI ids, and q35 + OVMF machines.
 - Keep answers short and practical. Use PVE terms (VMID, node, storage, vnet, ACL). Show pvesh/qm/pct commands when they help the admin learn.
-- If something needs the node's shell (outside the PVE API), say so and give the exact command for the admin to run; you cannot run shell commands.`
+- Anything the galley interface can do, you can draft: use propose_action (guest power, migrate, snapshot, destroy, backup protection, host commands, galley's own cluster settings and preferences) or propose_change for any PVE create/update/delete. Host commands are for administrators and only when the API cannot do the job.
+- When the user asks how to do something in galley, or where something is, use search_docs/read_doc and answer with short steps using the exact labels from the guide. Link to the relevant page with Markdown links: help pages as /help/<slug>, galley pages as /guests/<cluster>/<vmid>, /nodes/<cluster>/<node>, /storage/<cluster>/<storage>, /create, /hardware, /hosts, /protection, /api-explorer, /settings. Never invent UI that the guide does not describe.`
 
 func (s *Server) assistantTools() []assistant.ToolSpec {
 	str := func(d string) map[string]any { return map[string]any{"type": "string", "description": d} }
@@ -211,6 +212,9 @@ func truncate(b []byte, n int) string {
 
 // runTool executes one tool as the user. onChange receives drafted changes.
 func (s *Server) runTool(ctx context.Context, ss *session, call assistant.ToolCall, onChange func(*plan.Plan)) (string, bool) {
+	if !toolAllowed(ss, call.Name) {
+		return "this tool is not available to you", true
+	}
 	fail := func(err error) (string, bool) { return err.Error(), true }
 	out := func(v any) (string, bool) {
 		b, _ := json.Marshal(v)
@@ -378,7 +382,7 @@ func (s *Server) runTool(ctx context.Context, ss *session, call assistant.ToolCa
 		if err != nil {
 			return fail(err)
 		}
-		plan.MarkAssistantDraft(p)
+		s.markDraft(ss, p)
 		onChange(p)
 		return out(map[string]any{"status": "drafted, waiting for the user to review and apply it in the Changes tab", "changeId": p.ID, "destructive": p.Destructive, "confirmText": p.ConfirmText, "commands": p.CLI()})
 	case "propose_host_command":
@@ -395,9 +399,12 @@ func (s *Server) runTool(ctx context.Context, ss *session, call assistant.ToolCa
 		if err != nil {
 			return fail(err)
 		}
-		plan.MarkAssistantDraft(p)
+		s.markDraft(ss, p)
 		onChange(p)
 		return out(map[string]any{"status": "drafted, waiting for the user to review and apply it", "changeId": p.ID, "confirmText": p.ConfirmText})
+	}
+	if res, isErr, ok := s.runExtraTool(ctx, ss, call, onChange); ok {
+		return res, isErr
 	}
 	return fail(fmt.Errorf("unknown tool %q", call.Name))
 }
@@ -435,7 +442,7 @@ func (s *Server) assistantChat(w http.ResponseWriter, r *http.Request, ss *sessi
 			apiError(w, 409, "assistant_misconfigured", err.Error())
 			return
 		}
-		c = &chat{owner: ss.id, conv: prov.NewConversation(systemPrompt+"\n\nThe user is "+ss.user+". Today is "+time.Now().UTC().Format("2006-01-02")+".", s.assistantTools())}
+		c = &chat{owner: ss.id, conv: prov.NewConversation(systemPrompt+docsIndexPrompt()+"\nThe user is "+ss.user+". Today is "+time.Now().UTC().Format("2006-01-02")+".", s.toolsFor(ss))}
 		req.ConversationID = putChat(c)
 	}
 	if !c.mu.TryLock() {

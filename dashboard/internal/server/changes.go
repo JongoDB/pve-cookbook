@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"time"
 
@@ -22,6 +23,15 @@ func (s *Server) createPlan(w http.ResponseWriter, r *http.Request, ss *session)
 	var req plan.Request
 	if err := readJSON(r, &req); err != nil {
 		apiError(w, 400, "bad_request", err.Error())
+		return
+	}
+	if strings.HasPrefix(req.Action, "galley.") {
+		p, err := s.buildGalleyPlan(r.Context(), ss, req)
+		if err != nil {
+			apiError(w, 400, "bad_plan", err.Error())
+			return
+		}
+		writeJSON(w, 201, p)
 		return
 	}
 	v := s.view(r.Context(), ss, req.ClusterID)
@@ -118,7 +128,7 @@ func (s *Server) runPlan(w http.ResponseWriter, r *http.Request, ss *session) {
 			if e, err := s.store.UpdateAudit(entry.ID, "running", false, raw); err == nil {
 				s.broadcastAudit(e)
 			}
-		}, s.hostRunner(p.ClusterID, cl))
+		}, s.hostRunner(p.ClusterID, cl), s.galleyRunner(ss, p.ClusterID))
 		if !ok && s.base.Err() != nil && len(results) > 0 {
 			results[len(results)-1].Error = "galley stopped while this step was running; check the PVE task log for the outcome"
 		}

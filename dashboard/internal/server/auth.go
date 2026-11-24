@@ -22,6 +22,10 @@ type session struct {
 	// key is the session secret K from the cookie: it unlocks the session's
 	// stored credentials (see sessions.go). Never logged or stored.
 	key []byte
+	// agent sessions authenticate with a bearer token (MCP/API clients).
+	agent      bool
+	agentName  string
+	agentScope string // read | draft | apply
 }
 
 type handler func(w http.ResponseWriter, r *http.Request, s *session)
@@ -30,6 +34,9 @@ type handler func(w http.ResponseWriter, r *http.Request, s *session)
 // the session's secret K), sliding its idle expiry and keeping K in memory
 // while the session is in use.
 func (s *Server) session(r *http.Request) *session {
+	if bearer, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok {
+		return s.agentSession(strings.TrimSpace(bearer))
+	}
 	c, err := r.Cookie(cookieName)
 	if err != nil {
 		return nil
@@ -39,7 +46,7 @@ func (s *Server) session(r *http.Request) *session {
 		return nil
 	}
 	st, err := s.store.GetSession(id)
-	if err != nil || !s.store.CheckKey(st, k) {
+	if err != nil || !s.store.CheckKey(st, k) || st.Kind == "agent" {
 		return nil
 	}
 	s.rememberKey(store.HashID(id), k)
@@ -63,6 +70,14 @@ func (s *Server) authed(h handler) http.HandlerFunc {
 		ss := s.session(r)
 		if ss == nil {
 			apiError(w, 401, "unauthenticated", "your session ended; log in again")
+			return
+		}
+		if ss.agent {
+			if !agentAllowed(ss, r) {
+				apiError(w, 403, "agent_scope", "this agent token (scope "+ss.agentScope+") cannot do that; agent tokens can read, draft changes (scope draft) and apply them (scope apply)")
+				return
+			}
+			h(w, r, ss) // bearer tokens are not sent by browsers automatically: no CSRF token needed
 			return
 		}
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {

@@ -70,6 +70,34 @@ type HostRunner func(ctx context.Context, node, command string) (output string, 
 // MethodSSH marks a step that runs Body["command"] on node Path over SSH.
 const MethodSSH = "SSH"
 
+// MethodGalley marks a step that changes galley's own configuration: Path is
+// the action (e.g. "galley.cluster.update") and Body its parameters.
+const MethodGalley = "GALLEY"
+
+// GalleyRunner applies a galley-level step with the requesting user's rights.
+type GalleyRunner func(ctx context.Context, action string, body map[string]string) (string, error)
+
+// Register stores a plan built outside Build (galley-level actions) for user.
+func (m *Manager) Register(user string, p *Plan) error {
+	p.ID, p.owner = newID(), user
+	p.CreatedAt = time.Now().Unix()
+	p.ExpiresAt = p.CreatedAt + int64(TTL.Seconds())
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.gc()
+	n := 0
+	for _, q := range m.plans {
+		if q.owner == user && !q.used {
+			n++
+		}
+	}
+	if n >= MaxPendingPerUser {
+		return ErrTooMany
+	}
+	m.plans[p.ID] = p
+	return nil
+}
+
 // Target identifies a guest.
 type Target struct {
 	VMID int    `json:"vmid"`
@@ -465,7 +493,7 @@ var TaskPoll = time.Second
 // Execute runs the steps in order with the user's client, waiting for each
 // step's PVE task to finish and stopping at the first failure. progress is
 // called (if non-nil) whenever a result changes, with a copy of all results.
-func Execute(ctx context.Context, cl *pve.Client, p *Plan, progress func([]Result), host HostRunner) ([]Result, bool) {
+func Execute(ctx context.Context, cl *pve.Client, p *Plan, progress func([]Result), host HostRunner, galley GalleyRunner) ([]Result, bool) {
 	res := make([]Result, 0, len(p.Steps))
 	emit := func() {
 		if progress != nil {
@@ -473,6 +501,22 @@ func Execute(ctx context.Context, cl *pve.Client, p *Plan, progress func([]Resul
 		}
 	}
 	for i, s := range p.Steps {
+		if s.Method == MethodGalley {
+			r := Result{Step: i, Status: "ok", OK: true}
+			if galley == nil {
+				r.Status, r.OK, r.Error = "error", false, "galley actions are not available"
+			} else if msg, err := galley(ctx, s.Path, s.Body); err != nil {
+				r.Status, r.OK, r.Error = "error", false, err.Error()
+			} else {
+				r.Output = msg
+			}
+			res = append(res, r)
+			emit()
+			if !r.OK {
+				return res, false
+			}
+			continue
+		}
 		if s.Method == MethodSSH {
 			r := Result{Step: i, Status: "running"}
 			res = append(res, r)
@@ -725,10 +769,14 @@ func (m *Manager) buildAPICall(ctx context.Context, p *Plan, req Request) error 
 // MarkAssistantDraft labels a plan drafted by the assistant and always
 // requires typed confirmation, so data the model read (VM notes, names) can
 // never turn into a one-click change.
-func MarkAssistantDraft(p *Plan) {
-	p.Source = "assistant"
-	if !strings.HasPrefix(p.Title, "Assistant draft: ") {
-		p.Title = "Assistant draft: " + p.Title
+func MarkAssistantDraft(p *Plan) { MarkDraft(p, "assistant", "Assistant draft") }
+
+// MarkDraft labels a plan drafted by an AI (the assistant, or an external
+// agent via MCP) and always requires typed confirmation to apply it.
+func MarkDraft(p *Plan, source, label string) {
+	p.Source = source
+	if !strings.HasPrefix(p.Title, label+": ") {
+		p.Title = label + ": " + p.Title
 	}
 	if p.ConfirmText == "" {
 		p.ConfirmText = fmt.Sprintf("apply %d step", len(p.Steps))
@@ -736,4 +784,19 @@ func MarkAssistantDraft(p *Plan) {
 			p.ConfirmText += "s"
 		}
 	}
+}
+
+// List returns user's pending (not yet run, unexpired) plans, newest first.
+func (m *Manager) List(user string) []*Plan {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.gc()
+	var out []*Plan
+	for _, p := range m.plans {
+		if p.owner == user && !p.used {
+			out = append(out, p)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt > out[j].CreatedAt })
+	return out
 }

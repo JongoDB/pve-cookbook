@@ -59,9 +59,9 @@ jobs:
         working-directory: dashboard/web
         run: npm ci && npm run typecheck && npm run lint && npm test && npm run build
       - name: go vet + gofmt
-        run: go vet ./cmd/... ./internal/... && test -z "$(gofmt -l cmd internal)"
+        run: go vet ./cmd/... ./internal/... ./docs/... && test -z "$(gofmt -l cmd internal docs)"
       - name: go test (race)
-        run: go test -race -count=1 ./cmd/... ./internal/...
+        run: go test -race -count=1 ./cmd/... ./internal/... ./docs/...
       - name: build static binaries with embedded UI
         run: |
           for a in amd64 arm64; do CGO_ENABLED=0 GOOS=linux GOARCH=$a go build -trimpath -o /tmp/galley-$a ./cmd/galley; done

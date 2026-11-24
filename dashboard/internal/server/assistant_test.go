@@ -24,8 +24,13 @@ func fakeModel(t *testing.T) (*httptest.Server, *atomic.Int32) {
 			Tools    []any            `json:"tools"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
-		if len(body.Tools) != 8 {
+		if len(body.Tools) != 13 {
 			t.Errorf("tools offered: %d", len(body.Tools))
+		}
+		for _, tl := range body.Tools {
+			if strings.Contains(fmt.Sprint(tl), "apply_change") {
+				t.Error("the in-app assistant must never get apply_change")
+			}
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		chunk := func(v any) { b, _ := json.Marshal(v); fmt.Fprintf(w, "data: %s\n\n", b) }

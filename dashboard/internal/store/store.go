@@ -77,6 +77,10 @@ type Session struct {
 	// KeyCheck verifies the session secret K presented with the id (see
 	// Store.KeyCheck); it reveals nothing about K.
 	KeyCheck string
+	// Kind is "browser" (cookie) or "agent" (bearer token for MCP/API clients).
+	Kind  string
+	Name  string // agent token name
+	Scope string // agent scope: read | draft | apply
 }
 
 // Cred is a session's credential for one cluster.
@@ -214,6 +218,10 @@ var migrations = []string{
 	 CREATE TABLE token_revocations (
 	   cluster_id TEXT NOT NULL, pve_user TEXT NOT NULL, token_id TEXT NOT NULL,
 	   reason TEXT NOT NULL, created INTEGER NOT NULL, PRIMARY KEY (cluster_id, token_id));`,
+	// 6: agent sessions (bearer tokens for MCP/API clients)
+	`ALTER TABLE sessions ADD COLUMN kind TEXT NOT NULL DEFAULT 'browser';
+	 ALTER TABLE sessions ADD COLUMN name TEXT NOT NULL DEFAULT '';
+	 ALTER TABLE sessions ADD COLUMN scope TEXT NOT NULL DEFAULT '';`,
 }
 
 func (s *Store) migrate() error {
@@ -463,17 +471,20 @@ func HashID(id string) string {
 
 // PutSession creates or replaces a session.
 func (s *Store) PutSession(ss Session) error {
-	_, err := s.db.Exec(`INSERT INTO sessions(id_hash,user,home,csrf,created,last_seen,expires,key_check) VALUES(?,?,?,?,?,?,?,?)
+	if ss.Kind == "" {
+		ss.Kind = "browser"
+	}
+	_, err := s.db.Exec(`INSERT INTO sessions(id_hash,user,home,csrf,created,last_seen,expires,key_check,kind,name,scope) VALUES(?,?,?,?,?,?,?,?,?,?,?)
 	  ON CONFLICT(id_hash) DO UPDATE SET user=excluded.user, home=excluded.home, csrf=excluded.csrf, last_seen=excluded.last_seen, expires=excluded.expires, key_check=excluded.key_check`,
-		HashID(ss.ID), ss.User, ss.Home, ss.CSRF, ss.Created, ss.LastSeen, ss.Expires, ss.KeyCheck)
+		HashID(ss.ID), ss.User, ss.Home, ss.CSRF, ss.Created, ss.LastSeen, ss.Expires, ss.KeyCheck, ss.Kind, ss.Name, ss.Scope)
 	return err
 }
 
 // GetSession loads a session by raw id; expired sessions are deleted and reported missing.
 func (s *Store) GetSession(id string) (Session, error) {
 	var ss Session
-	err := s.db.QueryRow(`SELECT user,home,csrf,created,last_seen,expires,key_check FROM sessions WHERE id_hash=?`, HashID(id)).
-		Scan(&ss.User, &ss.Home, &ss.CSRF, &ss.Created, &ss.LastSeen, &ss.Expires, &ss.KeyCheck)
+	err := s.db.QueryRow(`SELECT user,home,csrf,created,last_seen,expires,key_check,kind,name,scope FROM sessions WHERE id_hash=?`, HashID(id)).
+		Scan(&ss.User, &ss.Home, &ss.CSRF, &ss.Created, &ss.LastSeen, &ss.Expires, &ss.KeyCheck, &ss.Kind, &ss.Name, &ss.Scope)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ss, ErrNotFound
 	}
@@ -868,4 +879,45 @@ func (s *Store) PutSetting(key, value string) error {
 	}
 	_, err = s.db.Exec(`INSERT INTO settings(key,value,updated) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated=excluded.updated`, key, sealed, time.Now().Unix())
 	return err
+}
+
+// AgentSession describes an agent token (no secrets).
+type AgentSession struct {
+	Hash     string `json:"-"`
+	ID       string `json:"id"` // short public id (prefix of the hash)
+	Name     string `json:"name"`
+	Scope    string `json:"scope"`
+	Created  int64  `json:"created"`
+	LastSeen int64  `json:"lastSeen"`
+	Expires  int64  `json:"expires"`
+}
+
+// AgentSessions lists user's agent tokens established on home.
+func (s *Store) AgentSessions(user, home string) ([]AgentSession, error) {
+	rows, err := s.db.Query(`SELECT id_hash,name,scope,created,last_seen,expires FROM sessions WHERE kind='agent' AND user=? AND home=? AND expires>=? ORDER BY created DESC`, user, home, time.Now().Unix())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []AgentSession{}
+	for rows.Next() {
+		var a AgentSession
+		if err := rows.Scan(&a.Hash, &a.Name, &a.Scope, &a.Created, &a.LastSeen, &a.Expires); err != nil {
+			return nil, err
+		}
+		a.ID = a.Hash[:16]
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// DeleteSessionByHash removes a session by its hash.
+func (s *Store) DeleteSessionByHash(hash string) error {
+	_, err := s.db.Exec(`DELETE FROM sessions WHERE id_hash=?`, hash)
+	return err
+}
+
+// CredMetasByHash lists a session's credentials (by session hash) without decrypting them.
+func (s *Store) CredMetasByHash(hash string) ([]CredMeta, error) {
+	return scanMetas(s.db.Query(`SELECT `+credMetaCols+` FROM session_creds c WHERE c.session_hash=?`, hash))
 }
