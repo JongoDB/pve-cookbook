@@ -1,0 +1,9 @@
+{
+  "default": true,
+  "MD013": false,   // line length: recipes contain long commands
+  "MD033": false,   // inline HTML allowed
+  "MD041": false,   // front-matter precedes the first heading
+  "MD024": { "siblings_only": true },
+  "MD060": false,
+  "MD025": { "front_matter_title": "" }
+}

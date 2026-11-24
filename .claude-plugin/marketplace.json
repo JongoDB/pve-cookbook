@@ -1,0 +1,11 @@
+{
+  "name": "pve-cookbook",
+  "owner": { "name": "pve-cookbook contributors" },
+  "plugins": [
+    {
+      "name": "pve-cookbook",
+      "source": "./",
+      "description": "Agent-safe recipes and tools to build and operate Proxmox VE clusters (Ceph, SDN, firewall, HA, backups, health, community-scripts deploys)."
+    }
+  ]
+}

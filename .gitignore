@@ -1,0 +1,9 @@
+# real inventories contain your IPs/hostnames — never commit them
+inventory.yaml
+*.inventory.yaml
+!examples/**/inventory.yaml
+.DS_Store
+node_modules/
+dist/
+/dashboard/galley
+*.log

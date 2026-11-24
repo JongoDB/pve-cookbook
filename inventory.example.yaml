@@ -1,0 +1,97 @@
+# pve-cookbook inventory
+# Copy to inventory.yaml and edit. Every recipe and `scripts/pvecb` step reads this file.
+# Values below describe a 3-node hyperconverged cluster (Ceph + EVPN SDN).
+# Documentation-only addresses (192.0.2.0/24) are used for the management LAN — replace them.
+
+cluster:
+  name: pve-lab                 # corosync cluster name (<= 15 chars, [a-z0-9-])
+  domain: example.internal      # node FQDN suffix
+  timezone: UTC
+  repos: no-subscription        # no-subscription | enterprise (enterprise requires a subscription key per node)
+  founder: pve1                 # node that creates the cluster; others join it
+
+nodes:
+  - name: pve1
+    ssh: root@192.0.2.11        # how the operator/agent reaches the node (pre-cluster)
+    mgmt_ip: 192.0.2.11
+    backend_ip: 10.15.15.11
+  - name: pve2
+    ssh: root@192.0.2.12
+    mgmt_ip: 192.0.2.12
+    backend_ip: 10.15.15.12
+  - name: pve3
+    ssh: root@192.0.2.13
+    mgmt_ip: 192.0.2.13
+    backend_ip: 10.15.15.13
+
+network:
+  mgmt:
+    cidr: 192.0.2.0/24
+    gateway: 192.0.2.1
+    bridge: vmbr0
+    uplink: nic0
+  backend:
+    cidr: 10.15.15.0/24
+    # shared-bridge: secondary IP on the mgmt bridge (works through a dumb switch; temporary)
+    # dedicated:     own interface/bond given in `iface` (static IPs from nodes[].backend_ip)
+    # mesh:          switchless full mesh between 3 nodes, see recipes/topologies/full-mesh.md
+    mode: shared-bridge
+    iface: ""                   # used when mode=dedicated, e.g. bond1 or nic1
+    mtu: 1500
+  # Enable 802.3x pause frames on the uplink. REQUIRED when using rate-adapting
+  # SFP-10G-T copper modules into a 1G/2.5G switch, otherwise bursts are dropped
+  # and corosync/pmxcfs wedge. Harmless elsewhere.
+  flow_control: true
+
+corosync:
+  # Links in priority order. Each must be a key under `network` with per-node IPs.
+  links: [backend, mgmt]
+
+storage:
+  # Disks are erased ONLY when wipe_confirm is true AND the step is run with --yes.
+  wipe_confirm: false
+  ceph:
+    enabled: true
+    # Select OSD disks either by model substring (cluster-wide) or per node with
+    # nodes[].osd_devices: [/dev/disk/by-id/...]. Boot disks are always refused.
+    osd_model_match: "3.84TB"
+    device_class: nvme
+    pool: vm-pool
+    size: 3
+    min_size: 2
+    osd_memory_target_gib: 8
+    cephfs: true                # shared ISO/template/snippet store
+    # Conservative recovery for links <= 10G shared with other traffic
+    protect_client_io: true
+  local_zfs:
+    enabled: true
+    model_match: "800GB"        # one disk per node -> pool `nvme-local`
+    pool: nvme-local
+    backup_quota: 500G          # dataset for node-local (off-Ceph) backups
+
+sdn:
+  evpn:
+    enabled: true
+    asn: 65000
+    vrf_vxlan: 10000
+    mtu: 1450                   # underlay MTU - 50 (VXLAN)
+    exit_nodes: all             # all | comma list
+    vnets:
+      - { name: servers, tag: 10010, cidr: 10.10.10.0/24, gateway: 10.10.10.1, alias: "Production servers" }
+      - { name: dmz,     tag: 10020, cidr: 10.10.20.0/24, gateway: 10.10.20.1, alias: "DMZ" }
+      - { name: lab,     tag: 10030, cidr: 10.10.30.0/24, gateway: 10.10.30.1, alias: "Lab / dev" }
+      - { name: infra,   tag: 10040, cidr: 10.10.40.0/24, gateway: 10.10.40.1, alias: "Infra services" }
+
+firewall:
+  enabled: true
+  management_cidrs: [192.0.2.0/24]   # GUI/SSH/console allowed from here only
+  overlay_ping: true                 # allow ICMP from vnets to anycast gateways
+
+ha:
+  shutdown_policy: migrate
+  crs: static
+
+backups:
+  schedule: "01:30"
+  storage: backup-local
+  retention: keep-last=3,keep-daily=7,keep-weekly=4,keep-monthly=3

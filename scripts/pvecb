@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# pvecb — pve-cookbook runner. Executes idempotent build steps against the
+# nodes described in inventory.yaml, over SSH, from any operator machine.
+#
+#   scripts/pvecb [-i inventory.yaml] [--dry-run] [--yes] <step>... | all | list
+#
+# Every step is safe to re-run. Destructive actions (disk wipes) additionally
+# require storage.wipe_confirm=true in the inventory AND --yes.
+set -Eeuo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/common.sh
+source "$HERE/lib/common.sh"
+
+STEPS_DIR="$HERE/steps"
+ORDER=(preflight base-os network cluster ceph local-zfs sdn firewall datacenter validate)
+
+usage() {
+  sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'
+  echo; echo "Steps (in order):"
+  for s in "${ORDER[@]}"; do printf '  %-11s %s\n' "$s" "$(sed -n 's/^# summary: //p' "$STEPS_DIR/$s.sh")"; done
+}
+
+args=()
+while (($#)); do
+  case "$1" in
+    -i|--inventory) INVENTORY="$2"; shift 2 ;;
+    --dry-run) PVECB_DRY_RUN=1; shift ;;
+    -y|--yes) PVECB_YES=1; shift ;;
+    -h|--help|list) usage; exit 0 ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+((${#args[@]})) || { usage; exit 1; }
+[[ "${args[0]}" == "all" ]] && args=("${ORDER[@]}")
+
+export PVECB_DRY_RUN PVECB_YES INVENTORY
+load_inventory
+
+for s in "${args[@]}"; do
+  f="$STEPS_DIR/$s.sh"
+  [[ -f "$f" ]] || die "unknown step '$s' (see: pvecb list)"
+  step "[$s] $(sed -n 's/^# summary: //p' "$f")"
+  # shellcheck source=/dev/null
+  source "$f"
+  "step_${s//-/_}"
+  ok "[$s] done"
+done

@@ -1,0 +1,41 @@
+name: ci
+on:
+  push: { branches: [main] }
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck -x -S warning scripts/pvecb scripts/lib/common.sh scripts/steps/*.sh scripts/*.sh
+      - name: bash -n
+        run: for f in scripts/pvecb scripts/lib/*.sh scripts/steps/*.sh scripts/*.sh; do bash -n "$f"; done
+      - name: inventory parses and dry-run lists steps
+        run: |
+          pip install --quiet pyyaml
+          cp inventory.example.yaml inventory.yaml
+          scripts/pvecb list
+          source scripts/lib/common.sh && INVENTORY=inventory.yaml load_inventory && test "$(nodes | wc -l)" = 3 && test "$(q 'sdn.evpn.vnets[1].name')" = dmz
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DavidAnson/markdownlint-cli2-action@v19
+        with:
+          globs: "**/*.md"
+      - name: recipes declare required front-matter and sections
+        run: |
+          fail=0
+          for f in $(find recipes -name '*.md' ! -name '_TEMPLATE.md'); do
+            for k in '^id:' '^tested:' '^risk:'; do grep -qE "$k" "$f" || { echo "$f missing $k"; fail=1; }; done
+            for s in Preconditions Steps Verify Rollback Gotchas; do grep -qE "^## $s" "$f" || { echo "$f missing ## $s"; fail=1; }; done
+          done
+          exit $fail
+      - name: no private identifiers
+        run: |
+          ! grep -rniE '192\.168\.86\.|BEGIN (RSA|OPENSSH) PRIVATE KEY|PVEAPIToken=[a-z0-9@!]+=[0-9a-f-]{36}' --exclude-dir=.git .

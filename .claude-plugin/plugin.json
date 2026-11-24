@@ -1,0 +1,8 @@
+{
+  "name": "pve-cookbook",
+  "version": "0.1.0",
+  "description": "Agent-safe recipes and tools to build and operate Proxmox VE clusters.",
+  "license": "MIT",
+  "repository": "https://github.com/JongoDB/pve-cookbook",
+  "keywords": ["proxmox", "pve", "ceph", "homelab", "infrastructure", "sdn"]
+}
