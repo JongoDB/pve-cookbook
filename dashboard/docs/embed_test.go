@@ -46,3 +46,26 @@ func TestChangelog(t *testing.T) {
 		}
 	}
 }
+
+// Real queries must land on the page that answers them.
+func TestSearchRanking(t *testing.T) {
+	cases := map[string]string{
+		"create a PCI mapping":            "hardware-and-gpus",
+		"how do I take a snapshot":        "guests",
+		"agent token MCP":                 "agents-and-mcp",
+		"typed confirmation":              "changes",
+		"send feedback":                   "feedback",
+		"open a console":                  "consoles",
+		"run a command on a node as root": "hosts",
+	}
+	for q, want := range cases {
+		hits := Search(q, 3)
+		if len(hits) == 0 || hits[0].Slug != want {
+			got := []string{}
+			for _, h := range hits {
+				got = append(got, h.Slug+"#"+h.Section)
+			}
+			t.Errorf("%q: want %s first, got %v", q, want, got)
+		}
+	}
+}

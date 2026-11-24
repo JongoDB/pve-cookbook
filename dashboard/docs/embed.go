@@ -154,31 +154,61 @@ type Hit struct {
 
 var word = regexp.MustCompile(`[a-z0-9]+`)
 
-// Search scores sections by query term matches (title and headings weigh more).
+// stopWords carry no meaning for ranking ("how do I create a mapping").
+var stopWords = map[string]bool{"a": true, "an": true, "the": true, "to": true, "of": true, "in": true, "on": true,
+	"for": true, "and": true, "or": true, "is": true, "it": true, "i": true, "do": true, "how": true, "can": true,
+	"my": true, "with": true, "what": true, "where": true, "does": true, "be": true, "this": true, "that": true, "galley": true}
+
+// Search ranks sections by how many query terms they contain (each term
+// counts once, capped occurrences), with heading and title matches weighing
+// most, so a focused section beats a long page that repeats common words.
 func Search(q string, limit int) []Hit {
-	terms := word.FindAllString(strings.ToLower(q), -1)
+	var terms []string
+	for _, t := range word.FindAllString(strings.ToLower(q), -1) {
+		if !stopWords[t] && len(t) > 1 {
+			terms = append(terms, t)
+		}
+	}
 	if len(terms) == 0 {
 		return nil
 	}
 	var hits []Hit
 	for _, p := range pages {
+		title, summary := strings.ToLower(p.Title), strings.ToLower(p.Summary)
 		for _, sec := range sections(p.Markdown) {
-			body := strings.ToLower(sec.body)
-			head := strings.ToLower(p.Title + " " + sec.heading)
-			score := 0
+			body, head := strings.ToLower(sec.body), strings.ToLower(sec.heading)
+			score, matched := 0, 0
 			for _, t := range terms {
-				score += 3*strings.Count(head, t) + strings.Count(body, t)
-				if strings.Contains(strings.ToLower(p.Summary), t) {
-					score++
+				in := false
+				if strings.Contains(head, t) {
+					score += 6
+					in = true
+				}
+				if strings.Contains(title, t) {
+					score += 4
+					in = true
+				}
+				if strings.Contains(summary, t) {
+					score += 2
+					in = true
+				}
+				if n := strings.Count(body, t); n > 0 {
+					score += min(n, 3)
+					in = true
+				}
+				if in {
+					matched++
 				}
 			}
-			if score > 0 {
-				ex := strings.TrimSpace(sec.body)
-				if r := []rune(ex); len(r) > 700 {
-					ex = string(r[:700]) + "…"
-				}
-				hits = append(hits, Hit{Slug: p.Slug, Title: p.Title, Section: sec.heading, Excerpt: ex, Score: score})
+			if matched == 0 {
+				continue
 			}
+			score += 10 * matched * matched / len(terms) // reward covering more of the query
+			ex := strings.TrimSpace(sec.body)
+			if r := []rune(ex); len(r) > 700 {
+				ex = string(r[:700]) + "…"
+			}
+			hits = append(hits, Hit{Slug: p.Slug, Title: p.Title, Section: sec.heading, Excerpt: ex, Score: score})
 		}
 	}
 	sort.SliceStable(hits, func(i, j int) bool { return hits[i].Score > hits[j].Score })
