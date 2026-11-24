@@ -32,7 +32,7 @@ export const sseBackoff = (attempt: number) => Math.min(30_000, 1000 * 2 ** Math
 /**
  * Talks to the galley backend. Mutations carry X-Galley-CSRF from /api/me or /api/login and
  * always a JSON body with Content-Type: application/json ("{}" when there is nothing to send).
- * Any 401 outside the login calls is reported once, centrally, through onUnauthorized.
+ * A 401 with code "unauthenticated" (the galley session ended) is reported once, centrally, through onUnauthorized.
  */
 export class HttpApi implements Api {
   private csrf = '';
@@ -51,13 +51,15 @@ export class HttpApi implements Api {
       credentials: 'same-origin',
       body: mutating ? JSON.stringify(body ?? {}) : undefined,
     });
-    if (res.status === 401 && !opts.noUnauthorized) {
-      this.csrf = '';
-      this.unauthorized?.();
-    }
     if (res.status === 204) return undefined as T;
     let data: unknown = null;
     try { data = await res.json(); } catch { /* empty or non-JSON body */ }
+    // Only an ended galley session logs the user out. Other 401s (wrong password,
+    // second factor required) are answers about credentials.
+    if (res.status === 401 && !opts.noUnauthorized && (data as { code?: string } | null)?.code === 'unauthenticated') {
+      this.csrf = '';
+      this.unauthorized?.();
+    }
     if (!res.ok) {
       const e = (data ?? {}) as { error?: string; code?: string; retryAfter?: number };
       let retry = typeof e.retryAfter === 'number' ? e.retryAfter : undefined;

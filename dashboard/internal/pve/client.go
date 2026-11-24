@@ -483,3 +483,14 @@ func (c *Client) OpenIDLogin(ctx context.Context, code, state, redirect string) 
 	}
 	return &Ticket{User: r.Username, Ticket: r.Ticket, CSRF: r.CSRF, Expires: time.Now().Add(110 * time.Minute)}, nil
 }
+
+// DynamicAuth resolves credentials at request time, so long-running work
+// (a plan that waits on tasks for hours) always presents the current, renewed
+// ticket instead of the one it started with.
+type DynamicAuth struct{ Get func() Auth }
+
+func (d DynamicAuth) apply(r *http.Request) {
+	if a := d.Get(); a != nil {
+		a.apply(r)
+	}
+}

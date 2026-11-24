@@ -58,6 +58,7 @@ type AuditEntry struct {
 type Session struct {
 	ID       string // raw id (only held in memory / cookie; DB stores a hash)
 	User     string
+	Home     string // cluster the identity was established on
 	CSRF     string
 	Created  int64
 	LastSeen int64
@@ -180,6 +181,9 @@ var migrations = []string{
 	 CREATE TABLE user_prefs (
 	   user TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, updated INTEGER NOT NULL,
 	   PRIMARY KEY (user, key));`,
+	// 3: correct statuses of pre-v2 audit rows; sessions remember their home cluster
+	`UPDATE audit SET status = CASE WHEN ok THEN 'ok' ELSE 'error' END WHERE updated = 0;
+	 ALTER TABLE sessions ADD COLUMN home TEXT NOT NULL DEFAULT '';`,
 }
 
 func (s *Store) migrate() error {
@@ -343,17 +347,17 @@ func HashID(id string) string {
 
 // PutSession creates or replaces a session.
 func (s *Store) PutSession(ss Session) error {
-	_, err := s.db.Exec(`INSERT INTO sessions(id_hash,user,csrf,created,last_seen,expires) VALUES(?,?,?,?,?,?)
-	  ON CONFLICT(id_hash) DO UPDATE SET user=excluded.user, csrf=excluded.csrf, last_seen=excluded.last_seen, expires=excluded.expires`,
-		HashID(ss.ID), ss.User, ss.CSRF, ss.Created, ss.LastSeen, ss.Expires)
+	_, err := s.db.Exec(`INSERT INTO sessions(id_hash,user,home,csrf,created,last_seen,expires) VALUES(?,?,?,?,?,?,?)
+	  ON CONFLICT(id_hash) DO UPDATE SET user=excluded.user, home=excluded.home, csrf=excluded.csrf, last_seen=excluded.last_seen, expires=excluded.expires`,
+		HashID(ss.ID), ss.User, ss.Home, ss.CSRF, ss.Created, ss.LastSeen, ss.Expires)
 	return err
 }
 
 // GetSession loads a session by raw id; expired sessions are deleted and reported missing.
 func (s *Store) GetSession(id string) (Session, error) {
 	var ss Session
-	err := s.db.QueryRow(`SELECT user,csrf,created,last_seen,expires FROM sessions WHERE id_hash=?`, HashID(id)).
-		Scan(&ss.User, &ss.CSRF, &ss.Created, &ss.LastSeen, &ss.Expires)
+	err := s.db.QueryRow(`SELECT user,home,csrf,created,last_seen,expires FROM sessions WHERE id_hash=?`, HashID(id)).
+		Scan(&ss.User, &ss.Home, &ss.CSRF, &ss.Created, &ss.LastSeen, &ss.Expires)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ss, ErrNotFound
 	}
@@ -594,13 +598,52 @@ func (s *Store) DeleteCredByHash(hash, clusterID string) error {
 	return err
 }
 
-// InterruptRunning marks audit entries left "running" by a previous process as failed.
+// CredByHash returns one credential of a session identified by its hash.
+func (s *Store) CredByHash(hash, clusterID string) (Cred, error) {
+	rows, err := s.db.Query(`SELECT cluster_id,pve_user,kind,token_id,secret,csrf,expires FROM session_creds WHERE session_hash=? AND cluster_id=?`, hash, clusterID)
+	if err != nil {
+		return Cred{}, err
+	}
+	cs, err := s.scanCreds(rows)
+	if err != nil {
+		return Cred{}, err
+	}
+	if len(cs) == 0 {
+		return Cred{}, ErrNotFound
+	}
+	return cs[0], nil
+}
+
+// InterruptRunning marks audit entries left "running" by a previous process:
+// steps still running become "unknown" (the PVE task may have completed) and
+// the entry becomes "error".
 func (s *Store) InterruptRunning() (int64, error) {
-	res, err := s.db.Exec(`UPDATE audit SET status='error', ok=0, updated=?,
-	  results=json_insert(results,'$[#]',json_object('status','error','error','galley stopped while this change was running; check the PVE task log for the outcome'))
-	  WHERE status='running'`, time.Now().Unix())
+	es, err := s.queryAudit(`WHERE status='running'`)
 	if err != nil {
 		return 0, err
 	}
-	return res.RowsAffected()
+	const note = "galley stopped while this step was running; check the PVE task log for the outcome"
+	var n int64
+	for _, e := range es {
+		var rs []map[string]any
+		if json.Unmarshal(e.Results, &rs) != nil {
+			rs = nil
+		}
+		marked := false
+		for _, r := range rs {
+			if r["status"] == "running" {
+				r["status"], r["ok"], r["error"] = "unknown", false, note
+				marked = true
+			}
+		}
+		if !marked {
+			rs = append(rs, map[string]any{"step": len(rs), "status": "unknown", "ok": false, "error": note})
+		}
+		raw, _ := json.Marshal(rs)
+		if _, err := s.UpdateAudit(e.ID, "error", false, raw); err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, nil
 }

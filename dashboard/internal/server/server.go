@@ -47,8 +47,12 @@ type Options struct {
 	DataDir string
 	// SecureCookies sets the cookie Secure flag (false only for plain-HTTP dev).
 	SecureCookies bool
-	// Admins (user@realm) may add clusters regardless of per-cluster rights.
+	// Admins ("cluster:user@realm") may add clusters and manage any cluster,
+	// when logged in to that cluster as that user.
 	Admins []string
+	// PublicURL is galley's external base URL (for OpenID redirects). When
+	// empty it is derived from the request's Host header.
+	PublicURL string
 }
 
 // Server wires the API.
@@ -70,6 +74,7 @@ type Server struct {
 	stopStreams context.CancelFunc
 
 	mu         sync.Mutex
+	setupMu    sync.Mutex
 	setupToken string
 	clients    map[string]*pve.Client // cluster id -> unauthenticated base client (shared pool)
 	views      map[string]*userView   // session id + "\x00" + cluster id
@@ -92,7 +97,9 @@ func New(st *store.Store, f *fleet.Poller, static fs.FS, log *slog.Logger, opt O
 		clients: map[string]*pve.Client{}, views: map[string]*userView{}, renewing: map[string]*sync.Mutex{},
 		sseCount: map[string]int{}, lastTouch: map[string]time.Time{}, oidc: map[string]oidcPending{},
 		limiter: newLimiter(), auditSubs: map[chan store.AuditEntry]*session{}, newClient: pve.New}
-	if n, err := st.InterruptRunning(); err == nil && n > 0 {
+	if n, err := st.InterruptRunning(); err != nil {
+		log.Error("could not mark interrupted changes", "err", err)
+	} else if n > 0 {
 		log.Warn("marked interrupted changes as failed", "count", n)
 	}
 	s.streams, s.stopStreams = context.WithCancel(ctx)
@@ -115,6 +122,11 @@ func (s *Server) Shutdown(ctx context.Context) {
 		s.log.Warn("shutdown: changes still running; marking them interrupted")
 	}
 	s.cancel()
+	// Give cancelled runs a moment to record their outcome before the store closes.
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+	}
 }
 
 // initSetupToken creates a one-time setup code while no cluster is registered.
@@ -133,7 +145,7 @@ func (s *Server) initSetupToken() {
 			_ = os.WriteFile(path, []byte(s.setupToken+"\n"), 0o600)
 		}
 	}
-	s.log.Warn("no cluster registered: setup requires this setup code", "setupCode", s.setupToken, "file", path)
+	s.log.Warn("no cluster registered: the setup code is in the setup-token file", "file", path)
 }
 
 func (s *Server) clearSetupToken() {
@@ -253,10 +265,15 @@ func randHex(n int) string {
 	return hex.EncodeToString(b)
 }
 
+// clientIP keys rate limits: the remote address (galley does not trust
+// X-Forwarded-For), with IPv6 clients grouped by /64.
 func clientIP(r *http.Request) string {
 	h, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		return r.RemoteAddr
+		h = r.RemoteAddr
+	}
+	if ip := net.ParseIP(h); ip != nil && ip.To4() == nil {
+		return ip.Mask(net.CIDRMask(64, 128)).String() + "/64"
 	}
 	return h
 }

@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"github.com/JongoDB/pve-cookbook/dashboard/internal/fakepve"
 	"github.com/JongoDB/pve-cookbook/dashboard/internal/fleet"
 	"github.com/JongoDB/pve-cookbook/dashboard/internal/plan"
+	"github.com/JongoDB/pve-cookbook/dashboard/internal/pve"
 	"github.com/JongoDB/pve-cookbook/dashboard/internal/server"
 	"github.com/JongoDB/pve-cookbook/dashboard/internal/store"
 )
@@ -330,7 +332,7 @@ func TestLoginRateLimited(t *testing.T) {
 		Code       string
 		RetryAfter int
 	}
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 12; i++ {
 		last = c.do("POST", "/api/login", map[string]any{"clusterId": "pve-lab", "username": "root@pam", "password": "wrong"}, &e)
 	}
 	if last != 429 || e.Code != "rate_limited" || e.RetryAfter <= 0 {
@@ -468,5 +470,85 @@ func TestHealthAndSPA(t *testing.T) {
 	b, _ := io.ReadAll(resp.Body)
 	if !strings.Contains(string(b), "<title>galley") || resp.Header.Get("X-Frame-Options") != "DENY" {
 		t.Fatalf("spa: %s", b)
+	}
+}
+
+func TestEndpointChangesNeedGalleyAdmin(t *testing.T) {
+	h := newHarness(t)
+	h.setup()
+	// second cluster where root has no Sys.Modify: root is admin of pve-lab only
+	f2 := fakepve.New()
+	t.Cleanup(f2.Close)
+	f2.Update(func(f *fakepve.Server) { f.Admins = map[string]bool{} })
+	root := h.login("root@pam", "secret")
+	if err := h.st.AddCluster(store.Cluster{ID: "other", Name: "other", Endpoints: []pve.Endpoint{f2.Endpoint()}, TokenID: f2.TokenID, TokenSecret: f2.Secret, CreatedAt: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if code := root.do("POST", "/api/clusters/other/login", map[string]any{"password": "secret"}, nil); code != 200 {
+		t.Fatalf("cluster login: %d", code)
+	}
+	var e struct{ Code string }
+	if code := root.do("PUT", "/api/clusters/pve-lab", map[string]any{"endpoints": []any{h.fake.Endpoint()}}, &e); code != 403 {
+		t.Fatalf("endpoint change by single-cluster admin: %d %s", code, e.Code)
+	}
+	if code := root.do("PUT", "/api/clusters/pve-lab", map[string]any{"shareLogin": true}, nil); code != 403 {
+		t.Fatalf("enable shareLogin by single-cluster admin: %d", code)
+	}
+	if code := root.do("PUT", "/api/clusters/pve-lab", map[string]any{"name": "renamed"}, nil); code != 200 {
+		t.Fatalf("rename by cluster admin: %d", code)
+	}
+}
+
+func TestMissingClusterLoginIsNot401(t *testing.T) {
+	h := newHarness(t)
+	h.setup()
+	root := h.login("root@pam", "secret")
+	f2 := fakepve.New()
+	t.Cleanup(f2.Close)
+	if err := h.st.AddCluster(store.Cluster{ID: "other", Name: "other", Endpoints: []pve.Endpoint{f2.Endpoint()}, TokenID: f2.TokenID, TokenSecret: f2.Secret, CreatedAt: 1}); err != nil {
+		t.Fatal(err)
+	}
+	h.refresh()
+	var e struct{ Code string }
+	code := root.do("POST", "/api/plans", map[string]any{"action": "guest.start", "clusterId": "other", "params": map[string]any{"targets": []map[string]any{{"vmid": 300}}}}, &e)
+	if code != 409 || e.Code != "cluster_login_required" {
+		t.Fatalf("got %d %s", code, e.Code)
+	}
+}
+
+func TestOpenIDCallbackBoundToBrowser(t *testing.T) {
+	h := newHarness(t)
+	h.setup()
+	attacker := h.client()
+	var start struct{ AuthURL string }
+	attacker.do("POST", "/api/login/openid", map[string]any{"clusterId": "pve-lab", "realm": "sso"}, &start)
+	u, _ := url.Parse(start.AuthURL)
+	victim := h.client() // no binding cookie
+	victim.do("GET", "/api/login/openid/callback?code=good&state="+url.QueryEscape(u.Query().Get("state")), nil, nil)
+	if code := victim.do("GET", "/api/me", nil, nil); code != 401 {
+		t.Fatalf("callback from another browser logged the victim in: %d", code)
+	}
+}
+
+func TestParallelGuessesStayWithinBudget(t *testing.T) {
+	h := newHarness(t)
+	h.setup()
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	counts := map[int]int{}
+	for i := 0; i < 25; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c := h.client()
+			code := c.do("POST", "/api/login", map[string]any{"clusterId": "pve-lab", "username": "root@pam", "password": "wrong"}, nil)
+			mu.Lock()
+			counts[code]++
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+	if counts[401] > 10 || counts[429] < 15 {
+		t.Fatalf("parallel guesses not bounded: %v", counts)
 	}
 }

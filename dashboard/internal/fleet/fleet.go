@@ -39,9 +39,9 @@ const (
 	publishEvery = time.Second
 	// nodeDetailWorkers caps concurrent per-node detail requests per cluster.
 	nodeDetailWorkers = 4
-	// reservedVMIDs is the start of a VMID range reserved for tests; guests at
+	// ReservedVMIDs is the start of a VMID range reserved for tests; guests at
 	// or above it are ignored for backup coverage.
-	reservedVMIDs = 99000
+	ReservedVMIDs = 99000
 )
 
 // ---- API read models (see docs/api.md) ----
@@ -1147,14 +1147,14 @@ func derive(c store.Cluster, last *lastGood, errs map[string]error, now time.Tim
 	}
 	total := 0
 	for _, g := range s.guests {
-		if !g.Template && g.VMID < reservedVMIDs {
+		if !g.Template && g.VMID < ReservedVMIDs {
 			total++
 		}
 	}
 	sum.Backups.Total = total
 	sum.Backups.Known = last.notBackedUp.fresh(now)
 	for _, g := range last.notBackedUp.val {
-		if g.VMID >= reservedVMIDs {
+		if g.VMID >= ReservedVMIDs {
 			continue // reserved test range
 		}
 		sum.Backups.Unprotected = append(sum.Backups.Unprotected, g.VMID)

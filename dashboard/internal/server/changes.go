@@ -25,11 +25,12 @@ func (s *Server) createPlan(w http.ResponseWriter, r *http.Request, ss *session)
 		return
 	}
 	v := s.view(r.Context(), ss, req.ClusterID)
-	if v == nil {
-		apiError(w, 401, "cluster_login_required", "log in to this cluster first")
+	cl, _, cerr := s.userClient(r.Context(), ss, req.ClusterID)
+	if v == nil || cerr != nil {
+		apiError(w, 409, "cluster_login_required", "log in to this cluster first")
 		return
 	}
-	p, err := s.plans.Build(r.Context(), ss.user, req, func(id int) bool { return v.guests[id] })
+	p, err := s.plans.Build(r.Context(), ss.user, req, func(id int) bool { return v.guests[id] }, cl)
 	switch {
 	case errors.Is(err, plan.ErrTooMany):
 		apiError(w, 429, "too_many_plans", err.Error())
@@ -66,7 +67,7 @@ func (s *Server) runPlan(w http.ResponseWriter, r *http.Request, ss *session) {
 	// Credential first, so a missing login does not consume the plan.
 	cl, cr, err := s.userClient(r.Context(), ss, p.ClusterID)
 	if err != nil {
-		apiError(w, 401, "cluster_login_required", err.Error())
+		apiError(w, 409, "cluster_login_required", err.Error())
 		return
 	}
 	p, err = s.plans.Take(id, ss.user, req.Confirm)
@@ -197,7 +198,8 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request, ss *session) {
 			case fleet.Fleet:
 				data = s.userFleet(ctx, ss, d)
 			case []fleet.Task:
-				data = s.userTasks(ctx, ss, d, 50)
+				_ = d // the event carries only the global top 50; filter from the full list
+				data = s.userTasks(ctx, ss, s.fleet.Tasks("", 500), 50)
 			default:
 				continue // unknown payloads are never forwarded unfiltered
 			}

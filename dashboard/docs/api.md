@@ -27,14 +27,20 @@ galley holds no authority of its own over clusters.
 - **CSRF:** authenticated mutations need `X-Galley-CSRF: <csrf>` from `GET /api/me`. All
   mutations (including login and setup) must be `Content-Type: application/json` and must not
   carry a cross-site `Origin` / `Sec-Fetch-Site`.
-- **Rate limits:** login failures are limited per client IP and per username (8 per 15 min,
-  30 attempts per minute) → `429 {"code":"rate_limited","retryAfter":seconds}` + `Retry-After`.
-- **Admin rights:** managing a cluster (`PUT`/`DELETE /api/clusters/{id}`) needs `Sys.Modify`
-  on `/` *of that cluster*. Adding a cluster needs `Sys.Modify` on `/` in every registered
-  cluster, or the user is listed with `galley --admin user@realm`.
-- Errors: HTTP status + `{"error": "message", "code": "snake_case"}`. `401` with code
+- **Rate limits:** login failures are limited per client IP (IPv6 per /64) and per username
+  (10 per 15 min, counted before the attempt completes so parallel guesses cannot exceed it;
+  30 attempts per minute; an unreachable cluster does not count) → `429 {"code":"rate_limited","retryAfter":seconds}` + `Retry-After`.
+- **Admin rights:** renaming or removing a cluster needs `Sys.Modify` on `/` *of that
+  cluster*. Adding a cluster, changing a cluster's endpoints (they decide where passwords are
+  sent) or enabling `shareLogin` needs a **galley admin**: `Sys.Modify` on `/` in every
+  registered cluster, or `galley --admin cluster:user@realm` while logged in to that cluster
+  as that user.
+- A login is rejected if the cluster answers for a different user than the one requested.
+- Errors: HTTP status + `{"error": "message", "code": "snake_case"}`. Only `401` with code
   `unauthenticated` means the galley session ended; `login_failed` / `otp_required` are
-  credential answers.
+  credential answers; `409 cluster_login_required` means this session has no (valid) login
+  for that cluster.
+- **Tasks:** like PVE, you see only your own tasks unless you hold `Sys.Audit` on `/`.
 
 ## Setup & clusters
 
@@ -78,7 +84,9 @@ so a change is never sent twice.
 `Me` = `{"user":"root@pam","csrf","version","galleyAdmin":bool,"expires","clusters":[{"id","name","authed":bool,"admin":bool}]}`
 
 For SSO, the PVE `openid` realm's IdP client must allow
-`https://<galley-host>/api/login/openid/callback` as a redirect URI.
+`https://<galley-host>/api/login/openid/callback` as a redirect URI. Run galley with
+`--public-url https://<galley-host>` so the redirect does not depend on the request's Host
+header. The flow is bound to the starting browser by a short-lived `galley_oidc` cookie.
 
 ## Read models (from the poller cache)
 
@@ -171,7 +179,11 @@ the background (independent of the browser) as the user. Each step that returns 
 SSE `audit` events and in `GET /api/audit`. Changes interrupted by a galley restart are
 marked `error` with a note to check the PVE task log.
 
-`Result` = `{"step","status":"running"|"ok"|"error","ok":bool,"upid"?,"exitstatus"?,"error"?}`
+`Result` = `{"step","status":"running"|"ok"|"error"|"unknown","ok":bool,"upid"?,"exitstatus"?,"error"?}`
+
+`unknown` means galley stopped following a task that may still be running in PVE (after
+6 hours, or a galley restart). Long changes keep working across ticket renewals: every
+request presents the user's current ticket.
 
 `DELETE /api/plans/{id}` discards a pending plan. Plans expire after 10 minutes, run at most
 once, are visible only to their owner (max 50 pending per user), and only target guests the
@@ -182,6 +194,8 @@ user can see.
 `GET /api/audit?limit=100` → `[{"id","at","updated","user","actorUser","clusterId","action","title","cli":["…"],"status":"running"|"ok"|"error","ok":bool,"results":[Result]}]`
 
 `user` is the galley session's identity, `actorUser` the PVE identity the change ran as.
+Entries are scoped to their cluster: you see an entry if you are logged in to that cluster
+and either hold `Sys.Audit` on `/` there or `actorUser` is you.
 Besides plans, the log records logins (`auth.login`, including failures with the client IP)
 and cluster administration (`cluster.add`, `cluster.update`, `cluster.delete`). Users see
 their own entries; `Sys.Audit` on `/` of a cluster shows everyone's entries for it.

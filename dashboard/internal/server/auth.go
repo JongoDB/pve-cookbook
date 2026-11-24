@@ -17,8 +17,8 @@ import (
 )
 
 type session struct {
-	id, user, csrf string
-	expires        int64
+	id, user, home, csrf string
+	expires              int64
 }
 
 type handler func(w http.ResponseWriter, r *http.Request, s *session)
@@ -45,7 +45,7 @@ func (s *Server) session(r *http.Request) *session {
 		_ = s.store.TouchSession(st.ID, now.Unix(), exp)
 		st.Expires = exp
 	}
-	return &session{id: st.ID, user: st.User, csrf: st.CSRF, expires: st.Expires}
+	return &session{id: st.ID, user: st.User, home: st.Home, csrf: st.CSRF, expires: st.Expires}
 }
 
 func (s *Server) authed(h handler) http.HandlerFunc {
@@ -85,8 +85,14 @@ func (s *Server) setupOrAdmin(h handler) http.HandlerFunc {
 					return
 				}
 				if subtle.ConstantTimeCompare([]byte(strings.TrimSpace(got)), []byte(tok)) != 1 {
-					s.limiter.fail("setup|"+clientIP(r), time.Now())
 					apiError(w, 403, "setup_token_invalid", "that setup code is not valid")
+					return
+				}
+				s.limiter.succeed("setup|" + clientIP(r))
+				s.setupMu.Lock() // one first registration at a time
+				defer s.setupMu.Unlock()
+				if cs, err := s.store.Clusters(); err != nil || len(cs) > 0 {
+					apiError(w, 409, "setup_done", "a cluster was registered meanwhile; log in instead")
 					return
 				}
 				h(w, r, nil)
@@ -103,10 +109,17 @@ func (s *Server) setupOrAdmin(h handler) http.HandlerFunc {
 	}
 }
 
-// galleyAdmin: listed in --admin, or holds Sys.Modify on / in every registered cluster.
+// galleyAdmin: listed in --admin as cluster:user@realm and logged in to that
+// cluster as exactly that user, or holds Sys.Modify on / in every registered
+// cluster. Qualifying by cluster means a rogue cluster that mints a ticket
+// named "root@pam" cannot claim an admin's identity.
 func (s *Server) galleyAdmin(ctx context.Context, ss *session) bool {
 	for _, a := range s.opt.Admins {
-		if a == ss.user {
+		cid, user, ok := strings.Cut(a, ":")
+		if !ok || user != ss.user {
+			continue
+		}
+		if cr, err := s.cred(ss, cid); err == nil && cr.PVEUser == user {
 			return true
 		}
 	}
@@ -156,12 +169,33 @@ func (s *Server) userClient(ctx context.Context, ss *session, cid string) (*pve.
 	if err != nil {
 		return nil, cr, fmt.Errorf("not logged in to %s", c.Name)
 	}
+	hash := store.HashID(ss.id)
 	if time.Until(time.Unix(cr.Expires, 0)) < 30*time.Minute {
-		if cr, err = s.renew(ctx, store.HashID(ss.id), cr); err != nil {
+		if cr, err = s.renew(ctx, hash, cr); err != nil {
 			return nil, cr, fmt.Errorf("your login to %s expired; log in again", c.Name)
 		}
 	}
-	return base.WithAuth(&pve.Ticket{User: cr.PVEUser, Ticket: cr.Secret, CSRF: cr.CSRF, Expires: time.Unix(cr.Expires, 0)}), cr, nil
+	// Each request presents the current ticket (renewed in the background), so
+	// long-running changes keep working past the 2-hour ticket lifetime.
+	cid2 := cid
+	current := cr
+	var mu sync.Mutex
+	auth := pve.DynamicAuth{Get: func() pve.Auth {
+		mu.Lock()
+		defer mu.Unlock()
+		if time.Until(time.Unix(current.Expires, 0)) < 45*time.Minute {
+			if fresh, err := s.store.CredByHash(hash, cid2); err == nil {
+				current = fresh
+			}
+			if time.Until(time.Unix(current.Expires, 0)) < 30*time.Minute {
+				if r, err := s.renew(s.base, hash, current); err == nil {
+					current = r
+				}
+			}
+		}
+		return &pve.Ticket{User: current.PVEUser, Ticket: current.Secret, CSRF: current.CSRF, Expires: time.Unix(current.Expires, 0)}
+	}}
+	return base.WithAuth(auth), cr, nil
 }
 
 // renew exchanges a still-valid ticket for a fresh one (PVE accepts a valid
@@ -176,12 +210,16 @@ func (s *Server) renew(ctx context.Context, hash string, cr store.Cred) (store.C
 	}
 	s.mu.Unlock()
 	m.Lock()
-	defer func() {
-		m.Unlock()
-		s.mu.Lock()
-		delete(s.renewing, key)
-		s.mu.Unlock()
-	}()
+	defer m.Unlock()
+	// Another caller may have renewed while we waited: work from the stored copy.
+	if fresh, err := s.store.CredByHash(hash, cr.ClusterID); err == nil {
+		cr = fresh
+		if time.Until(time.Unix(cr.Expires, 0)) > 45*time.Minute {
+			return cr, nil
+		}
+	} else {
+		return cr, errNoCred
+	}
 	base, _, err := s.baseClient(cr.ClusterID)
 	if err != nil {
 		return cr, err
@@ -267,31 +305,36 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	base, c, err := s.baseClient(req.ClusterID)
 	if err != nil {
+		s.limiter.succeed(ipKey, userKey)
 		apiError(w, 400, "bad_request", "choose a cluster to log in to")
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
 	t, err := base.Login(ctx, user, req.Password, req.OTP)
+	if err == nil && t.User != user {
+		err = &pve.APIError{Status: 401, Message: "cluster answered for a different user"}
+		s.log.Warn("login identity mismatch", "requested", user, "returned", t.User, "cluster", c.ID)
+	}
 	if err != nil {
 		var ae *pve.APIError
 		if errors.As(err, &ae) && ae.Message == "second factor required" {
+			s.limiter.succeed(ipKey, userKey)
 			apiError(w, 401, "otp_required", "this account requires a second factor")
 			return
 		}
-		now := time.Now()
-		s.limiter.fail(ipKey, now)
-		s.limiter.fail(userKey, now)
-		s.securityEvent(user, c.ID, "auth.login", "Login failed for "+user, false, map[string]string{"ip": clientIP(r)})
-		if errors.As(err, &ae) {
-			apiError(w, 401, "login_failed", "login failed: check the username, realm and password")
-		} else {
-			apiError(w, 502, "cluster_unreachable", "could not reach "+c.Name+": "+err.Error())
+		if !errors.As(err, &ae) { // outage: not a guess
+			s.limiter.succeed(ipKey, userKey)
+			apiError(w, 502, "cluster_unreachable", "could not reach "+c.Name)
+			return
 		}
+		s.securityEvent(user, c.ID, "auth.login", "Login failed for "+user, false, map[string]string{"ip": clientIP(r)})
+		apiError(w, 401, "login_failed", "login failed: check the username, realm and password")
 		return
 	}
+	s.limiter.succeed(ipKey, userKey)
 	s.limiter.reset(userKey)
-	ss, err := s.startSession(w, t.User)
+	ss, err := s.startSession(w, t.User, c.ID)
 	if err != nil {
 		apiError(w, 500, "store", err.Error())
 		return
@@ -314,7 +357,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 					if err != nil {
 						return
 					}
-					if ot, err := ob.Login(ctx, user, req.Password, ""); err == nil {
+					if ot, err := ob.Login(ctx, user, req.Password, ""); err == nil && ot.User == user {
 						_ = s.store.PutCred(ss.id, ticketCred(o.ID, ot))
 						mu.Lock()
 						authed = append(authed, o.ID)
@@ -334,15 +377,15 @@ func ticketCred(cid string, t *pve.Ticket) store.Cred {
 	return store.Cred{ClusterID: cid, PVEUser: t.User, Kind: "ticket", Secret: t.Ticket, CSRF: t.CSRF, Expires: t.Expires.Unix()}
 }
 
-func (s *Server) startSession(w http.ResponseWriter, user string) (*session, error) {
+func (s *Server) startSession(w http.ResponseWriter, user, home string) (*session, error) {
 	now := time.Now()
-	st := store.Session{ID: randHex(32), User: user, CSRF: randHex(24), Created: now.Unix(), LastSeen: now.Unix(), Expires: now.Add(sessionIdle).Unix()}
+	st := store.Session{ID: randHex(32), User: user, Home: home, CSRF: randHex(24), Created: now.Unix(), LastSeen: now.Unix(), Expires: now.Add(sessionIdle).Unix()}
 	if err := s.store.PutSession(st); err != nil {
 		return nil, err
 	}
 	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: st.ID, Path: "/", HttpOnly: true, Secure: s.opt.SecureCookies,
 		SameSite: http.SameSiteLaxMode, MaxAge: int(sessionAbsolute.Seconds())})
-	return &session{id: st.ID, user: user, csrf: st.CSRF, expires: st.Expires}, nil
+	return &session{id: st.ID, user: user, home: home, csrf: st.CSRF, expires: st.Expires}, nil
 }
 
 // clusterLogin adds a credential for another cluster to the session. The PVE
@@ -357,7 +400,7 @@ func (s *Server) clusterLogin(w http.ResponseWriter, r *http.Request, ss *sessio
 		req.Username = ss.user
 	}
 	user := req.userAtRealm()
-	if !strings.EqualFold(user, ss.user) {
+	if user != ss.user {
 		apiError(w, 400, "identity_mismatch", "log in to every cluster as "+ss.user+"; to use another identity, log out first")
 		return
 	}
@@ -367,24 +410,33 @@ func (s *Server) clusterLogin(w http.ResponseWriter, r *http.Request, ss *sessio
 	}
 	base, c, err := s.baseClient(r.PathValue("id"))
 	if err != nil {
+		s.limiter.succeed("ip|"+clientIP(r), userKey)
 		apiError(w, 404, "not_found", "unknown cluster")
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
 	t, err := base.Login(ctx, user, req.Password, req.OTP)
+	if err == nil && t.User != ss.user {
+		err = &pve.APIError{Status: 401, Message: "cluster answered for a different user"}
+	}
 	if err != nil {
 		var ae *pve.APIError
 		if errors.As(err, &ae) && ae.Message == "second factor required" {
+			s.limiter.succeed("ip|"+clientIP(r), userKey)
 			apiError(w, 401, "otp_required", "this account requires a second factor")
 			return
 		}
-		s.limiter.fail("ip|"+clientIP(r), time.Now())
-		s.limiter.fail(userKey, time.Now())
+		if !errors.As(err, &ae) {
+			s.limiter.succeed("ip|"+clientIP(r), userKey)
+			apiError(w, 502, "cluster_unreachable", "could not reach "+c.Name)
+			return
+		}
 		s.securityEvent(user, c.ID, "auth.login", "Login failed for "+user, false, map[string]string{"ip": clientIP(r)})
 		apiError(w, 401, "login_failed", "login failed")
 		return
 	}
+	s.limiter.succeed("ip|"+clientIP(r), userKey)
 	_ = s.store.PutCred(ss.id, ticketCred(c.ID, t))
 	s.dropView(ss.id, c.ID)
 	writeJSON(w, 200, s.meView(r.Context(), ss))
@@ -432,6 +484,11 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request, ss *session) {
 // ---- realms and OpenID Connect ----
 
 func (s *Server) realms(w http.ResponseWriter, r *http.Request) {
+	ipKey := "realms|" + clientIP(r)
+	if s.rateLimited(w, ipKey) {
+		return
+	}
+	s.limiter.succeed(ipKey)
 	base, _, err := s.baseClient(r.URL.Query().Get("cluster"))
 	if err != nil {
 		apiError(w, 404, "not_found", "unknown cluster")
@@ -441,18 +498,23 @@ func (s *Server) realms(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	rs, err := base.Realms(ctx)
 	if err != nil {
-		apiError(w, 502, "cluster_unreachable", err.Error())
+		apiError(w, 502, "cluster_unreachable", "could not reach the cluster")
 		return
 	}
 	writeJSON(w, 200, rs)
 }
 
+const oidcCookie = "galley_oidc"
+
 type oidcPending struct {
-	cluster, redirect string
-	exp               time.Time
+	cluster, redirect, bind string
+	exp                     time.Time
 }
 
 func (s *Server) publicBase(r *http.Request) string {
+	if s.opt.PublicURL != "" {
+		return strings.TrimRight(s.opt.PublicURL, "/")
+	}
 	scheme := "https"
 	if r.TLS == nil && !s.opt.SecureCookies {
 		scheme = "http"
@@ -471,9 +533,11 @@ func (s *Server) openidStart(w http.ResponseWriter, r *http.Request) {
 		apiError(w, 400, "bad_request", "clusterId and realm required")
 		return
 	}
-	if s.rateLimited(w, "ip|"+clientIP(r)) {
+	ipKey := "oidc|" + clientIP(r)
+	if s.rateLimited(w, ipKey) {
 		return
 	}
+	s.limiter.succeed(ipKey)
 	base, _, err := s.baseClient(req.ClusterID)
 	if err != nil {
 		apiError(w, 400, "bad_request", "unknown cluster")
@@ -484,7 +548,7 @@ func (s *Server) openidStart(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	authURL, err := base.OpenIDAuthURL(ctx, req.Realm, redirect)
 	if err != nil {
-		apiError(w, 502, "openid_failed", "the cluster could not start single sign-on: "+err.Error())
+		apiError(w, 502, "openid_failed", "the cluster could not start single sign-on for this realm")
 		return
 	}
 	u, err := url.Parse(authURL)
@@ -496,9 +560,13 @@ func (s *Server) openidStart(w http.ResponseWriter, r *http.Request) {
 		apiError(w, 502, "openid_failed", "the identity provider URL has no state parameter")
 		return
 	}
+	// Bind the flow to this browser: the callback must present this cookie,
+	// so a callback URL from someone else's login cannot log this browser in.
+	bind := randHex(16)
 	s.mu.Lock()
-	s.oidc[state] = oidcPending{cluster: req.ClusterID, redirect: redirect, exp: time.Now().Add(10 * time.Minute)}
+	s.oidc[state] = oidcPending{cluster: req.ClusterID, redirect: redirect, bind: store.HashID(bind), exp: time.Now().Add(10 * time.Minute)}
 	s.mu.Unlock()
+	http.SetCookie(w, &http.Cookie{Name: oidcCookie, Value: bind, Path: "/api/login/openid", HttpOnly: true, Secure: s.opt.SecureCookies, SameSite: http.SameSiteLaxMode, MaxAge: 600})
 	writeJSON(w, 200, map[string]string{"authUrl": authURL})
 }
 
@@ -512,8 +580,10 @@ func (s *Server) openidCallback(w http.ResponseWriter, r *http.Request) {
 	p, ok := s.oidc[state]
 	delete(s.oidc, state)
 	s.mu.Unlock()
-	if !ok || time.Now().After(p.exp) || code == "" {
-		fail("single sign-on expired or was not started here; try again")
+	bc, cerr := r.Cookie(oidcCookie)
+	http.SetCookie(w, &http.Cookie{Name: oidcCookie, Value: "", Path: "/api/login/openid", MaxAge: -1, HttpOnly: true, Secure: s.opt.SecureCookies, SameSite: http.SameSiteLaxMode})
+	if !ok || time.Now().After(p.exp) || code == "" || cerr != nil || store.HashID(bc.Value) != p.bind {
+		fail("single sign-on expired or was not started in this browser; try again")
 		return
 	}
 	base, c, err := s.baseClient(p.cluster)
@@ -526,10 +596,10 @@ func (s *Server) openidCallback(w http.ResponseWriter, r *http.Request) {
 	t, err := base.OpenIDLogin(ctx, code, state, p.redirect)
 	if err != nil {
 		s.securityEvent("(openid)", c.ID, "auth.login", "Single sign-on failed", false, map[string]string{"ip": clientIP(r)})
-		fail("single sign-on failed: " + err.Error())
+		fail("single sign-on failed")
 		return
 	}
-	ss, err := s.startSession(w, t.User)
+	ss, err := s.startSession(w, t.User, c.ID)
 	if err != nil {
 		fail("could not create a session")
 		return
@@ -541,17 +611,19 @@ func (s *Server) openidCallback(w http.ResponseWriter, r *http.Request) {
 
 // ---- login rate limiting ----
 
-// limiter counts failures per key in a sliding window and also caps total
-// attempts per key, so parallel guessing is throttled too.
+// limiter counts failures per key in a sliding window. allow() records a
+// provisional failure *before* the attempt and succeed() withdraws it, so
+// parallel guesses cannot outrun the budget. A per-key attempt cap per minute
+// also throttles floods.
 type limiter struct {
 	mu   sync.Mutex
-	hits map[string][]time.Time // attempts
-	errs map[string][]time.Time // failures
+	hits map[string][]time.Time // attempts in the last minute
+	errs map[string][]time.Time // failures (incl. in-flight) in the window
 }
 
 const (
 	limWindow      = 15 * time.Minute
-	limFailures    = 8  // failures per key per window
+	limFailures    = 10 // failures per key per window
 	limAttemptsMin = 30 // attempts per key per minute
 )
 
@@ -567,6 +639,7 @@ func prune(ts []time.Time, since time.Time) []time.Time {
 	return ts[i:]
 }
 
+// allow admits an attempt and provisionally counts it as a failure.
 func (l *limiter) allow(key string, now time.Time) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -576,13 +649,26 @@ func (l *limiter) allow(key string, now time.Time) bool {
 		return false
 	}
 	l.hits[key] = append(l.hits[key], now)
+	l.errs[key] = append(l.errs[key], now)
 	return true
 }
 
+// fail is kept for callers that did not go through allow (setup code).
 func (l *limiter) fail(key string, now time.Time) {
 	l.mu.Lock()
 	l.errs[key] = append(l.errs[key], now)
 	l.mu.Unlock()
+}
+
+// succeed withdraws the provisional failure of one attempt per key.
+func (l *limiter) succeed(keys ...string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, k := range keys {
+		if e := l.errs[k]; len(e) > 0 {
+			l.errs[k] = e[:len(e)-1]
+		}
+	}
 }
 
 func (l *limiter) reset(key string) {

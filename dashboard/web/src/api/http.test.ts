@@ -35,6 +35,15 @@ describe('HttpApi', () => {
     expect(cb).not.toHaveBeenCalled();
   });
 
+  it('does not end the session on a 401 that is not "unauthenticated"', async () => {
+    stubFetch(401, { error: 'second factor required', code: 'otp_required' });
+    const api = new HttpApi();
+    const cb = vi.fn();
+    api.onUnauthorized(cb);
+    await expect(api.fleet()).rejects.toMatchObject({ status: 401 });
+    expect(cb).not.toHaveBeenCalled();
+  });
+
   it('does not call a cleared callback, nor on other errors', async () => {
     stubFetch(500, { error: 'boom', code: 'internal' });
     const api = new HttpApi();

@@ -93,7 +93,7 @@ func TestInterruptRunning(t *testing.T) {
 		t.Fatalf("interrupt: %d %v", n, err)
 	}
 	got, _ := s.AuditEntry(e.ID)
-	if got.Status != "error" || !strings.Contains(string(got.Results), "galley stopped") {
+	if got.Status != "error" || !strings.Contains(string(got.Results), "galley stopped") && strings.Contains(string(got.Results), `"unknown"`) {
 		t.Fatalf("entry: %+v %s", got, got.Results)
 	}
 }

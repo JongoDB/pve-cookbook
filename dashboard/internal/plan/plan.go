@@ -147,7 +147,10 @@ func vmids(ts []Target) string {
 }
 
 // Build creates a plan for the user. It never calls mutating APIs.
-func (m *Manager) Build(ctx context.Context, user string, req Request, vis Visible) (*Plan, error) {
+// Build creates a plan for the user. reader is a client acting as that user;
+// it is used for any reads the plan needs, so users never learn more than PVE
+// lets them read. vis limits targets to guests the user can see.
+func (m *Manager) Build(ctx context.Context, user string, req Request, vis Visible, reader *pve.Client) (*Plan, error) {
 	p := &Plan{ID: newID(), Action: req.Action, ClusterID: req.ClusterID, CreatedAt: time.Now().Unix(), owner: user}
 	p.ExpiresAt = p.CreatedAt + int64(TTL.Seconds())
 	if m.fleet.ServiceClient(req.ClusterID) == nil {
@@ -289,8 +292,11 @@ func (m *Manager) Build(ctx context.Context, user string, req Request, vis Visib
 			Node    string `json:"node"`
 			Digest  string `json:"digest"`
 		}
-		if err := m.fleet.ServiceClient(req.ClusterID).Get(ctx, "/cluster/backup/"+url.PathEscape(prm.Job), &job); err != nil {
-			return nil, fmt.Errorf("%w: read job %s: %v", ErrBadRequest, prm.Job, err)
+		if reader == nil {
+			reader = m.fleet.ServiceClient(req.ClusterID)
+		}
+		if err := reader.Get(ctx, "/cluster/backup/"+url.PathEscape(prm.Job), &job); err != nil {
+			return nil, fmt.Errorf("%w: cannot read backup job %s with your permissions", ErrBadRequest, prm.Job)
 		}
 		if job.Pool != "" {
 			return nil, fmt.Errorf("%w: job %s selects guests by pool %q; add the guests to that pool instead", ErrBadRequest, prm.Job, job.Pool)
@@ -401,8 +407,10 @@ func (m *Manager) Take(id, user, confirm string) (*Plan, error) {
 	return p, nil
 }
 
-// TaskTimeout bounds how long Execute waits for one PVE task.
-var TaskTimeout = 30 * time.Minute
+// TaskTimeout bounds how long Execute waits for one PVE task. Migrations and
+// backups of large guests can take hours; past this the step is recorded as
+// "unknown" (still running in PVE), never as a failure.
+var TaskTimeout = 6 * time.Hour
 
 // TaskPoll is how often Execute polls a running task.
 var TaskPoll = time.Second
@@ -434,9 +442,17 @@ func Execute(ctx context.Context, cl *pve.Client, p *Plan, progress func([]Resul
 			emit()
 			tctx, cancel := context.WithTimeout(ctx, TaskTimeout)
 			exit, werr := cl.WaitTask(tctx, r.UPID, TaskPoll)
+			timedOut := errors.Is(tctx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
 			cancel()
 			r.ExitStatus = exit
 			switch {
+			case timedOut || (werr != nil && ctx.Err() != nil):
+				r.Status, r.OK = "unknown", false
+				r.Error = "galley stopped following this task; it may still be running — check the PVE task log"
+				res = res[:len(res)-1]
+				res = append(res, r)
+				emit()
+				return res, false
 			case werr != nil:
 				err = fmt.Errorf("task did not finish: %w", werr)
 			case exit != "OK" && !strings.HasPrefix(exit, "WARNINGS"):

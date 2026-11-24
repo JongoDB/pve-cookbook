@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -82,9 +83,15 @@ func (s *Server) view(ctx context.Context, ss *session, cid string) *userView {
 	wg.Wait()
 	if rerr != nil || perr != nil {
 		nv.err = fmt.Errorf("could not check permissions: %v %v", rerr, perr)
-		// keep the previous good view briefly rather than flapping to "nothing"
-		if v != nil && v.err == nil && time.Since(v.at) < 5*viewTTL {
+		var ae *pve.APIError
+		denied := (errors.As(rerr, &ae) || errors.As(perr, &ae)) && (ae.Status == 401 || ae.Status == 403)
+		// On a transient error keep the previous good view briefly (and do not
+		// cache the failure); never when PVE said the credential is no longer valid.
+		if !denied && v != nil && v.err == nil && time.Since(v.at) < 5*viewTTL {
 			return v
+		}
+		if !denied {
+			return nil
 		}
 	} else {
 		for _, r := range res {
@@ -137,6 +144,9 @@ func (s *Server) findingVisible(v *userView, f fleet.Finding) bool {
 	case "node":
 		return v.nodes[f.Resource.ID]
 	case "storage":
+		if f.Resource.Node == "" && !v.sysAudit { // shared storage: message names nodes
+			return false
+		}
 		return v.canSeeStorage(f.Resource.ID, f.Resource.Node)
 	default:
 		return v.sysAudit
@@ -172,7 +182,7 @@ func filterSummary(v *userView, c fleet.ClusterSummary, guests []fleet.Guest) fl
 	}
 	total := 0
 	for _, g := range guests {
-		if !g.Template && v.guests[g.VMID] {
+		if !g.Template && g.VMID < fleet.ReservedVMIDs && v.guests[g.VMID] {
 			total++
 		}
 	}
@@ -228,13 +238,9 @@ func (s *Server) taskVisible(v *userView, t fleet.Task) bool {
 	if v.sysAudit {
 		return true
 	}
-	if u, _, _ := strings.Cut(t.User, "!"); strings.EqualFold(u, v.pveUser) {
-		return true
-	}
-	if id, err := strconv.Atoi(t.ID); err == nil {
-		return v.guests[id]
-	}
-	return false
+	// Like PVE: without Sys.Audit you see only your own tasks.
+	u, _, _ := strings.Cut(t.User, "!")
+	return u == v.pveUser
 }
 
 func (s *Server) userTasks(ctx context.Context, ss *session, ts []fleet.Task, limit int) []fleet.Task {
@@ -437,8 +443,9 @@ func (s *Server) addCluster(w http.ResponseWriter, r *http.Request, ss *session)
 }
 
 func (s *Server) clusterView(c store.Cluster, detail bool) map[string]any {
-	m := map[string]any{"id": c.ID, "name": c.Name, "status": s.fleet.Status(c.ID)}
+	m := map[string]any{"id": c.ID, "name": c.Name}
 	if detail {
+		m["status"] = s.fleet.Status(c.ID)
 		m["endpoints"], m["tokenId"], m["shareLogin"], m["brokenSecret"] = c.Endpoints, c.TokenID, c.ShareLogin, c.BrokenSecret
 	}
 	return m
@@ -455,6 +462,10 @@ func (s *Server) listClusters(w http.ResponseWriter, r *http.Request, ss *sessio
 	for _, c := range cs {
 		v := vs[c.ID]
 		m := s.clusterView(c, v != nil && v.sysAudit)
+		if v != nil && !v.sysAudit {
+			st := s.fleet.Status(c.ID)
+			m["status"] = map[string]any{"reachable": st.Reachable, "quorate": st.Quorate, "lastPoll": st.LastPoll}
+		}
 		m["authed"] = v != nil
 		m["admin"] = v != nil && v.sysModify
 		out = append(out, m)
@@ -490,6 +501,12 @@ func (s *Server) updateCluster(w http.ResponseWriter, r *http.Request, ss *sessi
 			return
 		}
 		c.Name = *req.Name
+	}
+	if (req.Endpoints != nil || (req.ShareLogin != nil && *req.ShareLogin)) && !s.galleyAdmin(r.Context(), ss) {
+		// Endpoints decide where passwords are sent; sharing decides which clusters
+		// receive passwords typed for another. Both affect more than this cluster.
+		apiError(w, 403, "forbidden", "changing endpoints or enabling shared login requires a galley admin")
+		return
 	}
 	if req.ShareLogin != nil {
 		c.ShareLogin = *req.ShareLogin
@@ -557,12 +574,15 @@ func (s *Server) securityEvent(user, cid, action, title string, ok bool, detail 
 	s.broadcastAudit(e)
 }
 
+// auditVisible: entries are scoped to their cluster. You see an entry if you
+// are logged in to that cluster and either hold Sys.Audit on / there or the
+// entry is yours there (the same PVE identity on the same cluster).
 func (s *Server) auditVisible(ctx context.Context, ss *session, e store.AuditEntry, vs map[string]*userView) bool {
-	if strings.EqualFold(e.User, ss.user) {
-		return true
-	}
 	v := vs[e.ClusterID]
-	return v != nil && v.sysAudit
+	if v == nil {
+		return false
+	}
+	return v.sysAudit || e.ActorUser == v.pveUser
 }
 
 func (s *Server) audit(w http.ResponseWriter, r *http.Request, ss *session) {
@@ -598,7 +618,7 @@ func (s *Server) getPref(w http.ResponseWriter, r *http.Request, ss *session) {
 		apiError(w, 400, "bad_request", "invalid key")
 		return
 	}
-	v, err := s.store.GetPref(ss.user, k)
+	v, err := s.store.GetPref(prefOwner(ss), k)
 	if err != nil {
 		apiError(w, 404, "not_found", "no such preference")
 		return
@@ -619,9 +639,12 @@ func (s *Server) putPref(w http.ResponseWriter, r *http.Request, ss *session) {
 		apiError(w, 400, "bad_request", "body must be JSON (max 64 KiB)")
 		return
 	}
-	if err := s.store.PutPref(ss.user, k, v); err != nil {
+	if err := s.store.PutPref(prefOwner(ss), k, v); err != nil {
 		apiError(w, 500, "store", err.Error())
 		return
 	}
 	w.WriteHeader(204)
 }
+
+// prefOwner scopes preferences to an identity on its home cluster.
+func prefOwner(ss *session) string { return ss.home + ":" + ss.user }

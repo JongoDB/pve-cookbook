@@ -43,8 +43,15 @@ func main() {
 	version := flag.Bool("version", false, "print version")
 	demo := flag.Bool("demo", false, "register an in-process fake cluster (log in as root / secret) — for trying galley without PVE")
 	var admins stringList
-	flag.Var(&admins, "admin", "PVE user (user@realm) allowed to add clusters; repeatable (default: users with Sys.Modify on / in every registered cluster)")
+	flag.Var(&admins, "admin", "galley admin as cluster:user@realm (logged in to that cluster as that user); repeatable. Default: users with Sys.Modify on / in every registered cluster")
+	publicURL := flag.String("public-url", "", "external base URL of galley, e.g. https://galley.example.com (used for single sign-on redirects)")
 	flag.Parse()
+	for _, a := range admins {
+		if c, u, ok := strings.Cut(a, ":"); !ok || c == "" || !strings.Contains(u, "@") {
+			fmt.Fprintf(os.Stderr, "--admin %q: use cluster:user@realm\n", a)
+			os.Exit(2)
+		}
+	}
 	if *version {
 		fmt.Println(server.Version)
 		return
@@ -88,7 +95,7 @@ func main() {
 		log.Error("embedded UI", "err", err)
 		os.Exit(1)
 	}
-	api := server.New(st, poller, static, log, server.Options{DataDir: *data, SecureCookies: !*plainHTTP, Admins: admins})
+	api := server.New(st, poller, static, log, server.Options{DataDir: *data, SecureCookies: !*plainHTTP, Admins: admins, PublicURL: *publicURL})
 	srv := &http.Server{
 		Addr:              *listen,
 		Handler:           api.Handler(),
