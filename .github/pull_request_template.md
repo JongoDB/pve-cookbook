@@ -13,6 +13,7 @@
 - [ ] Release note added to `dashboard/docs/changelog.md` (What's new) for anything users notice
 - [ ] New UI actions are draftable by the assistant and MCP agents (`propose_action` / tools in `internal/server/tools.go`)
 - [ ] Tests added or updated
+- [ ] e2e tests pass (`cd dashboard && make e2e`) and are updated for new or changed UI (`dashboard/e2e/`)
 
 ## Merge Danger
 
