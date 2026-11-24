@@ -103,6 +103,7 @@ func New(st *store.Store, f *fleet.Poller, static fs.FS, log *slog.Logger, opt O
 		log.Warn("marked interrupted changes as failed", "count", n)
 	}
 	s.streams, s.stopStreams = context.WithCancel(ctx)
+	s.plans.Schema = s.clusterSchema
 	s.initSetupToken()
 	go s.maintain()
 	return s
@@ -187,6 +188,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/metrics", s.authed(s.metrics))
 	mux.HandleFunc("POST /api/metrics", s.authed(s.metricsBatch))
 	mux.HandleFunc("GET /api/clusters/{id}/pve/{path...}", s.authed(s.pveGet))
+	mux.HandleFunc("GET /api/clusters/{id}/schema", s.authed(s.schemaInfo))
 	mux.HandleFunc("GET /api/prefs/{key}", s.authed(s.getPref))
 	mux.HandleFunc("PUT /api/prefs/{key}", s.authed(s.putPref))
 	mux.HandleFunc("GET /api/events", s.authed(s.events))

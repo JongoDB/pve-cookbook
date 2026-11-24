@@ -152,6 +152,33 @@ HA services in state `error`, `fence` or `recovery`.
 
 `GET /api/nodes/{clusterId}/{node}/targets` → `["pve2","pve3"]` (migration targets, online nodes except source)
 
+## Metrics (one model for every resource)
+
+`GET /api/metrics?cluster=&kind=cluster|node|guest|storage&id=&timeframe=hour|day|week|month|year&cf=AVERAGE|MAX`
+→ `{"query":{…},"t":[unix…],"series":{"cpu":[0.12,null,…],…},"error"?}`
+
+`POST /api/metrics {"queries":[MetricQuery…]}` (≤ 32) → `[MetricSeries]` in order.
+
+Normalized from PVE's rrddata: `cpu` (0–1), `cpus`, `memUsed`, `memTotal`, `swapUsed`,
+`swapTotal`, `rootUsed`, `rootTotal`, `diskUsed`, `diskTotal` (bytes), `netIn`, `netOut`,
+`diskRead`, `diskWrite` (bytes/s), `ioWait` (0–1), `load`, `pressureCpu`, `pressureIo`,
+`pressureMem` (PSI some avg10, %). `null` is a missing sample. `id` is a node name, a vmid,
+or `storage[@node]`; `kind=cluster` sums the cluster's online nodes (cpu weighted by cpus) and
+needs `Sys.Audit` on `/`. Each query is authorized against the user's PVE view.
+
+## Reading anything from PVE
+
+`GET /api/clusters/{id}/pve/{path}?{query}` → `{"data": …}` — a GET against the PVE API
+**as the user** (PVE checks permissions). Detail pages and the resource editor read through it.
+
+## API schema (create, read, update, delete for everything)
+
+galley loads each cluster's own API schema (`/pve-docs/api-viewer/apidoc.js`, matching that
+cluster's PVE version; cached 6 h).
+
+- `GET /api/clusters/{id}/schema` → `[{"path":"/nodes/{node}/qemu/{vmid}/config","text","methods":{"GET":"…","PUT":"…"}}]`
+- `GET /api/clusters/{id}/schema?path=/nodes/pve1/qemu/120/config` → `{"path","text","info":{method: {description, permissions, parameters, returns}},"vars":{"node":"pve1","vmid":"120"}}`
+
 ## Plans (every mutation goes through a plan)
 
 `POST /api/plans` `{"action","clusterId","params":{}}` → `Plan`
@@ -169,6 +196,12 @@ MVP actions (`params`):
 | `guest.snapshot` | `{"targets":[…],"name":"pre-upgrade","description"?}` | no |
 | `guest.destroy` | `{"targets":[{"vmid","node","type"}]}` | **yes** — `confirmText` = `destroy <vmid>[,<vmid>…]` |
 | `backup.protect` | `{"vmids":[131],"job":"nightly-all"}` | no |
+| `api.call` | `{"title"?,"summary"?,"calls":[{"method":"POST\|PUT\|DELETE","path":"/nodes/pve1/qemu/300/config","body":{"hostpci1":"mapping=gpu-a2-1,pcie=1"}}]}` (1–20 calls) | DELETEs and destructive paths (`status/stop`, `rollback`, disk wipes…) — `confirmText` = `delete qemu/300`, `confirm …` or `apply N changes` |
+
+`api.call` is the generic create/update/delete: each call is validated against the cluster's
+API schema (method exists, every body key is a parameter — indexed families like `net0`
+match `net[n]` — types, ranges, enums, required parameters) and shown with its `pvesh`
+equivalent. It runs as the user like every other change.
 
 `POST /api/plans/{id}/run` `{"confirm"?: "destroy 120"}` → `202 {"auditId","status":"running","results":[]}`
 

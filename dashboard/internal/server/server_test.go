@@ -616,3 +616,46 @@ func TestPVEReadPassThroughRunsAsUser(t *testing.T) {
 		t.Fatal("path traversal accepted")
 	}
 }
+
+func TestGenericAPICallChange(t *testing.T) {
+	h := newHarness(t)
+	h.setup()
+	root := h.login("root@pam", "secret")
+	var paths []map[string]any
+	if code := root.do("GET", "/api/clusters/pve-lab/schema", nil, &paths); code != 200 || len(paths) == 0 {
+		t.Fatalf("schema: %d %d", code, len(paths))
+	}
+	var node struct {
+		Path string
+		Vars map[string]string
+		Info map[string]any
+	}
+	if code := root.do("GET", "/api/clusters/pve-lab/schema?path=/nodes/pve1/qemu/120/config", nil, &node); code != 200 || node.Path != "/nodes/{node}/qemu/{vmid}/config" || node.Info["PUT"] == nil {
+		t.Fatalf("schema node: %d %+v", code, node)
+	}
+	// invalid parameters never become a change
+	var e struct{ Code, Error string }
+	if code := root.do("POST", "/api/plans", map[string]any{"action": "api.call", "clusterId": "pve-lab", "params": map[string]any{
+		"calls": []map[string]any{{"method": "PUT", "path": "/nodes/pve1/qemu/300/config", "body": map[string]string{"cores": "zero"}}}}}, &e); code != 400 || !strings.Contains(e.Error, "integer") {
+		t.Fatalf("invalid call accepted: %d %+v", code, e)
+	}
+	// a valid bundle: attach a GPU and set cores, as one change
+	e1 := root.runAndWait("api.call", map[string]any{"title": "Attach second GPU to llm-vllm", "calls": []map[string]any{
+		{"method": "PUT", "path": "/nodes/pve1/qemu/300/config", "body": map[string]string{"hostpci1": "mapping=gpu-a2-1,pcie=1", "cores": "16"}},
+	}}, "")
+	if !e1.OK {
+		t.Fatalf("api.call: %+v", e1)
+	}
+	calls := h.fake.Recorded()
+	last := calls[len(calls)-1]
+	if last.Method != "PUT" || last.Form["hostpci1"] != "mapping=gpu-a2-1,pcie=1" || last.User != "root@pam" {
+		t.Fatalf("call: %+v", last)
+	}
+	// deletes need typed confirmation
+	var p plan.Plan
+	root.do("POST", "/api/plans", map[string]any{"action": "api.call", "clusterId": "pve-lab", "params": map[string]any{
+		"calls": []map[string]any{{"method": "DELETE", "path": "/nodes/pve1/qemu/300", "body": map[string]string{"purge": "1"}}}}}, &p)
+	if !p.Destructive || p.ConfirmText != "delete qemu/300" || p.Steps[0].CLI != "pvesh delete /nodes/pve1/qemu/300 --purge 1" {
+		t.Fatalf("delete plan: %+v", p)
+	}
+}

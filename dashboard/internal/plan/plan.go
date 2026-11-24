@@ -20,6 +20,7 @@ import (
 
 	"github.com/JongoDB/pve-cookbook/dashboard/internal/fleet"
 	"github.com/JongoDB/pve-cookbook/dashboard/internal/pve"
+	"github.com/JongoDB/pve-cookbook/dashboard/internal/schema"
 )
 
 // Step is one API call.
@@ -98,6 +99,9 @@ type Visible func(vmid int) bool
 
 // Manager builds and stores pending plans.
 type Manager struct {
+	// Schema returns the cluster's API schema (for generic api.call plans).
+	Schema func(ctx context.Context, cluster string) (*schema.Schema, error)
+
 	fleet *fleet.Poller
 	mu    sync.Mutex
 	plans map[string]*Plan
@@ -331,6 +335,10 @@ func (m *Manager) Build(ctx context.Context, user string, req Request, vis Visib
 			Path: "/cluster/backup/" + url.PathEscape(prm.Job), Body: body, CLI: cli})
 		p.Title = fmt.Sprintf("Protect %s with %s", joinIDs(prm.VMIDs), prm.Job)
 		p.Summary = "Takes effect from the job's next scheduled run."
+	case "api.call":
+		if err := m.buildAPICall(ctx, p, req); err != nil {
+			return nil, err
+		}
 	default:
 		return nil, fmt.Errorf("%w: unknown action %q", ErrBadRequest, req.Action)
 	}
@@ -537,3 +545,88 @@ func removeIDs(a, rm []int) []int {
 }
 
 func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+
+// Call is one raw PVE API call in an api.call plan.
+type Call struct {
+	Method string            `json:"method"`
+	Path   string            `json:"path"`
+	Body   map[string]string `json:"body"`
+}
+
+var (
+	apiPathRe       = regexp.MustCompile(`^/[A-Za-z0-9_.:@!%+=,\-/]+$`)
+	destructivePath = regexp.MustCompile(`/status/(stop|reset)$|/rollback$|/wipedisk$|/disks/(lvm|lvmthin|zfs|directory)/[^/]+$|/osd/[^/]+$`)
+)
+
+// buildAPICall turns arbitrary API calls into a reviewable plan. Every call is
+// validated against the cluster's own API schema; PVE checks permissions when
+// it runs as the user.
+func (m *Manager) buildAPICall(ctx context.Context, p *Plan, req Request) error {
+	var prm struct {
+		Calls   []Call `json:"calls"`
+		Title   string `json:"title"`
+		Summary string `json:"summary"`
+	}
+	if err := json.Unmarshal(req.Params, &prm); err != nil {
+		return fmt.Errorf("%w: %v", ErrBadRequest, err)
+	}
+	if len(prm.Calls) == 0 || len(prm.Calls) > 20 {
+		return fmt.Errorf("%w: 1–20 calls required", ErrBadRequest)
+	}
+	if m.Schema == nil {
+		return fmt.Errorf("%w: API schema unavailable", ErrBadRequest)
+	}
+	sc, err := m.Schema(ctx, req.ClusterID)
+	if err != nil {
+		return fmt.Errorf("%w: could not load the cluster's API schema: %v", ErrBadRequest, err)
+	}
+	deletes := 0
+	for i, c := range prm.Calls {
+		c.Method = strings.ToUpper(c.Method)
+		if c.Method != http.MethodPost && c.Method != http.MethodPut && c.Method != http.MethodDelete {
+			return fmt.Errorf("%w: call %d: method must be POST, PUT or DELETE (reads need no change)", ErrBadRequest, i+1)
+		}
+		if !apiPathRe.MatchString(c.Path) || strings.Contains(c.Path, "..") || strings.Contains(c.Path, "//") {
+			return fmt.Errorf("%w: call %d: invalid path", ErrBadRequest, i+1)
+		}
+		if c.Body == nil {
+			c.Body = map[string]string{}
+		}
+		meth, err := sc.Validate(c.Method, c.Path, c.Body)
+		if err != nil {
+			return fmt.Errorf("%w: call %d (%s %s): %v", ErrBadRequest, i+1, c.Method, c.Path, err)
+		}
+		desc, _, _ := strings.Cut(strings.TrimSpace(meth.Description), "\n")
+		if desc == "" {
+			desc = c.Method + " " + c.Path
+		}
+		if c.Method == http.MethodDelete || destructivePath.MatchString(c.Path) {
+			p.Destructive = true
+			deletes++
+		}
+		p.Steps = append(p.Steps, Step{Description: desc + " (" + c.Path + ")", Method: c.Method, Path: c.Path, Body: c.Body,
+			CLI: schema.CLI(c.Method, c.Path, c.Body)})
+	}
+	p.Title = strings.TrimSpace(prm.Title)
+	if p.Title == "" || len(p.Title) > 120 {
+		p.Title = p.Steps[0].Description
+		if len(p.Steps) > 1 {
+			p.Title = fmt.Sprintf("%d API changes", len(p.Steps))
+		}
+	}
+	if len(prm.Summary) <= 500 {
+		p.Summary = prm.Summary
+	}
+	if p.Destructive {
+		if len(prm.Calls) == 1 {
+			segs := strings.Split(strings.Trim(prm.Calls[0].Path, "/"), "/")
+			p.ConfirmText = "delete " + strings.Join(segs[max(0, len(segs)-2):], "/")
+			if prm.Calls[0].Method != http.MethodDelete {
+				p.ConfirmText = "confirm " + strings.Join(segs[max(0, len(segs)-2):], "/")
+			}
+		} else {
+			p.ConfirmText = fmt.Sprintf("apply %d changes", len(prm.Calls))
+		}
+	}
+	return nil
+}

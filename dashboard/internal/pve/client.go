@@ -494,3 +494,31 @@ func (d DynamicAuth) apply(r *http.Request) {
 		a.apply(r)
 	}
 }
+
+// GetStatic fetches a non-API file served by pveproxy (e.g. the API schema at
+// /pve-docs/api-viewer/apidoc.js), with the same TLS pinning and failover.
+func (c *Client) GetStatic(ctx context.Context, path string, max int64) ([]byte, error) {
+	var lastErr error
+	for _, ep := range c.endpoints {
+		u := "https://" + HostPort(ep.Host) + path
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := c.http.Do(req)
+		if err != nil {
+			lastErr = err
+			if ctx.Err() != nil {
+				return nil, err
+			}
+			continue
+		}
+		b, err := io.ReadAll(io.LimitReader(resp.Body, max))
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("pve: GET %s: %s", path, resp.Status)
+		}
+		return b, err
+	}
+	return nil, lastErr
+}

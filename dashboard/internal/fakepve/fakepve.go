@@ -211,6 +211,11 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(595)
 		return
 	}
+	if r.URL.Path == "/pve-docs/api-viewer/apidoc.js" {
+		w.Header().Set("Content-Type", "application/javascript")
+		_, _ = w.Write([]byte(APIDoc))
+		return
+	}
 	p := strings.TrimPrefix(r.URL.Path, "/api2/json")
 	_ = r.ParseForm()
 	if p == "/access/ticket" && r.Method == http.MethodPost {
