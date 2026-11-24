@@ -1,8 +1,8 @@
 import type {
   SetupInfo,
-  AddClusterRequest, Api, AssistantSettings, AssistantSettingsUpdate, AssistantStatus, AuditEntry, ChatEvent, ChatRequest,
+  AddClusterRequest, AgentToken, CreateAgentTokenRequest, CreatedAgentToken, Api, AssistantSettings, AssistantSettingsUpdate, AssistantStatus, AuditEntry, ChatEvent, ChatRequest,
   Cluster, ClusterLoginRequest, ConsoleRequest, ConsoleTicket, EventHandlers, Fleet, Guest, GuestFilter, HostScan, HostsInfo,
-  LoginRequest, Me, MetricQuery, MetricSeries, Plan, PlanRequest, Probe, Realm, RunResult, SchemaPathEntry, SchemaPathInfo, Task,
+  Doc, DocSummary, LoginRequest, Me, MetricQuery, MetricSeries, Plan, PlanRequest, Probe, Realm, RunResult, SchemaPathEntry, SchemaPathInfo, Task,
   UpdateClusterRequest,
 } from './types';
 import { readChatStream } from '../lib/sse';
@@ -135,6 +135,7 @@ export class HttpApi implements Api {
     return r.data;
   }
   createPlan(r: PlanRequest) { return this.req<Plan>('POST', '/plans', r); }
+  async plans() { return (await this.req<Plan[] | null>('GET', '/plans')) ?? []; }
   async runPlan(id: string, confirm?: string): Promise<RunResult> {
     const r = await this.req<Partial<RunResult> & { auditId: string }>('POST', `/plans/${encodeURIComponent(id)}/run`, confirm ? { confirm } : {});
     return { ...r, results: Array.isArray(r.results) ? r.results : [] };
@@ -173,6 +174,11 @@ export class HttpApi implements Api {
     await this.req<void>('PUT', `/clusters/${enc(clusterId)}/hosts/${enc(node)}`, { fingerprint });
   }
   async unpinHost(clusterId: string, node: string) { await this.req<void>('DELETE', `/clusters/${enc(clusterId)}/hosts/${enc(node)}`); }
+  async agentTokens() { return (await this.req<AgentToken[] | null>('GET', '/agent-tokens')) ?? []; }
+  createAgentToken(r: CreateAgentTokenRequest) { return this.req<CreatedAgentToken>('POST', '/agent-tokens', r); }
+  deleteAgentToken(id: string) { return this.req<void>('DELETE', `/agent-tokens/${enc(id)}`); }
+  docs() { return this.req<DocSummary[]>('GET', '/docs'); }
+  doc(slug: string) { return this.req<Doc>('GET', `/docs/${enc(slug)}`); }
   openConsole(clusterId: string, r: ConsoleRequest) { return this.req<ConsoleTicket>('POST', `/clusters/${enc(clusterId)}/console`, r); }
 
   /**

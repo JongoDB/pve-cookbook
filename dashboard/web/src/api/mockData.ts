@@ -66,7 +66,9 @@ TX:		off
 export type ScriptStep =
   | { kind: 'text'; text: string }
   | { kind: 'tool'; name: string; input: Record<string, unknown>; error?: string }
-  | { kind: 'change' };
+  | { kind: 'change' }
+  /** a galley.* action proposed with propose_action */
+  | { kind: 'galley'; action: string; clusterId: string; params: Record<string, unknown> };
 
 export function assistantScript(message: string): { steps: ScriptStep[]; change?: 'gpu' } {
   const m = message.toLowerCase();
@@ -84,6 +86,19 @@ export function assistantScript(message: string): { steps: ScriptStep[]; change?
       ],
     };
   }
+  if (/\bshare\b|shared login|share the login/.test(m)) {
+    return {
+      steps: [
+        { kind: 'tool', name: 'search_docs', input: { query: 'share a cluster login' } },
+        { kind: 'tool', name: 'read_doc', input: { slug: 'clusters-and-access' } },
+        { kind: 'tool', name: 'pve_get', input: { cluster: 'pve-lab', path: '/access/permissions' } },
+        { kind: 'text', text: 'Sharing a login lets other people use **pve-lab** in galley with the service token instead of their own PVE login. It is a galley setting, so nothing on the cluster changes. See [Clusters and access](/help/clusters-and-access) for what that means for the audit trail.\n\n' },
+        { kind: 'tool', name: 'propose_action', input: { action: 'galley.cluster.update', cluster: 'pve-lab', title: 'Share the pve-lab login' } },
+        { kind: 'galley', action: 'galley.cluster.update', clusterId: 'pve-lab', params: { shareLogin: true } },
+        { kind: 'text', text: 'After you apply it, the setting shows on the [Clusters](/clusters) page, where you can turn it off again.' },
+      ],
+    };
+  }
   if (/fail|broken|error/.test(m)) {
     return {
       steps: [
@@ -93,11 +108,20 @@ export function assistantScript(message: string): { steps: ScriptStep[]; change?
       ],
     };
   }
+  if (/how do|how to|how does|where|help|docs|guide/.test(m)) {
+    return {
+      steps: [
+        { kind: 'tool', name: 'search_docs', input: { query: message.replace(/[?.!]+$/, '').slice(0, 60) } },
+        { kind: 'tool', name: 'read_doc', input: { slug: 'getting-started' } },
+        { kind: 'text', text: 'Every change in galley waits in **Changes** until you apply it:\n\n1. Start it from a page, for example the actions on [web01 (120)](/guests/pve-lab/120), or from [Create](/create).\n2. Review the steps and the exact commands in the drawer.\n3. Apply it. It runs with your own PVE login, so PVE\'s permission checks apply.\n\nThe guide explains this in [How permissions work](/help/getting-started#how-permissions-work). For PVE\'s own side, see the [PVE admin guide](https://pve.proxmox.com/pve-docs/pve-admin-guide.html).' },
+      ],
+    };
+  }
   return {
     steps: [
       { kind: 'tool', name: 'get_findings', input: {} },
       { kind: 'tool', name: 'get_metrics', input: { cluster: 'pve-lab', kind: 'node', id: 'pve1', timeframe: 'hour' } },
-      { kind: 'text', text: 'Two things need you on **pve-lab**:\n\n- Storage `nas-backup` is not available on pve1, pve2 or pve3. Backups that target it will fail tonight.\n- grafana (131) is not in any backup job: it is on the exclude list of `nightly-all`.\n\npve1 logged 33 corosync retransmits in 10 minutes. Corosync shares its only link with guest traffic, so bursts will recur until it has a dedicated link.\n\nTo check the NFS server from a node:\n\n```\nshowmount -e 192.0.2.40\npvesm status --storage nas-backup\n```' },
+      { kind: 'text', text: 'Two things need you on **pve-lab**:\n\n- Storage `nas-backup` is not available on pve1, pve2 or pve3. Backups that target it will fail tonight.\n- [grafana (131)](/guests/pve-lab/131) is not in any backup job: it is on the exclude list of `nightly-all`. See [Protection](/protection).\n\npve1 logged 33 corosync retransmits in 10 minutes. Corosync shares its only link with guest traffic, so bursts will recur until it has a dedicated link.\n\nTo check the NFS server from a node:\n\n```\nshowmount -e 192.0.2.40\npvesm status --storage nas-backup\n```' },
     ],
   };
 }

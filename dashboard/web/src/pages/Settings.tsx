@@ -5,6 +5,7 @@ import { errMsg, useApp, useCrumbs } from '../state/app';
 import { useAsync } from '../lib/hooks';
 import { ApiErrorView } from '../components/ClusterLogin';
 import { Empty } from '../components/ui';
+import { HelpLink } from '../components/HelpLink';
 
 const BASE_URL_EXAMPLES: { url: string; what: string }[] = [
   { url: 'https://api.openai.com/v1', what: 'OpenAI' },
@@ -25,14 +26,17 @@ export function Settings() {
     return (
       <div className="page">
         <h1>Settings</h1>
-        <Empty title="Settings need a galley admin">A galley admin holds Sys.Modify on / in every registered cluster. Ask one to change galley-wide settings.</Empty>
+        <Empty title="Settings need a galley admin">
+          Galley admins are users with Sys.Modify on / in every registered cluster who are logged in to all of them in this session,
+          or users listed with <code>galley --admin cluster:user@realm</code>. Ask one to change galley-wide settings.
+        </Empty>
       </div>
     );
   }
   return (
     <div className="page">
       <div className="page-head">
-        <h1>Settings</h1>
+        <h1>Settings</h1><HelpLink />
         <div className="sub">Galley-wide settings. Every change here is recorded in the audit log.</div>
       </div>
       <AssistantSettingsForm />

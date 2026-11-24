@@ -7,6 +7,7 @@ import { ApiErrorView } from '../components/ClusterLogin';
 import { CopyButton, Empty } from '../components/ui';
 import { auditBadge } from './overview/Widgets';
 import { StepOutput } from '../components/Drawer';
+import { HelpLink } from '../components/HelpLink';
 
 export function Audit() {
   useCrumbs([{ label: 'Audit log' }]);
@@ -17,7 +18,7 @@ export function Audit() {
   return (
     <div className="page">
       <div className="page-head">
-        <h1>Audit log</h1>
+        <h1>Audit log</h1><HelpLink />
         <div className="sub">Changes, logins and cluster edits, with the exact commands. Copy any entry to repeat it from a shell.</div>
       </div>
       {error ? <ApiErrorView error={error} what="the audit log" onRetry={reload} /> : null}

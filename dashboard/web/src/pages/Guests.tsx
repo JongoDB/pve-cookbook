@@ -8,6 +8,7 @@ import { formatBytes, formatPct } from '../lib/units';
 import { guestPath, nodePath } from '../lib/links';
 import type { GuestAction } from '../lib/actions';
 import { guestTone } from './GuestDetail';
+import { HelpLink } from '../components/HelpLink';
 
 const key = (g: Guest) => `${g.clusterId}:${g.vmid}`;
 
@@ -84,7 +85,7 @@ export function Guests() {
   return (
     <div className="page">
       <div className="page-head">
-        <h1>Guests</h1>
+        <h1>Guests</h1><HelpLink />
         <div className="sub">{guests ? `${rows.length} of ${total} guests${fleet && multi ? ` on ${fleet.totals.clusters} clusters` : ''}` : ''}</div>
       </div>
 

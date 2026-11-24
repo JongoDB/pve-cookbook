@@ -13,6 +13,7 @@ import { ApiErrorView } from '../components/ClusterLogin';
 import { ClusterPicker, useClusterParam } from '../components/ClusterPicker';
 import { Badge, CopyButton } from '../components/ui';
 import { Tabs } from './GuestDetail';
+import { HelpLink } from '../components/HelpLink';
 
 const KINDS = [{ id: 'vm', label: 'Virtual machine' }, { id: 'ct', label: 'Container' }] as const;
 type Kind = (typeof KINDS)[number]['id'];
@@ -40,7 +41,7 @@ export function Create() {
   return (
     <div className="page">
       <div className="page-head">
-        <h1>Create</h1>
+        <h1>Create</h1><HelpLink />
         <ClusterPicker value={cluster} onChange={setCluster} />
         <div className="sub">Builds the exact PVE API calls and opens them in Changes. Nothing is created until you apply it.</div>
       </div>

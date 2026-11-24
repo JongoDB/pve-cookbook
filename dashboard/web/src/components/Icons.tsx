@@ -13,3 +13,4 @@ export const IconMenu = () => <svg {...base}><path d="M4 7h16M4 12h16M4 17h16" /
 export const IconAssistant = () => <svg {...base}><path d="M5 5h14v10H9l-4 4z" /></svg>;
 export const IconChanges = () => <svg {...base}><path d="M5 7h10M5 12h14M5 17h8" /><path d="M17 5l2 2-2 2" /></svg>;
 export const IconActivity = () => <svg {...base}><path d="M3 12h4l3-7 4 14 3-7h4" /></svg>;
+export const IconHelp = () => <svg {...base}><circle cx="12" cy="12" r="9" /><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.7.3-1 .8-1 1.5v.4" /><path d="M12 17h0" /></svg>;

@@ -7,6 +7,7 @@ import { guestPath } from '../lib/links';
 import { ApiErrorView } from '../components/ClusterLogin';
 import { Badge, Empty, Meter } from '../components/ui';
 import { staleReason } from './overview/Widgets';
+import { HelpLink } from '../components/HelpLink';
 
 interface BackupJob { id: string; schedule?: string; starttime?: string; dow?: string; storage?: string; mode?: string; all?: number; vmid?: string; exclude?: string; pool?: string; enabled?: number; comment?: string }
 
@@ -51,7 +52,7 @@ export function Protection() {
 
   return (
     <div className="page">
-      <div className="page-head"><h1>Protection</h1></div>
+      <div className="page-head"><h1>Protection</h1><HelpLink /></div>
       <div className="grid-3">
         {fleet.clusters.map((c) => {
           const why = c.backups.known === false ? `Could not read backup coverage${c.errors?.['backup-coverage'] ? `: ${c.errors['backup-coverage']}` : ''}` : staleReason(c);

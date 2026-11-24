@@ -21,6 +21,8 @@ import { Hosts } from './pages/Hosts';
 import { ApiExplorer } from './pages/ApiExplorer';
 import { Settings } from './pages/Settings';
 import { Console } from './pages/Console';
+import { HelpDoc, HelpIndex } from './pages/Help';
+import { Agents } from './pages/Agents';
 import { SESSION_ENDED } from './lib/auth';
 
 type Boot = { phase: 'loading' } | { phase: 'error'; message: string } | { phase: 'setup' } | { phase: 'login'; notice?: string } | { phase: 'ready'; me: Me };
@@ -91,6 +93,9 @@ export function App({ api }: { api: Api }) {
                 <Route path="/hosts" element={<Hosts />} />
                 <Route path="/api-explorer" element={<ApiExplorer />} />
                 <Route path="/settings" element={<Settings />} />
+                <Route path="/agents" element={<Agents />} />
+                <Route path="/help" element={<HelpIndex />} />
+                <Route path="/help/:slug" element={<HelpDoc />} />
                 <Route path="/console/:cluster/:type/:node/:vmid?" element={<Console />} />
                 <Route path="*" element={<Navigate to="/" replace />} />
               </Routes>

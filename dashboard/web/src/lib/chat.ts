@@ -2,6 +2,7 @@
 // and keeps streaming while the admin reviews a draft in Changes.
 import { ApiError } from '../api/http';
 import type { Api, ChatEvent, Plan, ToolEvent } from '../api/types';
+import { GALLEY_ACTION_LABEL } from './plan';
 
 export type ChatPart = { t: 'text'; text: string } | { t: 'tool'; tool: ToolEvent } | { t: 'change'; plan: Plan };
 
@@ -63,6 +64,12 @@ export function toolLabel(t: ToolEvent): string {
     case 'list_tasks': return 'Read the task log';
     case 'api_schema': return str(i.path) ? `Looked up ${str(i.path)} in the API schema` : 'Looked up the API schema';
     case 'propose_change': return `Drafted a change${str(i.title) ? `: ${str(i.title)}` : ''}`;
+    case 'propose_action': {
+      const what = str(i.title) || GALLEY_ACTION_LABEL[str(i.action)] || str(i.action);
+      return `Drafted a change${what ? `: ${what}` : ''}`;
+    }
+    case 'search_docs': return str(i.query) ? `Searched the docs for “${str(i.query)}”` : 'Searched the docs';
+    case 'read_doc': return `Read help: ${str(i.slug) || 'a page'}`;
     case 'propose_host_command': return `Drafted a command for ${str(i.node) || 'a node'}`;
     default: return t.name.replace(/_/g, ' ');
   }

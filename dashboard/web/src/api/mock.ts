@@ -2,8 +2,8 @@
 // Generic demo data only: two clusters, ~20 guests, two NVIDIA A2 GPUs on pve1.
 import { ApiError } from './http';
 import type {
-  AddClusterRequest, Api, AssistantConfig, CredentialMode, HostTransport, AssistantSettingsUpdate, AuditEntry, ChatEvent, ChatRequest, Cluster, ClusterLoginRequest,
-  ClusterSummary, ConsoleRequest, EventHandlers, Finding, Fleet, Guest, GuestFilter, GuestTarget, HostPin, HostsInfo, LoginRequest, Me, MetricName,
+  AddClusterRequest, AgentToken, CreateAgentTokenRequest, CreatedAgentToken, Api, AssistantConfig, CredentialMode, HostTransport, AssistantSettingsUpdate, AuditEntry, ChatEvent, ChatRequest, Cluster, ClusterLoginRequest,
+  ClusterSummary, ConsoleRequest, Doc, DocSummary, EventHandlers, Finding, Fleet, Guest, GuestFilter, GuestTarget, HostPin, HostsInfo, LoginRequest, Me, MetricName,
   MetricQuery, MetricSeries, Plan, PlanRequest, Probe, Realm, RunResult, SchemaPathEntry, SchemaPathInfo, Step, Storage, Task, Timeframe,
   UpdateClusterRequest,
 } from './types';
@@ -13,6 +13,18 @@ import {
   MOCK_HOST_OUTPUT, assistantScript, hostFingerprint, mockAuthorizedKey, mockPci, mockVnets, seedMappings, type MockMapping,
 } from './mockData';
 import { pveshCli, shellQuote } from '../lib/schemaForm';
+import { parseDocFile } from '../lib/docs';
+
+// The real user guide (dashboard/docs/user/*.md), bundled at build time like the Go binary embeds it.
+const DOC_FILES = import.meta.glob('../../../docs/user/*.md', { query: '?raw', import: 'default', eager: true }) as Record<string, string>;
+const MOCK_DOCS = Object.entries(DOC_FILES)
+  .map(([path, raw]) => ({ slug: path.replace(/^.*\//, '').replace(/\.md$/, ''), raw }))
+  .filter((f) => f.slug.toLowerCase() !== 'readme')
+  .map((f) => parseDocFile(f.slug, f.raw))
+  .sort((a, b) => a.order - b.order || a.slug.localeCompare(b.slug));
+
+/** galley.* actions: galley's own configuration, applied by galley through Changes (internal/server/galley_actions.go). */
+const GALLEY_ACTIONS = ['galley.cluster.update', 'galley.cluster.remove', 'galley.host.pin', 'galley.host.unpin', 'galley.prefs.set'];
 
 const GiB = 1024 ** 3;
 const TiB = 1024 ** 4;
@@ -253,7 +265,7 @@ export class MockApi implements Api {
   private clustersState: MockCluster[] = this.needsSetup ? [] : seedClusters();
   private guestsState: Guest[] = this.needsSetup ? [] : seedGuests();
   private session: Me | null = null;
-  private plans = new Map<string, Plan & { ran?: boolean }>();
+  private planMap = new Map<string, Plan & { ran?: boolean }>();
   private auditLog: AuditEntry[] = [];
   private taskLog: Task[] = [];
   private backupJob = new Set<number>();
@@ -265,6 +277,10 @@ export class MockApi implements Api {
   private assistantKey = 'demo-key';
   private conversations = new Map<string, { bytes: number; busy: boolean }>();
   private pins = new Map<string, HostPin>();
+  private agentTokenList: AgentToken[] = [
+    { id: '3f9a1c0b7d2e4a51', name: 'ci-runner', scope: 'draft', created: now() - 86400 * 6, lastSeen: now() - 3600 * 2, expires: now() + 86400 * 24 },
+  ];
+  private seededAgentDraft = false;
   private mappings: MockMapping[] = seedMappings();
   /** config edits applied by api.call changes; null = deleted key */
   private configEdits = new Map<string, Record<string, string | null>>();
@@ -538,7 +554,7 @@ export class MockApi implements Api {
       user: `${r.username}@${r.realm}`, csrf: rid(), version: '0.2.0-mock', galleyAdmin: true, expires: now() + 4 * 3600, maxExpires: now() + 12 * 3600,
       clusters: this.clustersState.map((c) => {
         const authed = c.id === r.clusterId || c.id !== 'edge-01';
-        return { id: c.id, name: c.name, authed, admin: authed, credentialMode: c.credentialMode ?? 'ticket', loginExpired: !authed && lapsed };
+        return { id: c.id, name: c.name, authed, admin: authed, hostAdmin: authed, credentialMode: c.credentialMode ?? 'ticket', loginExpired: !authed && lapsed };
       }),
     };
     return this.session;
@@ -549,7 +565,7 @@ export class MockApi implements Api {
     if (!r.password || r.password === 'wrong') throw new ApiError(401, 'login_failed', 'authentication failure');
     const [u, realm] = this.session!.user.split('@');
     if (r.password === 'tokenfail' && this.clustersState.find((c) => c.id === id)?.credentialMode === 'token') throw tokenFailed(u, realm);
-    this.session = { ...this.session!, clusters: this.session!.clusters.map((c) => (c.id === id ? { ...c, authed: true, admin: true, loginExpired: false } : c)) };
+    this.session = { ...this.session!, clusters: this.session!.clusters.map((c) => (c.id === id ? { ...c, authed: true, admin: true, hostAdmin: true, loginExpired: false } : c)) };
     this.emit();
     return this.session;
   }
@@ -627,6 +643,8 @@ export class MockApi implements Api {
       };
     } else if (r.action === 'api.call') {
       plan = this.apiCallPlan(base, r.params);
+    } else if (GALLEY_ACTIONS.includes(r.action)) {
+      plan = this.galleyPlan(base, r.params);
     } else if (r.action === 'host.exec') {
       if (!this.session!.clusters.find((x) => x.id === r.clusterId)?.admin) throw new ApiError(403, 'forbidden', 'host commands need administrator rights on / (Sys.Modify, Sys.Console and Permissions.Modify)');
       const nodeName = String(r.params.node ?? '');
@@ -643,8 +661,67 @@ export class MockApi implements Api {
     } else {
       throw new ApiError(400, 'unknown_action', `unknown action ${r.action}`);
     }
-    this.plans.set(plan.id, plan);
+    this.planMap.set(plan.id, plan);
     return plan;
+  }
+
+  /** galley.* actions, like internal/server.buildGalleyPlan: one GALLEY step, described in words. */
+  private galleyPlan(base: Pick<Plan, 'id' | 'action' | 'clusterId' | 'createdAt' | 'expiresAt'>, params: Record<string, unknown>, source?: string): Plan {
+    const body: Record<string, string> = {};
+    for (const [k, v] of Object.entries(params)) body[k] = typeof v === 'string' ? v : JSON.stringify(v);
+    const cid = base.clusterId;
+    if (base.action !== 'galley.prefs.set' && !this.clustersState.some((c) => c.id === cid)) throw new ApiError(400, 'bad_request', 'unknown cluster');
+    let desc: string;
+    switch (base.action) {
+      case 'galley.cluster.update': {
+        const bad = Object.keys(body).find((k) => !['name', 'shareLogin', 'credentialMode', 'hostTransport'].includes(k));
+        if (bad) throw new ApiError(400, 'bad_request', `unknown setting "${bad}" (allowed: name, shareLogin, credentialMode, hostTransport)`);
+        desc = `Update galley's settings for cluster ${cid}: ${Object.keys(body).sort().map((k) => `${k} = ${body[k]}`).join(', ')}`;
+        break;
+      }
+      case 'galley.cluster.remove': desc = `Remove cluster ${cid} from galley (the cluster itself is not touched)`; break;
+      case 'galley.host.pin':
+        if (!body.node) throw new ApiError(400, 'bad_request', 'node required');
+        desc = `Trust the SSH host key ${body.fingerprint} for node ${body.node}`; break;
+      case 'galley.host.unpin':
+        if (!body.node) throw new ApiError(400, 'bad_request', 'node required');
+        desc = `Forget the SSH host key of node ${body.node}`; break;
+      default:
+        if (!body.key) throw new ApiError(400, 'bad_request', 'key required');
+        try { JSON.parse(body.value ?? ''); } catch { throw new ApiError(400, 'bad_request', 'value must be JSON'); }
+        desc = `Change your galley preference ${body.key}`;
+    }
+    const destructive = base.action === 'galley.cluster.remove';
+    const clusterLabel = this.clustersState.find((c) => c.id === cid)?.name ?? cid;
+    const assistant = source === 'assistant';
+    return {
+      ...base, title: assistant ? `Assistant draft: ${desc}` : desc, destructive,
+      summary: String(params.summary ?? '') || "Changes galley's own configuration; nothing on the cluster changes.",
+      steps: [{ description: desc, method: 'GALLEY', path: base.action, body, cli: desc }],
+      ...(destructive ? { confirmText: `remove ${clusterLabel}` } : assistant ? { confirmText: 'apply 1 step' } : {}),
+      ...(source ? { source } : {}),
+    };
+  }
+
+  /** Apply one GALLEY step through the same methods the UI calls. */
+  private async applyGalley(clusterId: string, s: Step) {
+    const b = s.body as Record<string, string>;
+    switch (s.path) {
+      case 'galley.cluster.update': {
+        const u: UpdateClusterRequest = {};
+        if (b.name !== undefined) u.name = b.name;
+        if (b.shareLogin !== undefined) u.shareLogin = /^(1|true|yes|on)$/i.test(b.shareLogin);
+        if (b.credentialMode !== undefined) u.credentialMode = b.credentialMode as CredentialMode;
+        if (b.hostTransport !== undefined) u.hostTransport = b.hostTransport as HostTransport;
+        await this.updateCluster(clusterId, u);
+        return;
+      }
+      case 'galley.cluster.remove': await this.removeCluster(clusterId); return;
+      case 'galley.host.pin': await this.pinHost(clusterId, b.node, b.fingerprint); return;
+      case 'galley.host.unpin': await this.unpinHost(clusterId, b.node); return;
+      case 'galley.prefs.set': await this.putPref(b.key, JSON.parse(b.value)); return;
+      default: throw new Error(`unknown galley action ${s.path}`);
+    }
   }
 
   /** api.call: validated against the (mock) schema like internal/plan.buildAPICall. */
@@ -748,7 +825,7 @@ export class MockApi implements Api {
    */
   async runPlan(id: string, confirm?: string): Promise<RunResult> {
     await wait(300); this.requireAuth();
-    const plan = this.plans.get(id);
+    const plan = this.planMap.get(id);
     if (!plan) throw new ApiError(404, 'not_found', 'plan not found');
     if (plan.ran) throw new ApiError(409, 'already_ran', 'plan already ran');
     if (now() >= plan.expiresAt) throw new ApiError(410, 'expired', 'plan expired — create it again');
@@ -770,6 +847,24 @@ export class MockApi implements Api {
     const done = (async () => {
       for (let i = 0; i < plan.steps.length; i++) {
         const s = plan.steps[i];
+        if (s.method === 'GALLEY') {
+          // applied by galley itself: no PVE task
+          entry.results.push({ step: i, ok: false, status: 'running' });
+          publish();
+          await sleep();
+          const res = entry.results[i];
+          try {
+            await this.applyGalley(plan.clusterId, s);
+            Object.assign(res, { ok: true, status: 'ok' });
+          } catch (e) {
+            const msg = (e as Error).message;
+            Object.assign(res, { ok: false, status: 'error', error: msg });
+            this.emit();
+            break;
+          }
+          this.emit();
+          continue;
+        }
         const m = s.path.match(/^\/nodes\/([^/]+)\/(qemu|lxc)\/(\d+)/);
         const node = m?.[1] ?? 'pve1';
         const vmid = m ? Number(m[3]) : 0;
@@ -815,7 +910,49 @@ export class MockApi implements Api {
     return { auditId: entry.id, status: 'running', results: [] };
   }
 
-  async discardPlan(id: string) { await wait(40); this.requireAuth(); this.plans.delete(id); }
+  async plans(): Promise<Plan[]> {
+    await wait(60); this.requireAuth();
+    if (!this.seededAgentDraft) {
+      // a change drafted by an agent over MCP, waiting for the user
+      this.seededAgentDraft = true;
+      const t0 = now();
+      const body = { snapname: 'pre-migration', description: 'before schema migration' };
+      const p: Plan = {
+        id: rid(), action: 'api.call', clusterId: 'pve-lab', createdAt: t0 - 420, expiresAt: t0 + 3600,
+        title: 'Agent draft (ci-runner): Take a snapshot of db01 before the upgrade', summary: 'Drafted by the ci-runner agent before tonight\'s schema migration.', destructive: false,
+        steps: [{ description: 'Snapshot VM 125 (/nodes/pve2/qemu/125/snapshot)', method: 'POST', path: '/nodes/pve2/qemu/125/snapshot', body, cli: pveshCli('POST', '/nodes/pve2/qemu/125/snapshot', body) }],
+      };
+      this.planMap.set(p.id, { ...p, source: 'agent:ci-runner', confirmText: 'apply 1 step', destructive: true });
+    }
+    return [...this.planMap.values()].filter((p) => !p.ran && p.expiresAt > now()).sort((a, b) => b.createdAt - a.createdAt).map((p) => { const c: Plan & { ran?: boolean } = { ...p }; delete c.ran; return c; });
+  }
+
+  async agentTokens(): Promise<AgentToken[]> {
+    await wait(60); this.requireAuth();
+    return this.agentTokenList.filter((t) => t.expires > now()).map((t) => ({ ...t }));
+  }
+
+  async createAgentToken(r: CreateAgentTokenRequest): Promise<CreatedAgentToken> {
+    await wait(400); this.requireAuth();
+    if (!/^[A-Za-z0-9._-]{1,64}$/.test(r.name ?? '') || !['read', 'draft', 'apply'].includes(r.scope) || !(r.days >= 1 && r.days <= 90)) {
+      throw new ApiError(400, 'bad_request', 'name (letters, digits, . _ -), scope (read, draft or apply) and days (1–90) are required');
+    }
+    const t0 = now();
+    const id = Array.from({ length: 16 }, () => Math.floor(Math.random() * 16).toString(16)).join('');
+    const expires = t0 + r.days * 86400;
+    this.agentTokenList.unshift({ id, name: r.name, scope: r.scope, created: t0, lastSeen: 0, expires });
+    const clusters = this.session!.clusters.filter((c) => c.authed).map((c) => c.id);
+    const warnings = this.session!.clusters.filter((c) => !c.authed).map((c) => `${c.id}: you are not logged in to this cluster, so galley could not create an API token there`);
+    const token = `glly_${Array.from({ length: 40 }, () => 'abcdefghijklmnopqrstuvwxyz0123456789'[Math.floor(Math.random() * 36)]).join('')}`;
+    return { token, id, name: r.name, scope: r.scope, expires, clusters, warnings };
+  }
+
+  async deleteAgentToken(id: string): Promise<void> {
+    await wait(200); this.requireAuth();
+    this.agentTokenList = this.agentTokenList.filter((t) => t.id !== id);
+  }
+
+  async discardPlan(id: string) { await wait(40); this.requireAuth(); this.planMap.delete(id); }
 
   async audit(limit = 100) { await wait(40); this.requireAuth(); return this.auditLog.slice(0, limit); }
 
@@ -1060,7 +1197,12 @@ export class MockApi implements Api {
               { method: 'PUT', path: '/nodes/pve1/qemu/300/config', body: { hostpci1: 'mapping=gpu-a2-1,pcie=1', digest: 'beef' } },
             ],
           }, 'assistant');
-          this.plans.set(plan.id, plan);
+          this.planMap.set(plan.id, plan);
+          onEvent({ type: 'change', plan });
+        } else if (step.kind === 'galley') {
+          const t0 = now();
+          const plan = this.galleyPlan({ id: rid(), action: step.action, clusterId: step.clusterId, createdAt: t0, expiresAt: t0 + 600 }, step.params, 'assistant');
+          this.planMap.set(plan.id, plan);
           onEvent({ type: 'change', plan });
         } else {
           // stream in small word chunks, like a model would
@@ -1141,6 +1283,19 @@ export class MockApi implements Api {
   async unpinHost(clusterId: string, nodeName: string) {
     await wait(200); this.requireAuth(); this.requireHostAdmin(clusterId);
     this.pins.delete(`${clusterId}/${nodeName}`);
+  }
+
+  // ---------- help ----------
+  async docs(): Promise<DocSummary[]> {
+    await wait(60); this.requireAuth();
+    return MOCK_DOCS.map(({ slug, title, summary, order, route }) => ({ slug, title, summary, order, ...(route ? { route } : {}) }));
+  }
+
+  async doc(slug: string): Promise<Doc> {
+    await wait(60); this.requireAuth();
+    const d = MOCK_DOCS.find((x) => x.slug === slug);
+    if (!d) throw new ApiError(404, 'not_found', 'no such help page');
+    return { ...d };
   }
 
   // ---------- consoles ----------

@@ -10,6 +10,7 @@ import { ApiErrorView } from '../components/ClusterLogin';
 import { ClusterPicker, useClusterParam } from '../components/ClusterPicker';
 import { ResourceEditor } from '../components/ResourceEditor';
 import { CopyButton, Empty } from '../components/ui';
+import { HelpLink } from '../components/HelpLink';
 
 const METHOD_ORDER = ['GET', 'POST', 'PUT', 'DELETE'];
 
@@ -54,7 +55,7 @@ export function ApiExplorer() {
   return (
     <div className="page">
       <div className="page-head">
-        <h1>API</h1>
+        <h1>API</h1><HelpLink />
         <ClusterPicker value={cluster} onChange={(id) => { setCluster(id); }} />
         <div className="sub">Every path of this cluster&apos;s PVE API, from its own schema. Reads run as you; changes open in Changes for review.</div>
       </div>

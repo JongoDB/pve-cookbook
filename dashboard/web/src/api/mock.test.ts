@@ -198,4 +198,46 @@ describe('MockApi: host transports and credential modes', () => {
     await expect(api.clusterLogin('edge-01', { password: 'tokenfail' })).rejects.toMatchObject({ status: 502, code: 'credential_failed' });
     expect((await api.clusters()).find((c) => c.id === 'pve-lab')).toMatchObject({ credentialMode: 'ticket', hostTransport: 'ssh' });
   });
+
+  it('serves the user guide from docs/user with front matter parsed', async () => {
+    const api = new MockApi({ stepDelayMs: 0 });
+    await api.login({ clusterId: 'pve-lab', username: 'root', realm: 'pam', password: 'x' });
+    const idx = await api.docs();
+    expect(idx.length).toBeGreaterThan(0);
+    expect(idx.map((d) => d.order)).toEqual([...idx.map((d) => d.order)].sort((a, b) => a - b));
+    expect(idx.find((d) => d.slug === 'getting-started')).toMatchObject({ title: 'Getting started' });
+    const doc = await api.doc('getting-started');
+    expect(doc.markdown.startsWith('---')).toBe(false);
+    expect(doc).not.toHaveProperty('markdown', '');
+    await expect(api.doc('nope')).rejects.toMatchObject({ status: 404 });
+  });
+
+  it('runs galley.* actions as GALLEY steps through Changes', async () => {
+    const api = new MockApi({ stepDelayMs: 0 });
+    await api.login({ clusterId: 'pve-lab', username: 'root', realm: 'pam', password: 'x' });
+    const plan = await api.createPlan({ action: 'galley.cluster.update', clusterId: 'pve-lab', params: { shareLogin: true } });
+    expect(plan.steps).toEqual([expect.objectContaining({ method: 'GALLEY', path: 'galley.cluster.update', body: { shareLogin: 'true' } })]);
+    expect(plan.steps[0].cli).not.toMatch(/pvesh/);
+    expect((await api.plans()).some((p) => p.id === plan.id)).toBe(true);
+    const final = await api.whenSettled((await api.runPlan(plan.id)).auditId);
+    expect(final.status).toBe('ok');
+    expect((await api.clusters()).find((c) => c.id === 'pve-lab')?.shareLogin).toBe(true);
+    expect((await api.plans()).some((p) => p.id === plan.id)).toBe(false);
+    const rm = await api.createPlan({ action: 'galley.cluster.remove', clusterId: 'pve-lab', params: {} });
+    expect(rm).toMatchObject({ destructive: true, confirmText: 'remove pve-lab' });
+    await expect(api.createPlan({ action: 'galley.cluster.update', clusterId: 'pve-lab', params: { evil: 1 } })).rejects.toMatchObject({ status: 400 });
+  });
+
+  it('creates, lists and revokes agent tokens', async () => {
+    const api = new MockApi({ stepDelayMs: 0 });
+    await api.login({ clusterId: 'pve-lab', username: 'root', realm: 'pam', password: 'x' });
+    await expect(api.createAgentToken({ name: 'bad name', scope: 'read', days: 7 })).rejects.toMatchObject({ status: 400 });
+    await expect(api.createAgentToken({ name: 'ok', scope: 'read', days: 91 })).rejects.toMatchObject({ status: 400 });
+    const t = await api.createAgentToken({ name: 'ci', scope: 'draft', days: 7 });
+    expect(t.token).toMatch(/^glly_/);
+    expect((await api.agentTokens()).map((x) => x.name)).toContain('ci');
+    expect(await api.agentTokens()).not.toContainEqual(expect.objectContaining({ token: expect.anything() }));
+    await api.deleteAgentToken(t.id);
+    expect((await api.agentTokens()).map((x) => x.name)).not.toContain('ci');
+  });
 });

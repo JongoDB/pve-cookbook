@@ -6,6 +6,7 @@ import { useAsync } from '../lib/hooks';
 import { ago } from '../lib/format';
 import { ApiErrorView, ClusterLoginForm } from '../components/ClusterLogin';
 import { Badge, CopyButton, Empty, Status } from '../components/ui';
+import { HelpLink } from '../components/HelpLink';
 
 export const HOSTS_EXPLAIN = 'For what the PVE API cannot do: NIC flow control, kernel parameters, disks, packages. Commands run as root on the node, only after you apply them in Changes, and their output is kept in the audit log.';
 
@@ -17,7 +18,7 @@ export function Hosts() {
   return (
     <div className="page">
       <div className="page-head">
-        <h1>Hosts</h1>
+        <h1>Hosts</h1><HelpLink />
         <div className="sub">{HOSTS_EXPLAIN}</div>
       </div>
       {!admin.length && <div className="notice notice-info"><div className="grow">Host commands need administrator rights on / of a cluster (Sys.Modify, Sys.Console and Permissions.Modify). PVE does not report them for your account on any cluster.</div></div>}

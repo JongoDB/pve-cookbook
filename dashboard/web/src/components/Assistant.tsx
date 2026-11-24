@@ -1,17 +1,19 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import type { Plan, ToolEvent } from '../api/types';
 import { useApp } from '../state/app';
 import { useAsync } from '../lib/hooks';
 import { toolLabel, type ChatTurn } from '../lib/chat';
-import { planCli } from '../lib/plan';
+import { commandCli, galleySettings } from '../lib/plan';
 import { ApiErrorView } from './ClusterLogin';
 import { Markdown } from './Markdown';
+import { HelpLink } from './HelpLink';
 
 const EXAMPLES = [
   'What needs my attention right now?',
   'Attach the second A2 GPU to llm-vllm',
   'What failed in the last hour, and why?',
+  'How do changes work?',
 ];
 
 export function AssistantPanel() {
@@ -30,6 +32,7 @@ export function AssistantPanel() {
         <p className="text-2">The assistant is not set up yet. A galley admin can connect a model provider in Settings.</p>
         <p className="explain">When it is connected, it reads with your permissions and anything it proposes waits for you in Changes.</p>
         {me.galleyAdmin && <p><Link className="btn btn-sm" to="/settings">Set up the assistant</Link></p>}
+        <p><HelpLink slug="assistant" label="How the assistant works" /></p>
       </div>
     );
   }
@@ -72,6 +75,7 @@ function Chat({ notice, model }: { notice: string; model: string }) {
           <div className="chat-examples">
             <span className="muted small">Try</span>
             {EXAMPLES.map((x) => <button key={x} type="button" className="chip-btn" onClick={() => send(x)}>{x}</button>)}
+            <HelpLink slug="assistant" label="How the assistant works" />
           </div>
         )}
         {state.turns.map((t) => (t.role === 'user'
@@ -118,7 +122,10 @@ function AssistantTurn({ turn }: { turn: ChatTurn }) {
 }
 
 function ToolLine({ tool }: { tool: ToolEvent }) {
-  const label = toolLabel(tool);
+  let label: ReactNode = toolLabel(tool);
+  const slug = typeof tool.input?.slug === 'string' ? tool.input.slug : '';
+  // "Read help: <page>" links to the page it read
+  if (tool.name === 'read_doc' && /^[a-z0-9][a-z0-9_-]{0,63}$/i.test(slug)) label = <>Read help: <Link to={`/help/${slug}`}>{slug}</Link></>;
   return (
     <div className={`tool-line tool-${tool.status}`}>
       <span className="tool-dot" aria-hidden="true" />
@@ -135,15 +142,26 @@ function ChangeCard({ plan }: { plan: Plan }) {
   const { showPlan, planState, clusterName, me } = useApp();
   const title = plan.title.replace(/^Assistant draft:\s*/i, '');
   const open = planState.plan?.id === plan.id;
+  const cli = commandCli(plan);
+  const settings = galleySettings(plan);
   return (
     <div className="chat-change">
       <div className="chat-change-head">
         <div className="chat-change-label">Assistant draft</div>
         <div className="strong">{title}</div>
-        <div className="chat-change-sub">{clusterName(plan.clusterId)}, {plan.steps.length} step{plan.steps.length === 1 ? '' : 's'}. Runs as you, {me.user}, once you apply it.</div>
+        <div className="chat-change-sub">
+          {plan.clusterId ? `${clusterName(plan.clusterId)}, ` : ''}{plan.steps.length} step{plan.steps.length === 1 ? '' : 's'}.{' '}
+          {cli ? `Runs as you, ${me.user}, once you apply it.` : 'galley applies it to its own configuration once you apply it.'}
+        </div>
         {plan.summary && <p className="chat-change-sub" style={{ marginTop: 6 }}>{plan.summary}</p>}
       </div>
-      <pre className="chat-change-cli" aria-label="Commands this draft would run">{planCli(plan)}</pre>
+      {cli && <pre className="chat-change-cli" aria-label="Commands this draft would run">{cli}</pre>}
+      {settings.length > 0 && (
+        <div className="chat-change-galley" role="group" aria-label="What this draft changes in galley">
+          <div className="galley-settings-label">galley setting</div>
+          <ul>{settings.map((t, i) => <li key={i}>{t}</li>)}</ul>
+        </div>
+      )}
       <div className="chat-change-foot">
         <button type="button" className="btn btn-sm btn-apply" onClick={() => showPlan(plan)}>{open ? 'Open in Changes' : 'Review in Changes'}</button>
         <span className="chat-change-sub">You confirm it there by typing <code>{plan.confirmText ?? 'the confirmation'}</code>.</span>

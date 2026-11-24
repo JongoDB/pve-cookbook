@@ -2,10 +2,12 @@ import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useApp, type DrawerTab } from '../state/app';
 import type { Plan } from '../api/types';
-import { canRun, planCli, runFinished, stepStatus } from '../lib/plan';
+import { canRun, commandCli, galleySettings, isGalleyStep, runFinished, sourceLabel, stepStatus } from '../lib/plan';
+import { PendingChanges } from './PendingChanges';
 import { ago } from '../lib/format';
 import { ClusterLoginForm } from './ClusterLogin';
 import { IconActivity, IconAssistant, IconChanges, IconFold } from './Icons';
+import { HelpLink } from './HelpLink';
 import { CopyButton } from './ui';
 import { AssistantPanel } from './Assistant';
 
@@ -88,6 +90,8 @@ export function Drawer() {
 
 /** Why this change needs care, in the admin's terms. */
 function destructiveNote(plan: Plan): string {
+  if (plan.action === 'galley.cluster.remove') return 'galley forgets this cluster: its connection, the service token secret and pinned host keys. The cluster itself is not touched. Adding it back means entering the token again.';
+  if (plan.source?.startsWith('agent:')) return `Drafted by the agent ${plan.source.slice(6)} with a token you created. Check every step before you confirm it.`;
   if (plan.source === 'assistant') return 'Drafted by the assistant from what it read in the cluster. Check every command before you confirm it.';
   if (plan.action === 'host.exec') return 'Runs as root on the node, outside PVE\'s permission checks. Check the command before you confirm it.';
   if (plan.action === 'api.call') return 'This deletes settings or data, or interrupts service. Check every command before you confirm it.';
@@ -107,6 +111,7 @@ export function ChangesPanel() {
   const done = runFinished(result);
   const runnable = canRun(plan, typed) && !running && !result;
   const allOk = !!result && result.results.length > 0 && result.results.every((r) => stepStatus(r) === 'ok');
+  const footer = <p className="change-help"><HelpLink slug="changes" label="How changes work" className="help-link" /></p>;
 
   if (loading) return <div className="muted" role="status">Preparing the change</div>;
 
@@ -135,20 +140,33 @@ export function ChangesPanel() {
   if (!plan) {
     return (
       <div className="change">
-        <div className="change-title">No change waiting</div>
+        <PendingChanges />
+        <div className="change-title">No change open</div>
         <p className="explain">{EXPLAIN_CHANGES}</p>
         <p className="explain">
           Start one from a finding with a fix, a guest&apos;s actions, or <kbd>⌘K</kbd> with a command such as <code>start 120</code>.
         </p>
+        {footer}
       </div>
     );
   }
 
+  const cli = commandCli(plan);
+  const settings = galleySettings(plan);
+  const galleyOnly = !cli;
+
   return (
     <div className="change" aria-busy={running}>
+      <PendingChanges compact />
       <div>
         <div className="change-title" tabIndex={-1} ref={title}>{plan.title}</div>
-        <div className="change-sub">{plan.source === 'assistant' && <span className="badge badge-warn" style={{ marginRight: 8 }}>Assistant draft</span>}{clusterName(plan.clusterId)}, runs as you ({me.user})</div>
+        <div className="change-sub">
+          {sourceLabel(plan.source) && <span className={`badge ${plan.source === 'assistant' ? 'badge-warn' : 'badge-info'}`} style={{ marginRight: 8 }}>{sourceLabel(plan.source)}</span>}
+          {galleyOnly && <span className="badge badge-info" style={{ marginRight: 8 }}>galley setting</span>}
+          {galleyOnly
+            ? <>{plan.clusterId ? `${clusterName(plan.clusterId)}, ` : ''}applied by galley for you ({me.user})</>
+            : <>{clusterName(plan.clusterId)}, runs as you ({me.user})</>}
+        </div>
       </div>
       {plan.summary && <p className="change-summary">{plan.summary}</p>}
       {plan.destructive && (
@@ -163,6 +181,7 @@ export function ChangesPanel() {
           return (
             <li key={i}>
               {s.description}
+              {isGalleyStep(s) && !galleyOnly && <span className="badge badge-info step-kind">galley setting</span>}
               {r && st === 'running' && <span className="st run" role="status">Running{r.upid ? `, task ${r.upid}` : ''}</span>}
               {r && st === 'ok' && <span className="st ok">Done{r.exitstatus && r.exitstatus !== 'OK' ? `: ${r.exitstatus}` : ''}</span>}
               {r && st === 'error' && <span className="st err">Failed: {r.error ?? r.exitstatus ?? 'no reason given'}</span>}
@@ -173,8 +192,19 @@ export function ChangesPanel() {
           );
         })}
       </ol>
-      <pre className="cli" aria-label="Commands this change runs">{planCli(plan)}</pre>
-      <div className="row-actions"><CopyButton text={planCli(plan)} /></div>
+      {cli && (
+        <>
+          <pre className="cli" aria-label="Commands this change runs">{cli}</pre>
+          <div className="row-actions"><CopyButton text={cli} /></div>
+        </>
+      )}
+      {settings.length > 0 && (
+        <div className="galley-settings" role="group" aria-label="What this changes in galley">
+          <div className="galley-settings-label">galley setting</div>
+          <ul>{settings.map((t, i) => <li key={i}>{t}</li>)}</ul>
+          <p className="explain">galley applies this to its own configuration. Nothing on the cluster changes, and there is no command to copy.</p>
+        </div>
+      )}
 
       {plan.confirmText && !result && (
         <label className="field">
@@ -207,7 +237,8 @@ export function ChangesPanel() {
           </>
         )}
       </div>
-      <p className="explain">{EXPLAIN_CHANGES}</p>
+      <p className="explain">{galleyOnly ? 'Nothing in galley changes until you apply it here. Each change is written to the audit log.' : EXPLAIN_CHANGES}</p>
+      {footer}
     </div>
   );
 }

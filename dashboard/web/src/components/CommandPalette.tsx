@@ -4,6 +4,7 @@ import type { Guest } from '../api/types';
 import { ACTION_LABEL } from '../lib/actions';
 import { parseCommand } from '../lib/commands';
 import { rank } from '../lib/fuzzy';
+import { docsCache, searchDocs, useDocsIndex } from '../lib/docs';
 import { useApp } from '../state/app';
 import { PAGES, visiblePage } from './Layout';
 
@@ -13,7 +14,9 @@ const storagePath = (clusterId: string, id: string, node: string, shared: boolea
   `/storage/${encodeURIComponent(clusterId)}/${encodeURIComponent(shared ? id : `${id}@${node}`)}`;
 
 export function CommandPalette({ onClose }: { onClose: () => void }) {
-  const { fleet, openPlan, clusterName, guests: shared, guestsError, me, openDrawer, chat } = useApp();
+  const { fleet, openPlan, clusterName, guests: shared, guestsError, me, openDrawer, chat, api } = useApp();
+  const { docs } = useDocsIndex(api);
+  const [docBodies, setDocBodies] = useState<Record<string, string>>({});
   const nav = useNavigate();
   const [q, setQ] = useState('');
   const guests: Guest[] = useMemo(() => shared ?? [], [shared]);
@@ -33,6 +36,15 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
     for (const c of fleet?.clusters ?? []) m[c.id] = c.nodes.map((n) => n.name);
     return m;
   }, [fleet]);
+
+  // Search the guide's page text once the admin starts typing.
+  const typing = !!q.trim();
+  useEffect(() => {
+    if (!typing) return;
+    let live = true;
+    docsCache(api).loadBodies().then((b) => { if (live) setDocBodies(b); }, () => { /* titles still match */ });
+    return () => { live = false; };
+  }, [typing, api]);
 
   const parsed = useMemo(() => parseCommand(q, guests, nodesByCluster), [q, guests, nodesByCluster]);
 
@@ -81,12 +93,16 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
         key: `s:${c.id}:${s.id}:${s.shared ? '' : s.node}`, label: s.shared ? s.id : `${s.id} on ${s.node}`,
         hint: `Storage on ${c.name}, ${s.type}`, run: go(storagePath(c.id, s.id, s.node, s.shared)),
       }));
+    const docList = docs ?? [];
+    const docMatches = [...rank(q, docList, (d) => d.title, 3), ...searchDocs(docList, docBodies, q).map((h) => h.doc)];
+    const docItems = docMatches.filter((d, i) => docMatches.indexOf(d) === i).slice(0, 4)
+      .map((d) => ({ key: `h:${d.slug}`, label: `Help: ${d.title}`, hint: 'Help page', run: go(`/help/${d.slug}`) }));
     // Anything that reads like a question goes to the assistant (it answers in the drawer).
     const ask = { key: 'ask', label: `Ask the assistant: ${q.trim()}`, hint: 'Assistant', run: () => { openDrawer('assistant'); void chat.send(q); onClose(); } };
     const question = /\?\s*$|^(why|what|how|which|is|are|can|does|do|when|where|show|list|explain)\b/i.test(q.trim()) || q.trim().split(/\s+/).length > 3;
     const found = [...guestItems, ...nodeItems, ...storeItems, ...pageItems];
-    return question ? [ask, ...found] : [...found, ask];
-  }, [parsed, q, guests, fleet, nav, onClose, openPlan, clusterName, me, openDrawer, chat]);
+    return question ? [ask, ...docItems, ...found] : [...found, ...docItems, ask];
+  }, [parsed, q, guests, fleet, nav, onClose, openPlan, clusterName, me, openDrawer, chat, docs, docBodies]);
 
   useEffect(() => { setSel(0); }, [q]);
 
@@ -107,7 +123,7 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
           className="palette-input"
           value={q}
           onChange={(e) => setQ(e.target.value)}
-          placeholder="Search guests, nodes and storage, or type start 120"
+          placeholder="Search guests, nodes, storage and help, or type start 120"
           autoComplete="off"
           spellCheck={false}
           role="combobox"
@@ -137,7 +153,7 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
               <span>{it.label}</span><span className="hint">{it.hint}</span>
             </li>
           ))}
-          {items.length === 0 && parsed.kind === 'none' && <li className="muted" role="presentation">No guest, node, storage or page matches. Try a VMID or a command such as start 120.</li>}
+          {items.length === 0 && parsed.kind === 'none' && <li className="muted" role="presentation">No guest, node, storage, page or help page matches. Try a VMID or a command such as start 120.</li>}
         </ul>
         <div className="palette-foot"><span>Enter to open, arrow keys to move, Esc to close</span><span>Commands: start, shutdown, stop, reboot, migrate, snapshot, destroy</span></div>
       </div>

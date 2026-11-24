@@ -10,6 +10,7 @@ import { ApiErrorView } from '../components/ClusterLogin';
 import { ClusterPicker, useClusterParam } from '../components/ClusterPicker';
 import { ResourceEditor } from '../components/ResourceEditor';
 import { Badge, Empty } from '../components/ui';
+import { HelpLink } from '../components/HelpLink';
 
 /** PCI classes PVE hides by default: memory controllers, bridges, processors. */
 const CHIPSET = /^0x(05|06|0b)/;
@@ -27,7 +28,7 @@ export function Hardware() {
   return (
     <div className="page">
       <div className="page-head">
-        <h1>Hardware</h1>
+        <h1>Hardware</h1><HelpLink />
         <ClusterPicker value={cluster} onChange={setCluster} />
         <div className="sub">PCI devices of every node, GPUs first, with their IOMMU groups and cluster mappings. A mapping names a device cluster-wide so VMs, HA and migration can use it safely.</div>
       </div>

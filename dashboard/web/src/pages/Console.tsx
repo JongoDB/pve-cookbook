@@ -6,6 +6,7 @@ import { errMsg, useApp, useCrumbs } from '../state/app';
 import { guestPath, nodePath } from '../lib/links';
 import { consoleSocketUrl, inputFrame, loginMessage, PING_FRAME, resizeFrame } from '../lib/termproxy';
 import { ApiErrorView } from '../components/ClusterLogin';
+import { HelpLink } from '../components/HelpLink';
 
 type Phase = 'requesting' | 'connecting' | 'connected' | 'closed' | 'error';
 
@@ -80,7 +81,7 @@ export function Console() {
   return (
     <div className="page console-page">
       <div className="page-head">
-        <h1>{label}</h1>
+        <h1>{label}</h1><HelpLink />
         <div className="toolbar">
           {protocol === 'vnc' && <button type="button" className="btn btn-sm" disabled={phase !== 'connected'} onClick={() => ctrlAltDel.current?.()}>Send Ctrl+Alt+Del</button>}
           <button type="button" className="btn btn-sm" disabled={phase !== 'connected'} onClick={fullscreen}>Full screen</button>
@@ -88,7 +89,7 @@ export function Console() {
           <Link className="btn btn-sm" to={back}>Back to {type === 'node' ? node : g?.name ?? `guest ${vmid}`}</Link>
         </div>
         <div className="sub">
-          {type === 'node' ? `Root shell on ${node}, ${clusterName(cluster)}. Commands here run outside galley's changes and audit log; PVE logs the session.`
+          {type === 'node' ? `Shell on ${node}, ${clusterName(cluster)} (root for root@pam; others log in). Commands here run outside galley's changes and audit log; PVE logs the session.`
             : `${type === 'qemu' ? 'VM display' : 'Container terminal'} on ${node}, ${clusterName(cluster)}. Keyboard input goes to the guest while the console has focus.`}
         </div>
       </div>

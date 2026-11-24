@@ -29,6 +29,10 @@ describe('toolLabel and errors', () => {
     expect(toolLabel({ id: '1', name: 'get_metrics', status: 'ok', input: { kind: 'node', id: 'pve1', timeframe: 'hour' } })).toBe('Checked metrics for node pve1, last hour');
     expect(toolLabel({ id: '1', name: 'get_findings', status: 'ok' })).toBe('Checked findings');
     expect(toolLabel({ id: '1', name: 'brand_new_tool', status: 'ok' })).toBe('brand new tool');
+    expect(toolLabel({ id: '1', name: 'search_docs', status: 'ok', input: { query: 'snapshot' } })).toBe('Searched the docs for “snapshot”');
+    expect(toolLabel({ id: '1', name: 'read_doc', status: 'ok', input: { slug: 'changes' } })).toBe('Read help: changes');
+    expect(toolLabel({ id: '1', name: 'propose_action', status: 'ok', input: { action: 'galley.host.unpin' } })).toBe('Drafted a change: Forget a host key');
+    expect(toolLabel({ id: '1', name: 'propose_action', status: 'ok', input: { title: 'Share the login' } })).toBe('Drafted a change: Share the login');
   });
   it('turns API errors into next steps', () => {
     expect(chatErrorMessage(new ApiError(409, 'conversation_full', 'x')).message).toMatch(/Start a new one/);

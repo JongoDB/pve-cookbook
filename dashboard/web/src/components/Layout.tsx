@@ -21,12 +21,14 @@ export const PAGES: { to: string; label: string; group?: 'tools' | 'bottom' }[] 
   { to: '/hosts', label: 'Hosts', group: 'tools' },
   { to: '/api-explorer', label: 'API', group: 'tools' },
   { to: '/clusters', label: 'Clusters' },
+  { to: '/agents', label: 'Agents', group: 'bottom' },
+  { to: '/help', label: 'Help', group: 'bottom' },
   { to: '/settings', label: 'Settings', group: 'bottom' },
 ];
 
 /** Pages a user can use: Hosts needs admin rights on some cluster, Settings a galley admin. */
-export const visiblePage = (p: { to: string }, me: { galleyAdmin?: boolean; clusters: { admin?: boolean }[] }) =>
-  p.to === '/hosts' ? me.clusters.some((c) => c.admin) : p.to === '/settings' ? !!me.galleyAdmin : true;
+export const visiblePage = (p: { to: string }, me: { galleyAdmin?: boolean; clusters: { admin?: boolean; hostAdmin?: boolean }[] }) =>
+  p.to === '/hosts' ? me.clusters.some((c) => c.hostAdmin ?? c.admin) : p.to === '/settings' ? !!me.galleyAdmin : true;
 
 const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);
 

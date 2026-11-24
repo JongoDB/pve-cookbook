@@ -75,6 +75,8 @@ export interface Realm { realm: string; type: string; comment?: string; tfa?: st
 
 export interface MeCluster {
   id: string; name: string; authed: boolean; admin?: boolean;
+  /** Sys.Modify + Sys.Console + Permissions.Modify on /: may run host commands (older builds: use `admin`) */
+  hostAdmin?: boolean;
   /** this session had a login here that lapsed (unused too long) or PVE refused: ask for the password again */
   loginExpired?: boolean;
   credentialMode?: CredentialMode;
@@ -399,6 +401,22 @@ export interface ConsoleRequest { type: ConsoleType; node: string; vmid?: number
 export interface ConsoleTicket { token: string; protocol: 'vnc' | 'term'; password: string; user: string; port: string }
 
 /** The whole surface the SPA uses. Implemented over HTTP and in-memory (mock mode). */
+// ---- help (GET /api/docs, GET /api/docs/{slug}) ----
+
+/** One page of the user guide, without its body. `route` is the galley page it explains. */
+export interface DocSummary { slug: string; title: string; summary: string; order: number; route?: string }
+/** A user-guide page; markdown has no front matter. Relative links (`changes.md#x`) point to other pages. */
+export interface Doc extends Omit<DocSummary, 'order'> { order?: number; markdown: string }
+
+// ---- agents (GET/POST /api/agent-tokens, DELETE /api/agent-tokens/{id}) ----
+
+/** read: query only. draft: also propose changes the user applies. apply: also apply changes itself. */
+export type AgentScope = 'read' | 'draft' | 'apply';
+export interface AgentToken { id: string; name: string; scope: AgentScope; created: number; lastSeen: number; expires: number }
+export interface CreateAgentTokenRequest { name: string; scope: AgentScope; days: number }
+/** `token` is shown once; `warnings` name clusters where PVE refused a token for the agent. */
+export interface CreatedAgentToken { token: string; id: string; name: string; scope: AgentScope; expires: number; clusters: string[]; warnings?: string[] | null }
+
 export interface Api {
   health(): Promise<{ ok: boolean; version?: string; status?: string }>;
   setup(): Promise<SetupInfo>;
@@ -426,6 +444,8 @@ export interface Api {
   /** Read pass-through: GET /api/clusters/{id}/pve/{path}, run as the user (PVE ACLs apply). */
   pve<T>(clusterId: string, path: string, query?: Record<string, string | number | undefined>): Promise<T>;
   createPlan(req: PlanRequest): Promise<Plan>;
+  /** GET /api/plans: the user's pending changes, newest first (including assistant and agent drafts). */
+  plans(): Promise<Plan[]>;
   runPlan(id: string, confirm?: string): Promise<RunResult>;
   discardPlan(id: string): Promise<void>;
   audit(limit?: number): Promise<AuditEntry[]>;
@@ -452,4 +472,10 @@ export interface Api {
    * ended server-side and the app must return to the login screen.
    */
   onUnauthorized(fn: (() => void) | null): void;
+  /** The user guide's pages in reading order. */
+  docs(): Promise<DocSummary[]>;
+  agentTokens(): Promise<AgentToken[]>;
+  createAgentToken(req: CreateAgentTokenRequest): Promise<CreatedAgentToken>;
+  deleteAgentToken(id: string): Promise<void>;
+  doc(slug: string): Promise<Doc>;
 }

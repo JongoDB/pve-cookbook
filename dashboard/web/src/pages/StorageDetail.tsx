@@ -12,6 +12,7 @@ import { ApiErrorView } from '../components/ClusterLogin';
 import { Badge, Empty, Meter } from '../components/ui';
 import { TimeRange } from './Overview';
 import { storageUnavailable } from './overview/Widgets';
+import { HelpLink } from '../components/HelpLink';
 
 interface Volume { volid: string; content: string; format?: string; size?: number; used?: number; vmid?: number; ctime?: number; notes?: string }
 
@@ -50,7 +51,7 @@ export function StorageDetail() {
   return (
     <div className="page">
       <div className="page-head">
-        <h1>{sid}{onlyNode ? <span className="title-id"> on {onlyNode}</span> : null}</h1>
+        <h1>{sid}{onlyNode ? <span className="title-id"> on {onlyNode}</span> : null}</h1><HelpLink />
         <div className="sub">{first.type} storage, {first.shared ? 'shared by every node that lists it' : `local to ${first.node}`}, {clusterName(cluster)}</div>
       </div>
 

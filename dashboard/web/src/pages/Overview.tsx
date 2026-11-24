@@ -13,6 +13,7 @@ import {
   AttentionWidget, BackupsWidget, CephWidget, ChangesWidget, GuestsWidget, MetricWidget, QuorumWidget, StorageWidget,
   GpuWidget, TasksWidget, TopGuestsWidget, cephTitle, resolveMetric, uniqueStorage, type WidgetHead,
 } from './overview/Widgets';
+import { HelpLink } from '../components/HelpLink';
 
 export function TimeRange({ value, onChange }: { value: Timeframe; onChange: (t: Timeframe) => void }) {
   return (
@@ -125,7 +126,7 @@ export function Overview() {
   return (
     <div className="page">
       <div className="ov-bar">
-        <h1>Overview</h1>
+        <h1>Overview</h1><HelpLink />
         <TimeRange value={layout.timeframe} onChange={(t) => dispatch({ type: 'timeframe', timeframe: t })} />
         {editing ? (
           <>

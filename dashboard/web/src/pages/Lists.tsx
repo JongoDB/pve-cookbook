@@ -8,6 +8,7 @@ import { nodePath, storageKey, storagePath } from '../lib/links';
 import { Badge, Empty, Meter, Status } from '../components/ui';
 import { storageUnavailable, staleReason, uniqueStorage } from './overview/Widgets';
 import { taskBadge } from './GuestDetail';
+import { HelpLink } from '../components/HelpLink';
 
 function ClusterFilter({ value, onChange }: { value: string; onChange: (v: string) => void }) {
   const { me } = useApp();
@@ -30,7 +31,7 @@ export function Nodes() {
   const rows = cs.flatMap((c) => c.nodes.map((n) => ({ c, n })));
   return (
     <div className="page">
-      <div className="page-head"><h1>Nodes</h1><ClusterFilter value={cluster} onChange={setCluster} /></div>
+      <div className="page-head"><h1>Nodes</h1><HelpLink /><ClusterFilter value={cluster} onChange={setCluster} /></div>
       {cs.filter((c) => c.stale).map((c) => <div key={c.id} className="notice notice-warn" role="status"><div className="grow">{staleReason(c)}. Its nodes show the last good data.</div></div>)}
       <section className="panel" aria-label="Nodes">
         {!fleet ? <div className="muted panel-body" role="status">Loading nodes</div> : rows.length === 0 ? <Empty title="No nodes">Register a cluster on the Clusters page.</Empty> : (
@@ -62,7 +63,7 @@ export function StorageList() {
   const rows = (fleet?.clusters ?? []).filter((c) => !cluster || c.id === cluster).flatMap((c) => uniqueStorage(c).map((s) => ({ c, s })));
   return (
     <div className="page">
-      <div className="page-head"><h1>Storage</h1><ClusterFilter value={cluster} onChange={setCluster} /></div>
+      <div className="page-head"><h1>Storage</h1><HelpLink /><ClusterFilter value={cluster} onChange={setCluster} /></div>
       <section className="panel" aria-label="Storage">
         {!fleet ? <div className="muted panel-body" role="status">Loading storage</div> : rows.length === 0 ? <Empty title="No storage reported" /> : (
           <div className="table-wrap"><table className="table">
@@ -92,7 +93,7 @@ export function Activity() {
   return (
     <div className="page">
       <div className="page-head">
-        <h1>Activity</h1>
+        <h1>Activity</h1><HelpLink />
         <ClusterFilter value={cluster} onChange={setCluster} />
         <div className="sub">The newest 50 PVE tasks across clusters, live. You see your own tasks, and everyone&apos;s where you hold Sys.Audit.</div>
       </div>

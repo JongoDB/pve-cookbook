@@ -13,6 +13,7 @@ import { Badge, Empty, Meter, Status } from '../components/ui';
 import { TimeRange } from './Overview';
 import { guestTone } from './GuestDetail';
 import { storageUnavailable, uniqueStorage } from './overview/Widgets';
+import { HelpLink } from '../components/HelpLink';
 
 interface NodeStatus {
   cpu?: number; uptime?: number; loadavg?: (string | number)[]; kversion?: string; pveversion?: string;
@@ -47,9 +48,9 @@ export function NodeDetail() {
   return (
     <div className="page">
       <div className="page-head">
-        <h1>{node}</h1>
+        <h1>{node}</h1><HelpLink />
         <Link className="btn" to={consolePath(cluster, 'node', node)} aria-disabled={!authed} onClick={(e) => { if (!authed) e.preventDefault(); }}
-          title={authed ? 'Root shell on this node (needs Sys.Console)' : 'Log in to this cluster first'}>Shell</Link>
+          title={authed ? 'Node shell: root for root@pam, others log in (needs Sys.Console)' : 'Log in to this cluster first'}>Shell</Link>
         <div className="sub">
           {n ? <Status tone={n.online ? 'ok' : 'crit'}>{n.online ? 'online' : 'offline'}</Status> : null} node of {clusterName(cluster)}
           {n?.online ? `, up ${uptime(s?.uptime ?? n.uptime)}` : ''}

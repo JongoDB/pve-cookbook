@@ -16,6 +16,7 @@ import { ResourceEditor } from '../components/ResourceEditor';
 import { consolePath } from '../lib/links';
 import { TimeRange } from './Overview';
 import type { Timeframe } from '../api/types';
+import { HelpLink } from '../components/HelpLink';
 
 const TABS = [
   { id: 'summary', label: 'Summary' },
@@ -157,7 +158,7 @@ export function GuestDetail() {
   return (
     <div className="page">
       <div className="page-head">
-        <h1>{g.name} <span className="title-id">{g.vmid}</span></h1>
+        <h1>{g.name} <span className="title-id">{g.vmid}</span></h1><HelpLink />
         <GuestActionsWrapper g={g} />
         <div className="sub">
           <Status tone={guestTone(g.status)}>{g.status}</Status>{' '}

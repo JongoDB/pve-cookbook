@@ -6,6 +6,7 @@ import { AddClusterForm, ProbeEndpoints } from './AddClusterForm';
 import { ClusterLoginForm } from '../components/ClusterLogin';
 import { Badge, ErrorBox } from '../components/ui';
 import { ago } from '../lib/format';
+import { HelpLink } from '../components/HelpLink';
 
 function Rename({ c, onDone }: { c: Cluster; onDone: () => void }) {
   const { api, refreshMe } = useApp();
@@ -114,8 +115,8 @@ function Credentials({ c, onDone }: { c: Cluster; onDone: () => void }) {
           {confirmPve && (
             <div className="notice notice-warn">
               <div className="grow">
-                Switching to the PVE node terminal deletes galley&apos;s SSH key for {c.name} and every pinned host key. Afterwards remove the
-                <code> galley@{c.id}</code> line from <code>/etc/pve/priv/authorized_keys</code> on any node.
+                Switching to the PVE node terminal deletes galley&apos;s SSH key for {c.name} and every pinned host key. Afterwards remove the line ending in
+                <code> galley</code> from <code>/etc/pve/priv/authorized_keys</code> on any node.
                 <div className="row-actions" style={{ marginTop: 8 }}>
                   <button type="button" className="btn btn-sm btn-danger-outline" disabled={busy} onClick={() => void save({ hostTransport: 'pve' })}>Delete the key and switch</button>
                   <button type="button" className="btn btn-sm" onClick={() => setConfirmPve(false)}>Keep SSH</button>
@@ -172,7 +173,7 @@ export function Clusters() {
   return (
     <div className="page">
       <div className="page-head">
-        <h1>Clusters</h1>
+        <h1>Clusters</h1><HelpLink />
         {me.galleyAdmin && !adding && <button type="button" className="btn btn-primary" onClick={() => nav('/clusters?add=1')}>Add cluster</button>}
       </div>
       <ErrorBox message={err} />
