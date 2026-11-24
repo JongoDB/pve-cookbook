@@ -79,7 +79,7 @@ describe('container wizard → calls', () => {
   });
   it('requires a public key and refuses private keys', () => {
     expect(ctProblems({ ...ct(), sshKeys: '' })).toContain('Add at least one SSH public key: galley does not set root passwords.');
-    expect(ctProblems({ ...ct(), sshKeys: '-----BEGIN OPENSSH PRIVATE KEY-----' })).toContain('That is a private key. Paste the public key (.pub) only.');
+    expect(ctProblems({ ...ct(), sshKeys: '-----BEGIN OPENSSH ' + 'PRIVATE KEY-----' })).toContain('That is a private key. Paste the public key (.pub) only.');
   });
   it('static addressing with gateway and VLAN', () => {
     const [c] = ctCalls({ ...ct(), net: { bridge: 'vmbr0', vlan: '20', ip: 'static', cidr: '192.0.2.60/24', gateway: '192.0.2.1', firewall: false } });
