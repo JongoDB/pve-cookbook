@@ -423,8 +423,11 @@ func (m *Manager) Build(ctx context.Context, user string, req Request, vis Visib
 		p.Steps = []Step{{Description: "Run as root on " + prm.Node, Method: MethodSSH, Path: prm.Node,
 			Body: map[string]string{"command": prm.Command}, CLI: "ssh root@" + prm.Node + " " + schema.Quote(prm.Command)}}
 		p.Title = "Run on " + prm.Node + ": " + first
-		if len(prm.Reason) <= 500 {
-			p.Summary = prm.Reason
+		if r := strings.TrimSpace(prm.Reason); r != "" && len(r) <= 500 {
+			if !strings.ContainsAny(r[len(r)-1:], ".!?") {
+				r += "."
+			}
+			p.Summary = r
 		}
 		p.Summary = strings.TrimSpace(p.Summary + " Runs as root outside the PVE API; PVE permissions do not limit it.")
 		p.Destructive = true
