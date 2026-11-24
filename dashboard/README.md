@@ -59,6 +59,30 @@ Development: `cd dashboard/web && npm run dev:mock` (UI only, mock API) or `npm 
 (proxies `/api` to a local `galley --insecure-http --listen 127.0.0.1:8443`). Tests:
 `make test`. API contract: [`docs/api.md`](docs/api.md).
 
+### Contributing: end-to-end tests
+
+`dashboard/e2e/` drives the real binary in demo mode (`galley --demo`, the in-process fake
+cluster from `internal/fakepve`) with Playwright and Chromium:
+
+```bash
+cd dashboard && make e2e          # builds web + binary, installs Chromium, runs the suite (~2 min)
+cd dashboard/e2e && npx playwright test --grep @fast      # only the quick specs
+npx playwright test tests/12-guests.spec.ts --headed      # one file, watch it
+npx playwright show-report                                # last run, with traces of failures
+```
+
+The config starts `../galley` (or `$GALLEY_BIN`) on a free port with a fresh temporary data
+directory; global setup logs in once as `root@pam` (admin) and `dev@pve` (restricted). Every
+test fails on an uncaught exception, a console error, a failed request or a galley API answer of
+400 or more that the test did not declare with `guard.allow()` (with a reason); the few answers
+that are always expected are listed in `e2e/lib/fixtures.ts`. The suite covers a route sweep
+(both users), a link crawl, a button sweep and the real flows (changes applied against the fake
+cluster, consoles over websockets, MCP with an agent token). The assistant runs against a
+scripted OpenAI-compatible model (`e2e/lib/fakeLlm.ts`) that the test registers as the provider
+in Settings, so no special server flag is involved. Tests share one galley and run in file order:
+leave state as you found it, or put the test in its own file after the ones it would disturb.
+Update or add specs with every UI change.
+
 ## Architecture
 
 ```text

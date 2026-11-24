@@ -1,0 +1,16 @@
+{
+  "name": "galley-e2e",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "playwright test",
+    "test:fast": "playwright test --grep @fast",
+    "report": "playwright show-report",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.65.0",
+    "@types/node": "22.10.2",
+    "typescript": "5.6.3"
+  }
+}

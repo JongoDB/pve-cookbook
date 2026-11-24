@@ -3,7 +3,7 @@ LDFLAGS := -s -w -X github.com/JongoDB/pve-cookbook/dashboard/internal/server.Ve
 # node_modules contains a stray Go package; never use ./...
 PKGS := ./cmd/... ./internal/... ./docs/...
 
-.PHONY: all web build test lint dist
+.PHONY: all web build test lint dist e2e
 all: web build
 
 web:
@@ -24,3 +24,7 @@ lint:
 dist: web
 	mkdir -p dist
 	for a in amd64 arm64; do CGO_ENABLED=0 GOOS=linux GOARCH=$$a go build -trimpath -ldflags '$(LDFLAGS)' -o dist/galley-linux-$$a ./cmd/galley; done
+
+# End-to-end: the real binary in demo mode, driven by Chromium (see README.md, "end-to-end tests").
+e2e: web build
+	cd e2e && npm ci && npx playwright install chromium && npx playwright test
