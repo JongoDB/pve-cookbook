@@ -112,18 +112,22 @@ func TestAssistantProposesButNeverApplies(t *testing.T) {
 		t.Fatalf("events: change=%d done=%d model calls=%d", len(ev["change"]), len(ev["done"]), calls.Load())
 	}
 	var p struct {
-		ID    string
-		Steps []struct{ CLI string }
+		ID, Title, Source, ConfirmText string
+		Steps                          []struct{ CLI string }
 	}
 	_ = json.Unmarshal(ev["change"][0], &p)
-	if p.Steps[0].CLI != "pvesh set /nodes/pve1/qemu/300/config --hostpci1 mapping=gpu-a2-1,pcie=1" {
+	if p.Steps[0].CLI != "pvesh set /nodes/pve1/qemu/300/config --hostpci1 mapping=gpu-a2-1,pcie=1" ||
+		p.Source != "assistant" || !strings.HasPrefix(p.Title, "Assistant draft: ") || p.ConfirmText != "apply 1 step" {
 		t.Fatalf("drafted change: %+v", p)
 	}
 	if len(h.fake.Recorded()) != before {
 		t.Fatal("the assistant changed the cluster")
 	}
 	// the drafted change is the user's, and applying it is a separate, explicit step
-	e := root.runPlanID(p.ID)
+	if code := root.do("POST", "/api/plans/"+p.ID+"/run", map[string]any{}, nil); code != 400 {
+		t.Fatalf("assistant draft applied without typed confirmation: %d", code)
+	}
+	e := root.runPlanID(p.ID, "apply 1 step")
 	if !e.OK {
 		t.Fatalf("apply drafted change: %+v", e)
 	}

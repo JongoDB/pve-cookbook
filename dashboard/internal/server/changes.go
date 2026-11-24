@@ -75,6 +75,7 @@ func (s *Server) runPlan(w http.ResponseWriter, r *http.Request, ss *session) {
 		return
 	}
 	if hasHostSteps(p) {
+		s.dropView(ss.id, p.ClusterID) // re-check rights now, not from the 30 s cache
 		if v := s.view(r.Context(), ss, p.ClusterID); v == nil || !hostAdmin(v) {
 			apiError(w, 403, "forbidden", hostAdminMsg)
 			return

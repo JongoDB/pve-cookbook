@@ -96,14 +96,15 @@ func (c *anthropicConv) Step(ctx context.Context, emit func(Event)) ([]ToolCall,
 		}
 		return nil, fmt.Errorf("model provider unreachable: %w", err)
 	}
-	// Keep the response unchanged in history (thinking blocks included).
-	c.history = append(c.history, msg.ToParam())
 	switch msg.StopReason {
 	case anthropic.BetaStopReasonRefusal:
+		// Not kept: the conversation stays valid for the next question.
 		return nil, ErrDeclined
 	case anthropic.BetaStopReasonMaxTokens:
 		return nil, errors.New("the response hit the token limit before finishing")
 	}
+	// Keep the response unchanged in history (thinking blocks included).
+	c.history = append(c.history, msg.ToParam())
 	var calls []ToolCall
 	for _, b := range msg.Content {
 		if tu, ok := b.AsAny().(anthropic.BetaToolUseBlock); ok {
@@ -114,8 +115,6 @@ func (c *anthropicConv) Step(ctx context.Context, emit func(Event)) ([]ToolCall,
 			calls = append(calls, ToolCall{ID: tu.ID, Name: tu.Name, Input: raw})
 		}
 	}
-	if msg.StopReason != anthropic.BetaStopReasonToolUse {
-		return nil, nil
-	}
+	// Every tool_use in history must get a result, so return any calls present.
 	return calls, nil
 }

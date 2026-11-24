@@ -72,8 +72,10 @@ func (s *Server) putAssistantSettings(w http.ResponseWriter, r *http.Request, ss
 	}
 	cfg := req.Config
 	old := s.assistantConfig()
-	if cfg.APIKey == "" && !req.ClearAPIKey {
-		cfg.APIKey = old.APIKey // keep the stored key unless replaced or cleared
+	// Keep the stored key unless replaced or cleared — and never send it to a
+	// different destination than the one it was entered for.
+	if cfg.APIKey == "" && !req.ClearAPIKey && cfg.Provider == old.Provider && sameHost(cfg.BaseURL, old.BaseURL) {
+		cfg.APIKey = old.APIKey
 	}
 	if err := cfg.Validate(); err != nil {
 		apiError(w, 400, "bad_request", err.Error())
@@ -85,17 +87,27 @@ func (s *Server) putAssistantSettings(w http.ResponseWriter, r *http.Request, ss
 		return
 	}
 	s.securityEvent(ss.user, ss.home, "settings.assistant", fmt.Sprintf("Assistant: %s %s, enabled=%v", cfg.Provider, cfg.Model, cfg.Enabled), true,
-		map[string]any{"provider": cfg.Provider, "model": cfg.Model, "baseUrl": cfg.BaseURL, "enabled": cfg.Enabled, "apiKeyChanged": req.APIKey != "" || req.ClearAPIKey})
+		map[string]any{"provider": cfg.Provider, "model": cfg.Model, "baseUrl": redactURL(cfg.BaseURL), "enabled": cfg.Enabled, "apiKeyChanged": cfg.APIKey != old.APIKey})
 	w.WriteHeader(204)
 }
 
 // ---- conversations ----
 
 type chat struct {
-	mu    sync.Mutex
-	owner string // session id
+	mu    sync.Mutex // one answer at a time
+	owner string     // session id
 	conv  assistant.Conversation
-	last  time.Time
+	last  time.Time // guarded by chats
+	bytes int       // approximate history size, guarded by mu
+}
+
+// maxChatBytes bounds a conversation so it stays within model context limits.
+const maxChatBytes = 400_000
+
+func touchChat(c *chat) {
+	chats.Lock()
+	c.last = time.Now()
+	chats.Unlock()
 }
 
 var chats = struct {
@@ -116,6 +128,7 @@ func getChat(id, owner string) *chat {
 	if c == nil || c.owner != owner {
 		return nil
 	}
+	c.last = now
 	return c
 }
 
@@ -285,7 +298,7 @@ func (s *Server) runTool(ctx context.Context, ss *session, call assistant.ToolCa
 		if err := decodeStrict(call.Input, &in); err != nil {
 			return fail(err)
 		}
-		if !pvePathRe.MatchString(in.Path) || strings.Contains(in.Path, "..") || !strings.HasPrefix(in.Path, "/") {
+		if !pvePathRe.MatchString(in.Path) || strings.Contains(in.Path, "..") {
 			return fail(errors.New("invalid path"))
 		}
 		cl, _, err := s.userClient(ctx, ss, in.Cluster)
@@ -365,6 +378,7 @@ func (s *Server) runTool(ctx context.Context, ss *session, call assistant.ToolCa
 		if err != nil {
 			return fail(err)
 		}
+		plan.MarkAssistantDraft(p)
 		onChange(p)
 		return out(map[string]any{"status": "drafted, waiting for the user to review and apply it in the Changes tab", "changeId": p.ID, "destructive": p.Destructive, "confirmText": p.ConfirmText, "commands": p.CLI()})
 	case "propose_host_command":
@@ -381,6 +395,7 @@ func (s *Server) runTool(ctx context.Context, ss *session, call assistant.ToolCa
 		if err != nil {
 			return fail(err)
 		}
+		plan.MarkAssistantDraft(p)
 		onChange(p)
 		return out(map[string]any{"status": "drafted, waiting for the user to review and apply it", "changeId": p.ID, "confirmText": p.ConfirmText})
 	}
@@ -428,7 +443,11 @@ func (s *Server) assistantChat(w http.ResponseWriter, r *http.Request, ss *sessi
 		return
 	}
 	defer c.mu.Unlock()
-	c.last = time.Now()
+	touchChat(c)
+	if c.bytes+len(req.Message) > maxChatBytes {
+		apiError(w, 409, "conversation_full", "this conversation is too long; start a new one")
+		return
+	}
 
 	fl, ok := w.(http.Flusher)
 	if !ok {
@@ -450,8 +469,16 @@ func (s *Server) assistantChat(w http.ResponseWriter, r *http.Request, ss *sessi
 	defer cancel()
 
 	c.conv.AddUser(req.Message)
+	c.bytes += len(req.Message)
 	for i := 0; i < 16; i++ {
-		calls, err := c.conv.Step(ctx, func(e assistant.Event) { send("text", map[string]string{"delta": e.Text}) })
+		if c.bytes > maxChatBytes {
+			send("error", map[string]string{"message": "this conversation got too long; start a new one"})
+			return
+		}
+		calls, err := c.conv.Step(ctx, func(e assistant.Event) {
+			c.bytes += len(e.Text)
+			send("text", map[string]string{"delta": e.Text})
+		})
 		if err != nil {
 			s.log.Info("assistant error", "user", ss.user, "err", err)
 			send("error", map[string]string{"message": err.Error()})
@@ -478,7 +505,25 @@ func (s *Server) assistantChat(w http.ResponseWriter, r *http.Request, ss *sessi
 			}(j, call)
 		}
 		wg.Wait()
+		for _, r := range results {
+			c.bytes += len(r.Content)
+		}
 		c.conv.AddToolResults(results)
 	}
 	send("error", map[string]string{"message": "stopped after 16 tool rounds; ask a narrower question"})
+}
+
+func sameHost(a, b string) bool {
+	ua, ea := url.Parse(a)
+	ub, eb := url.Parse(b)
+	return ea == nil && eb == nil && strings.EqualFold(ua.Host, ub.Host) && ua.Scheme == ub.Scheme
+}
+
+func redactURL(u string) string {
+	p, err := url.Parse(u)
+	if err != nil {
+		return ""
+	}
+	p.User = nil
+	return p.String()
 }

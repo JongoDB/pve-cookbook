@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // Param describes one parameter (JSON-schema subset used by PVE).
@@ -285,7 +286,7 @@ func checkValue(p *Param, v string) string {
 	}
 	if p.Pattern != "" {
 		// PVE patterns are Perl regexes; check only those RE2 understands.
-		if re, err := regexp.Compile("^(?:" + p.Pattern + ")$"); err == nil && !re.MatchString(v) {
+		if re := compiled(p.Pattern); re != nil && !re.MatchString(v) {
 			return "does not match the expected format"
 		}
 	}
@@ -293,6 +294,21 @@ func checkValue(p *Param, v string) string {
 		return "contains control characters"
 	}
 	return ""
+}
+
+var patterns sync.Map // pattern -> *regexp.Regexp (nil if not RE2-compatible)
+
+func compiled(p string) *regexp.Regexp {
+	if v, ok := patterns.Load(p); ok {
+		re, _ := v.(*regexp.Regexp)
+		return re
+	}
+	re, err := regexp.Compile("^(?:" + p + ")$")
+	if err != nil {
+		re = nil
+	}
+	patterns.Store(p, re)
+	return re
 }
 
 // CLI renders the equivalent pvesh command for a call.
@@ -312,10 +328,20 @@ func CLI(method, path string, body map[string]string) string {
 		b.WriteString(" --")
 		b.WriteString(k)
 		b.WriteString(" ")
+		if Sensitive(k) {
+			b.WriteString("'<redacted>'")
+			continue
+		}
 		b.WriteString(Quote(body[k]))
 	}
 	return b.String()
 }
+
+var sensitiveKey = regexp.MustCompile(`(?i)(pass(word)?|secret|token|privkey|private-?key|api-?key|psk)$|^(value|key|keyring)$`)
+
+// Sensitive reports whether a parameter carries a secret (passwords, tokens,
+// keys); such values are kept out of CLI text and the audit log.
+func Sensitive(key string) bool { return sensitiveKey.MatchString(key) }
 
 var safeArg = regexp.MustCompile(`^[A-Za-z0-9_./:=,@%+-]+$`)
 

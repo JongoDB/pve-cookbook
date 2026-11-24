@@ -168,16 +168,16 @@ func (c *openAIConv) Step(ctx context.Context, emit func(Event)) ([]ToolCall, er
 		out = append(out, *tc)
 		tcs = append(tcs, map[string]any{"id": tc.ID, "type": "function", "function": map[string]any{"name": tc.Name, "arguments": raw}})
 	}
-	am := oaMsg{"role": "assistant", "content": text.String()}
-	if len(tcs) > 0 {
-		am["tool_calls"] = tcs
-	}
-	c.history = append(c.history, am)
 	if finish == "length" {
 		return nil, errors.New("the response hit the token limit before finishing")
 	}
 	if finish == "content_filter" {
 		return nil, ErrDeclined
 	}
+	am := oaMsg{"role": "assistant", "content": text.String()}
+	if len(tcs) > 0 {
+		am["tool_calls"] = tcs
+	}
+	c.history = append(c.history, am)
 	return out, nil
 }

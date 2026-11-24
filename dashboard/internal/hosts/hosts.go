@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -67,7 +68,8 @@ func Scan(ctx context.Context, addr string) (string, error) {
 			fp = ssh.FingerprintSHA256(key)
 			return errScanned
 		},
-		HostKeyAlgorithms: []string{ssh.KeyAlgoED25519, ssh.KeyAlgoECDSA256, ssh.KeyAlgoRSASHA256},
+		// Scan and Run must negotiate the same key type, or the pin never matches.
+		HostKeyAlgorithms: hostKeyAlgos,
 		Timeout:           10 * time.Second,
 	}
 	conn, err := dial(ctx, addr)
@@ -75,6 +77,7 @@ func Scan(ctx context.Context, addr string) (string, error) {
 		return "", err
 	}
 	defer conn.Close()
+	setDeadline(ctx, conn)
 	_, _, _, err = ssh.NewClientConn(conn, addr, cfg)
 	if fp != "" {
 		return fp, nil
@@ -83,6 +86,18 @@ func Scan(ctx context.Context, addr string) (string, error) {
 }
 
 var errScanned = errors.New("scanned")
+
+// hostKeyAlgos pins the ed25519 host key, which every current Debian/PVE node has.
+var hostKeyAlgos = []string{ssh.KeyAlgoED25519}
+
+// setDeadline bounds the SSH handshake (ClientConfig.Timeout only applies to ssh.Dial).
+func setDeadline(ctx context.Context, conn net.Conn) {
+	d := time.Now().Add(15 * time.Second)
+	if dl, ok := ctx.Deadline(); ok && dl.Before(d) {
+		d = dl
+	}
+	_ = conn.SetDeadline(d)
+}
 
 func dial(ctx context.Context, addr string) (net.Conn, error) {
 	if _, _, err := net.SplitHostPort(addr); err != nil {
@@ -101,12 +116,26 @@ type Result struct {
 // MaxOutput bounds captured output (stdout and stderr combined).
 const MaxOutput = 256 << 10
 
+// capped is written concurrently by the stdout and stderr copiers.
 type capped struct {
+	mu  sync.Mutex
 	buf bytes.Buffer
 	cut bool
 }
 
+func (c *capped) String() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	s := c.buf.String()
+	if c.cut {
+		s += "\n…(output truncated)"
+	}
+	return s
+}
+
 func (c *capped) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if room := MaxOutput - c.buf.Len(); room > 0 {
 		if len(p) > room {
 			c.buf.Write(p[:room])
@@ -134,17 +163,20 @@ func Run(ctx context.Context, k *Key, addr, pinnedFP, command string) (Result, e
 			}
 			return nil
 		},
-		Timeout: 10 * time.Second,
+		HostKeyAlgorithms: hostKeyAlgos,
+		Timeout:           10 * time.Second,
 	}
 	conn, err := dial(ctx, addr)
 	if err != nil {
 		return Result{}, err
 	}
+	setDeadline(ctx, conn)
 	c, chans, reqs, err := ssh.NewClientConn(conn, addr, cfg)
 	if err != nil {
 		conn.Close()
 		return Result{}, err
 	}
+	_ = conn.SetDeadline(time.Time{}) // the command itself is bounded by ctx
 	client := ssh.NewClient(c, chans, reqs)
 	defer client.Close()
 	sess, err := client.NewSession()
@@ -160,12 +192,10 @@ func Run(ctx context.Context, k *Key, addr, pinnedFP, command string) (Result, e
 	case <-ctx.Done():
 		_ = sess.Signal(ssh.SIGTERM)
 		client.Close()
-		return Result{Output: out.buf.String(), Exit: -1}, ctx.Err()
+		<-done // copiers finish before the buffer is read
+		return Result{Output: out.String(), Exit: -1}, ctx.Err()
 	case err := <-done:
-		res := Result{Output: out.buf.String()}
-		if out.cut {
-			res.Output += "\n…(output truncated)"
-		}
+		res := Result{Output: out.String()}
 		var ee *ssh.ExitError
 		switch {
 		case err == nil:

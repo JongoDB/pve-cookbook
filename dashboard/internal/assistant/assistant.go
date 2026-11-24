@@ -37,6 +37,10 @@ func DefaultConfig() Config {
 func (c Config) Validate() error {
 	switch c.Provider {
 	case "anthropic":
+		if c.BaseURL != "" && !strings.HasPrefix(c.BaseURL, "https://") &&
+			!strings.HasPrefix(c.BaseURL, "http://127.0.0.1") && !strings.HasPrefix(c.BaseURL, "http://localhost") {
+			return errors.New("baseUrl for Anthropic must use https://")
+		}
 	case "openai":
 		if c.BaseURL == "" {
 			return errors.New("baseUrl is required for OpenAI-compatible providers (e.g. https://api.openai.com/v1 or http://gpu-host:8000/v1)")

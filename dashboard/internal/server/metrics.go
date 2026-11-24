@@ -87,11 +87,14 @@ func (c *metricCache) get(k string, ttl time.Duration) (MetricSeries, bool) {
 func (c *metricCache) put(k string, ms MetricSeries) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if len(c.m) > 5000 { // crude bound
+	if len(c.m) > 5000 { // bound memory
 		for kk, e := range c.m {
 			if time.Since(e.at) > 5*time.Minute {
 				delete(c.m, kk)
 			}
+		}
+		if len(c.m) > 5000 {
+			c.m = map[string]metricCacheEntry{}
 		}
 	}
 	c.m[k] = metricCacheEntry{at: time.Now(), ms: ms}
@@ -180,9 +183,6 @@ func normalizeRRD(rows []map[string]any) ([]int64, map[string][]*float64) {
 			}
 			f, isNum := v.(float64)
 			if isNum && !math.IsNaN(f) && !math.IsInf(f, 0) {
-				if name == "ioWait" && f > 1 { // some versions report percent
-					f /= 100
-				}
 				ff := f
 				series[name][i] = &ff
 			}
@@ -284,7 +284,8 @@ func (s *Server) runMetric(ctx context.Context, ss *session, q MetricQuery) Metr
 		res.Error = err.Error()
 		return res
 	}
-	key := q.Cluster + "|" + q.Kind + "|" + q.ID + "|" + q.Timeframe + "|" + q.CF
+	// Key on the resolved PVE paths: the same id can resolve to different nodes for different users.
+	key := q.Cluster + "|" + q.Kind + "|" + strings.Join(paths, ",")
 	if ms, ok := mcache.get(key, timeframes[q.Timeframe]); ok {
 		return ms
 	}
@@ -362,14 +363,16 @@ func (s *Server) metricsBatch(w http.ResponseWriter, r *http.Request, ss *sessio
 
 // ---- read pass-through ----
 
-var pvePathRe = regexp.MustCompile(`^[A-Za-z0-9_.:@!%+=,\-/]+$`)
+// No percent-encoding: PVE path segments never need it, and decoded/encoded
+// mismatches could make galley check one path while PVE serves another.
+var pvePathRe = regexp.MustCompile(`^(/[A-Za-z0-9_.:@!+=,-]+)+$`)
 
 // pveGet proxies a GET to the PVE API **as the user**, so PVE's own ACL checks
 // apply. Detail pages and the generic resource editor read through it; every
 // write still goes through a reviewed plan.
 func (s *Server) pveGet(w http.ResponseWriter, r *http.Request, ss *session) {
 	p := "/" + r.PathValue("path")
-	if !pvePathRe.MatchString(p) || strings.Contains(p, "..") || strings.Contains(p, "//") {
+	if strings.Contains(r.URL.RawPath, "%") || !pvePathRe.MatchString(p) || strings.Contains(p, "..") {
 		apiError(w, 400, "bad_request", "invalid API path")
 		return
 	}
@@ -398,4 +401,14 @@ func (s *Server) pveGet(w http.ResponseWriter, r *http.Request, ss *session) {
 	_, _ = io.WriteString(w, `{"data":`)
 	_, _ = w.Write(out)
 	_, _ = io.WriteString(w, `}`)
+}
+
+func (c *metricCache) forget(cluster string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for k := range c.m {
+		if strings.HasPrefix(k, cluster+"|") {
+			delete(c.m, k)
+		}
+	}
 }

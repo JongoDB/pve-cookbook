@@ -42,8 +42,10 @@ type Plan struct {
 	Destructive bool   `json:"destructive"`
 	ConfirmText string `json:"confirmText,omitempty"`
 	Steps       []Step `json:"steps"`
-	CreatedAt   int64  `json:"createdAt"`
-	ExpiresAt   int64  `json:"expiresAt"`
+	// Source is "assistant" when the assistant drafted the plan.
+	Source    string `json:"source,omitempty"`
+	CreatedAt int64  `json:"createdAt"`
+	ExpiresAt int64  `json:"expiresAt"`
 
 	owner string
 	used  bool
@@ -616,9 +618,35 @@ type Call struct {
 }
 
 var (
-	apiPathRe       = regexp.MustCompile(`^/[A-Za-z0-9_.:@!%+=,\-/]+$`)
-	destructivePath = regexp.MustCompile(`/status/(stop|reset)$|/rollback$|/wipedisk$|/disks/(lvm|lvmthin|zfs|directory)/[^/]+$|/osd/[^/]+$`)
+	// Canonical paths only: no trailing slash, no percent-encoding, no empty segments.
+	apiPathRe = regexp.MustCompile(`^(/[A-Za-z0-9_.:@!+=,-]+)+$`)
+	// Matched schema templates whose calls disrupt service or destroy data.
+	destructiveTemplates = regexp.MustCompile(`/status/(stop|reset|suspend)$|/rollback$|/stopall$|/wipedisk$|/initgpt$|/disks/(lvm|lvmthin|zfs|directory)(/\{name\})?$|/ceph/osd(/\{osdid\})?$|/access/password$|/move_disk$|/move_volume$|/remote_migrate$`)
+	destructiveKeys      = map[string]bool{"delete": true, "purge": true, "destroy-unreferenced-disks": true, "force": true, "cleanup-disks": true, "skiplock": true}
 )
+
+// isDestructive decides from the matched template, method and body, not the raw path.
+func isDestructive(method, template string, body map[string]string) bool {
+	if method == http.MethodDelete || destructiveTemplates.MatchString(template) {
+		return true
+	}
+	for k, v := range body {
+		if destructiveKeys[k] && v != "" && v != "0" {
+			return true
+		}
+	}
+	switch {
+	case template == "/nodes/{node}/status" && (body["command"] == "reboot" || body["command"] == "shutdown"):
+		return true
+	case template == "/access/acl" && body["delete"] != "" && body["delete"] != "0":
+		return true
+	case strings.HasSuffix(template, "/firewall/options") && body["enable"] != "":
+		return true
+	case strings.HasPrefix(template, "/cluster/ha/resources") && (body["state"] == "stopped" || body["state"] == "disabled" || body["state"] == "ignored"):
+		return true
+	}
+	return false
+}
 
 // buildAPICall turns arbitrary API calls into a reviewable plan. Every call is
 // validated against the cluster's own API schema; PVE checks permissions when
@@ -648,8 +676,8 @@ func (m *Manager) buildAPICall(ctx context.Context, p *Plan, req Request) error 
 		if c.Method != http.MethodPost && c.Method != http.MethodPut && c.Method != http.MethodDelete {
 			return fmt.Errorf("%w: call %d: method must be POST, PUT or DELETE (reads need no change)", ErrBadRequest, i+1)
 		}
-		if !apiPathRe.MatchString(c.Path) || strings.Contains(c.Path, "..") || strings.Contains(c.Path, "//") {
-			return fmt.Errorf("%w: call %d: invalid path", ErrBadRequest, i+1)
+		if !apiPathRe.MatchString(c.Path) || strings.Contains(c.Path, "..") {
+			return fmt.Errorf("%w: call %d: invalid path (no trailing slash or percent-encoding)", ErrBadRequest, i+1)
 		}
 		if c.Body == nil {
 			c.Body = map[string]string{}
@@ -658,11 +686,12 @@ func (m *Manager) buildAPICall(ctx context.Context, p *Plan, req Request) error 
 		if err != nil {
 			return fmt.Errorf("%w: call %d (%s %s): %v", ErrBadRequest, i+1, c.Method, c.Path, err)
 		}
+		node, _, _ := sc.Match(c.Path)
 		desc, _, _ := strings.Cut(strings.TrimSpace(meth.Description), "\n")
 		if desc == "" {
 			desc = c.Method + " " + c.Path
 		}
-		if c.Method == http.MethodDelete || destructivePath.MatchString(c.Path) {
+		if isDestructive(c.Method, node.Path, c.Body) {
 			p.Destructive = true
 			deletes++
 		}
@@ -691,4 +720,20 @@ func (m *Manager) buildAPICall(ctx context.Context, p *Plan, req Request) error 
 		}
 	}
 	return nil
+}
+
+// MarkAssistantDraft labels a plan drafted by the assistant and always
+// requires typed confirmation, so data the model read (VM notes, names) can
+// never turn into a one-click change.
+func MarkAssistantDraft(p *Plan) {
+	p.Source = "assistant"
+	if !strings.HasPrefix(p.Title, "Assistant draft: ") {
+		p.Title = "Assistant draft: " + p.Title
+	}
+	if p.ConfirmText == "" {
+		p.ConfirmText = fmt.Sprintf("apply %d step", len(p.Steps))
+		if len(p.Steps) != 1 {
+			p.ConfirmText += "s"
+		}
+	}
 }

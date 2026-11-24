@@ -311,6 +311,10 @@ func (s *Server) baseClient(cid string) (*pve.Client, *store.Cluster, error) {
 }
 
 func (s *Server) dropClient(cid string) {
+	mcache.forget(cid)
+	schemas.mu.Lock()
+	delete(schemas.m, cid)
+	schemas.mu.Unlock()
 	s.mu.Lock()
 	if cl := s.clients[cid]; cl != nil {
 		cl.CloseIdle()

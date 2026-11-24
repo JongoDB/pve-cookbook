@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/binary"
+	"encoding/json"
 	"net"
 	"strings"
 	"sync"
@@ -128,11 +129,34 @@ func TestHostCommands(t *testing.T) {
 	if e.OK || e.Results[0].ExitStatus != "exit 3" {
 		t.Fatalf("failing command: %+v", e)
 	}
-	// a changed host key is refused
-	if code := root.do("PUT", "/api/clusters/pve-lab/hosts/pve1", map[string]any{"addr": sc.Addr, "fingerprint": "SHA256:" + strings.Repeat("A", 43)}, nil); code != 204 {
-		t.Fatalf("repin: %d", code)
+	// a pin must match what the node's own address presents, and the address can't be redirected
+	if code := root.do("PUT", "/api/clusters/pve-lab/hosts/pve1", map[string]any{"fingerprint": "SHA256:" + strings.Repeat("A", 43)}, nil); code != 409 {
+		t.Fatalf("pin with wrong fingerprint: %d", code)
 	}
-	e = root.runAndWait("host.exec", map[string]any{"node": "pve1", "command": "id"}, "run on pve1")
+	if code := root.do("PUT", "/api/clusters/pve-lab/hosts/pve1", map[string]any{"addr": "203.0.113.9:22", "fingerprint": sc.Fingerprint}, nil); code != 400 {
+		t.Fatalf("pin redirected to another address: %d", code)
+	}
+	// a node whose key changed after pinning is refused at run time
+	d2 := newSSHD(t)
+	d2.mu.Lock()
+	d2.allowed = pk
+	d2.mu.Unlock()
+	h.fake.Update(func(f *fakepve.Server) { f.NodeIP["pve2"] = d2.addr })
+	var sc2 struct{ Addr, Fingerprint string }
+	root.do("POST", "/api/clusters/pve-lab/hosts/pve2/scan", map[string]any{}, &sc2)
+	if code := root.do("PUT", "/api/clusters/pve-lab/hosts/pve2", map[string]any{"fingerprint": sc2.Fingerprint}, nil); code != 204 {
+		t.Fatalf("pin pve2: %d", code)
+	}
+	// simulate pve2 being replaced by a machine with a different host key at the pinned address
+	pins := map[string]map[string]map[string]any{}
+	raw, _ := h.st.GetSetting("hosts.pins")
+	_ = json.Unmarshal([]byte(raw), &pins)
+	pins["pve-lab"]["pve2"]["addr"] = d.addr
+	b, _ := json.Marshal(pins)
+	if err := h.st.PutSetting("hosts.pins", string(b)); err != nil {
+		t.Fatal(err)
+	}
+	e = root.runAndWait("host.exec", map[string]any{"node": "pve2", "command": "id"}, "run on pve2")
 	if e.OK || !strings.Contains(e.Results[0].Error, "host key changed") {
 		t.Fatalf("mismatched host key accepted: %+v", e)
 	}

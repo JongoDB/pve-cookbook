@@ -583,7 +583,14 @@ func (s *Server) auditVisible(ctx context.Context, ss *session, e store.AuditEnt
 	if v == nil {
 		return false
 	}
-	return v.sysAudit || e.ActorUser == v.pveUser
+	if e.ActorUser == v.pveUser {
+		return true
+	}
+	// Root command output can reveal anything on the node: administrators only.
+	if e.Action == "host.exec" {
+		return hostAdmin(v)
+	}
+	return v.sysAudit
 }
 
 func (s *Server) audit(w http.ResponseWriter, r *http.Request, ss *session) {

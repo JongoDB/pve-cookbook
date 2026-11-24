@@ -157,10 +157,10 @@ type auditEntry struct {
 var _ = plan.MethodSSH
 
 // runPlanID runs an existing plan and waits for it to finish.
-func (c *client) runPlanID(id string) auditEntry {
+func (c *client) runPlanID(id, confirm string) auditEntry {
 	c.h.t.Helper()
 	var run struct{ AuditID int64 }
-	if code := c.do("POST", "/api/plans/"+id+"/run", map[string]any{}, &run); code != 202 {
+	if code := c.do("POST", "/api/plans/"+id+"/run", map[string]any{"confirm": confirm}, &run); code != 202 {
 		c.h.t.Fatalf("run: %d", code)
 	}
 	return c.waitAudit(run.AuditID)
@@ -686,5 +686,33 @@ func TestGenericAPICallChange(t *testing.T) {
 		"calls": []map[string]any{{"method": "DELETE", "path": "/nodes/pve1/qemu/300", "body": map[string]string{"purge": "1"}}}}}, &p)
 	if !p.Destructive || p.ConfirmText != "delete qemu/300" || p.Steps[0].CLI != "pvesh delete /nodes/pve1/qemu/300 --purge 1" {
 		t.Fatalf("delete plan: %+v", p)
+	}
+}
+
+func TestAPICallPathCanonicalAndDestructive(t *testing.T) {
+	h := newHarness(t)
+	h.setup()
+	root := h.login("root@pam", "secret")
+	mk := func(method, path string, body map[string]string) (int, plan.Plan) {
+		var p plan.Plan
+		code := root.do("POST", "/api/plans", map[string]any{"action": "api.call", "clusterId": "pve-lab", "params": map[string]any{
+			"calls": []map[string]any{{"method": method, "path": path, "body": body}}}}, &p)
+		return code, p
+	}
+	for _, bad := range []string{"/nodes/pve1/qemu/300/config/", "/nodes/pve1%2Fqemu/300/config", "/nodes//qemu/300/config"} {
+		if code, _ := mk("PUT", bad, map[string]string{"cores": "2"}); code != 400 {
+			t.Fatalf("non-canonical path %s accepted: %d", bad, code)
+		}
+	}
+	if _, p := mk("PUT", "/nodes/pve1/qemu/300/config", map[string]string{"delete": "balloon"}); !p.Destructive {
+		t.Fatal("config delete= not treated as destructive")
+	}
+	if _, p := mk("PUT", "/nodes/pve1/qemu/300/config", map[string]string{"cores": "2"}); p.Destructive {
+		t.Fatal("plain config change treated as destructive")
+	}
+	var e struct{ Error string }
+	root.do("GET", "/api/clusters/pve-lab/pve/nodes/pve1%2Fqemu", nil, &e)
+	if !strings.Contains(e.Error, "invalid") {
+		t.Fatalf("encoded pass-through path accepted: %+v", e)
 	}
 }

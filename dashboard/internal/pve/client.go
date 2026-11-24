@@ -546,7 +546,7 @@ func (c *Client) WebsocketProxy(path string, q url.Values, ticket string) http.H
 		Transport:     c.http.Transport,
 		FlushInterval: -1,
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
-			http.Error(w, "console connection failed: "+err.Error(), http.StatusBadGateway)
+			http.Error(w, "console connection to the node failed", http.StatusBadGateway)
 		},
 	}
 }

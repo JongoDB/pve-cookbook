@@ -198,10 +198,12 @@ administrator rights on `/` of that cluster (`Sys.Modify`, `Sys.Console`, `Permi
   (`/etc/pve/priv/authorized_keys`).
 - `POST /api/clusters/{id}/hosts/{node}/scan` → `{"addr","fingerprint"}` read from the node's SSH
   server — compare with `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on the node.
-- `PUT /api/clusters/{id}/hosts/{node} {"addr","fingerprint"}` pins it; `DELETE` unpins.
+- `PUT /api/clusters/{id}/hosts/{node} {"fingerprint"}` pins it after galley re-reads the key
+  from the node's own cluster address (from `/cluster/status`; it cannot be pointed elsewhere)
+  and it matches; `DELETE` unpins. galley uses a separate SSH key per cluster.
 - Change action `host.exec {"node","command","reason"?}` — always needs typed confirmation
-  `run on <node>`; output (≤ 256 KiB) and exit status are recorded in the audit log. Connections
-  to a host whose key differs from the pin are refused.
+  `run on <node>`; output (≤ 256 KiB) and exit status are recorded in the audit log, visible only
+  to the actor and administrators. Connections to a host whose key differs from the pin are refused.
 
 ## Assistant
 
@@ -216,7 +218,9 @@ administrator rights on `/` of that cluster (`Sys.Modify`, `Sys.Console`, `Permi
 The assistant's tools run with the user's PVE permissions (`list_resources`, `get_findings`,
 `list_tasks`, `pve_get`, `get_metrics`, `api_schema`) and can only **draft** changes
 (`propose_change`, `propose_host_command` for administrators). Nothing is applied until the user
-applies it. Default model: `claude-opus-5-5` with Anthropic's server-side refusal fallback;
+applies it, and drafts are marked `"source":"assistant"`, titled "Assistant draft: …" and always
+need typed confirmation (`apply N steps`), so text the model read from the cluster can never become
+a one-click change. Conversations are capped (~400 KB); start a new one when told. Default model: `claude-opus-5-5` with Anthropic's server-side refusal fallback;
 OpenAI-compatible endpoints (OpenAI, xAI, OpenRouter, vLLM, Ollama) are supported via `baseUrl`.
 
 ## Plans (every mutation goes through a plan)
@@ -242,7 +246,12 @@ MVP actions (`params`):
 `api.call` is the generic create/update/delete: each call is validated against the cluster's
 API schema (method exists, every body key is a parameter — indexed families like `net0`
 match `net[n]` — types, ranges, enums, required parameters) and shown with its `pvesh`
-equivalent. It runs as the user like every other change.
+equivalent. It runs as the user like every other change. Paths must be canonical (no trailing
+slash, no percent-encoding). A call is destructive — typed confirmation — when it deletes, or its
+matched schema path stops/resets/rolls back/wipes/initializes disks or changes passwords, or its
+body deletes options, purges, forces, reboots or shuts down a node, removes ACLs, toggles a
+firewall, or stops an HA resource. Secret parameters (passwords, tokens, keys) are redacted from
+the CLI text and the audit log.
 
 `POST /api/plans/{id}/run` `{"confirm"?: "destroy 120"}` → `202 {"auditId","status":"running","results":[]}`
 

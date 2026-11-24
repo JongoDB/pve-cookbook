@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"net"
 	"net/http"
 	"regexp"
 	"sync"
@@ -47,10 +46,13 @@ type HostPin struct {
 
 var hostMu sync.Mutex
 
-func (s *Server) hostKey() (*hosts.Key, error) {
+// hostKey is galley's SSH identity for one cluster. Separate keys mean a pin
+// on cluster A can never reach nodes that only trust cluster B's key.
+func (s *Server) hostKey(cid string) (*hosts.Key, error) {
 	hostMu.Lock()
 	defer hostMu.Unlock()
-	if p, err := s.store.GetSetting(hostKeySetting); err == nil {
+	name := hostKeySetting + "." + cid
+	if p, err := s.store.GetSetting(name); err == nil {
 		return hosts.ParseKey([]byte(p))
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return nil, err
@@ -59,7 +61,7 @@ func (s *Server) hostKey() (*hosts.Key, error) {
 	if err != nil {
 		return nil, err
 	}
-	return k, s.store.PutSetting(hostKeySetting, string(k.PEM()))
+	return k, s.store.PutSetting(name, string(k.PEM()))
 }
 
 func (s *Server) hostPins() map[string]map[string]HostPin {
@@ -81,7 +83,7 @@ func (s *Server) hostRunner(cid string) plan.HostRunner {
 		if !ok {
 			return "", -1, errors.New("no confirmed SSH host key for " + node + "; pin it on the Hosts page first")
 		}
-		k, err := s.hostKey()
+		k, err := s.hostKey(cid)
 		if err != nil {
 			return "", -1, err
 		}
@@ -128,7 +130,7 @@ func (s *Server) listHosts(w http.ResponseWriter, r *http.Request, ss *session) 
 	if !s.requireHostAdmin(w, r, ss, cid) {
 		return
 	}
-	k, err := s.hostKey()
+	k, err := s.hostKey(cid)
 	if err != nil {
 		apiError(w, 500, "hosts", err.Error())
 		return
@@ -180,17 +182,41 @@ func (s *Server) pinHost(w http.ResponseWriter, r *http.Request, ss *session) {
 		return
 	}
 	var req struct{ Addr, Fingerprint string }
-	if err := readJSON(r, &req); err != nil || !fpRe.MatchString(req.Fingerprint) || net.ParseIP(req.Addr) == nil && !hostRe.MatchString(req.Addr) {
-		apiError(w, 400, "bad_request", "addr and a SHA256:… fingerprint are required")
+	if err := readJSON(r, &req); err != nil || !fpRe.MatchString(req.Fingerprint) {
+		apiError(w, 400, "bad_request", "the SHA256:… fingerprint you verified on the node is required")
 		return
 	}
+	// The address is the node's own cluster address, never user input, and the
+	// fingerprint must be what that address presents now: a pin cannot point a
+	// node of this cluster at a machine elsewhere.
+	addr, err := s.nodeAddr(r.Context(), cid, node)
+	if err != nil {
+		apiError(w, 404, "not_found", err.Error())
+		return
+	}
+	if req.Addr != "" && req.Addr != addr {
+		apiError(w, 400, "bad_request", "the address must be the node's cluster address "+addr)
+		return
+	}
+	sctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	live, err := hosts.Scan(sctx, addr)
+	cancel()
+	if err != nil {
+		apiError(w, 502, "ssh_unreachable", "could not read the host key of "+node+": "+err.Error())
+		return
+	}
+	if live != req.Fingerprint {
+		apiError(w, 409, "fingerprint_mismatch", "the node presents "+live+", not the fingerprint you entered")
+		return
+	}
+	req.Addr = addr
 	hostMu.Lock()
 	pins := s.hostPins()
 	if pins[cid] == nil {
 		pins[cid] = map[string]HostPin{}
 	}
 	pins[cid][node] = HostPin{Addr: req.Addr, Fingerprint: req.Fingerprint, PinnedBy: ss.user, PinnedAt: time.Now().Unix()}
-	err := s.savePins(pins)
+	err = s.savePins(pins)
 	hostMu.Unlock()
 	if err != nil {
 		apiError(w, 500, "store", err.Error())
