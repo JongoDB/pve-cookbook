@@ -1,7 +1,7 @@
 ---
 id: admin/passthrough-gpu
 title: Host resource passthrough & virtualization for GPU/LLM servers
-tested: untested
+tested: partial — steps 1–4 (IOMMU, vfio-pci by address, PCI mapping, q35/OVMF VM with mapping) on PVE 9.2.32, kernel 7.0.14, 2026-11-24
 risk: high
 runs_on: node
 ---
@@ -89,7 +89,7 @@ softdep nouveau pre: vfio-pci
 EOF
 ```
 
-After reboot:
+After reboot (verified on PVE 9.2 / kernel 7.0: the second A2 stays on the host driver):
 
 ```bash
 lspci -nnk -s 16:00.0 | grep 'Kernel driver in use: vfio-pci'
