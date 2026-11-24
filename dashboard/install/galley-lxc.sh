@@ -44,6 +44,11 @@ if [[ -z "$BIN" ]]; then
   [[ "$VER" != latest ]] && url="https://github.com/$REPO/releases/download/$VER/galley-linux-$ARCH"
   echo ">> downloading $url"
   curl -fsSL -o "$TMP/galley" "$url" || die "download failed (no release yet? use --binary)"
+  curl -fsSL -o "$TMP/SHA256SUMS" "${url%/*}/SHA256SUMS" || die "could not fetch SHA256SUMS for verification"
+  want="$(awk -v f="galley-linux-$ARCH" '$2==f || $2=="*"f {print $1}' "$TMP/SHA256SUMS")"
+  got="$(sha256sum "$TMP/galley" | awk '{print $1}')"
+  [[ -n "$want" && "$want" == "$got" ]] || die "checksum mismatch for galley-linux-$ARCH (want ${want:-none}, got $got)"
+  echo ">> sha256 verified ($got)"
   BIN="$TMP/galley"
 fi
 [[ -x "$BIN" || -f "$BIN" ]] || die "binary not found: $BIN"
@@ -91,7 +96,13 @@ systemctl enable -q --now galley
 IN
 
 for _ in $(seq 20); do pct exec "$ID" -- test -f /var/lib/galley/tls.crt && break; sleep 1; done
-CTIP="$(pct exec "$ID" -- hostname -I | awk '{print $1}')"
+CTIP=""
+for _ in $(seq 30); do  # wait for the IPv4 lease (DHCP); hostname -I may list IPv6 first
+  CTIP="$(pct exec "$ID" -- ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)"
+  [[ -n "$CTIP" ]] && break; sleep 1
+done
+[[ -n "$CTIP" ]] || CTIP="$(pct exec "$ID" -- hostname -I | awk '{print $1}')"
+[[ "$CTIP" == *:* ]] && CTIP="[$CTIP]"
 FP="$(pct exec "$ID" -- openssl x509 -in /var/lib/galley/tls.crt -noout -fingerprint -sha256 | cut -d= -f2)"
 
 if ((TOKEN)); then
@@ -109,7 +120,7 @@ cat <<EOF
 galley is running.
   URL:          https://$CTIP:8443
   TLS (sha256): $FP
-  Setup:        add this cluster's nodes (e.g. $(hostname -I | awk '{print $1}')), confirm their fingerprints,
+  Setup:        add this cluster's nodes (e.g. $(ip -4 -o addr show scope global | awk '{print $4}' | cut -d/ -f1 | head -1)), confirm their fingerprints,
                 then enter the service token below. Log in with your normal PVE account.
 EOF
 if [[ -n "${SECRET:-}" ]]; then

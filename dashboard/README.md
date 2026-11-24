@@ -30,8 +30,17 @@ detection, and safe bulk operations. Deep, rarely used settings link out to the 
 # Try it without Proxmox: an in-process fake cluster (log in as root / secret)
 cd dashboard && make web build && ./galley --demo --insecure-http --listen 127.0.0.1:8080
 
-# On a real cluster: run on any PVE node; creates an unprivileged Debian LXC
-bash dashboard/install/galley-lxc.sh --id 150 --storage vm-pool --bridge vmbr0 --ip dhcp --create-token
+# On a real cluster: run on any PVE node; creates an unprivileged Debian LXC and
+# downloads the release binary (sha256-verified against the release's SHA256SUMS)
+bash <(curl -fsSL https://github.com/JongoDB/pve-cookbook/releases/latest/download/galley-lxc.sh) \
+  --id 150 --storage vm-pool --bridge vmbr0 --ip dhcp --create-token
+# a specific (or pre-release) version:  … galley-lxc.sh --version v0.1.0-rc.1 …
+
+# Or just the binary, anywhere with network access to the cluster (Linux amd64/arm64):
+curl -fsSLO https://github.com/JongoDB/pve-cookbook/releases/latest/download/galley-linux-amd64
+curl -fsSLO https://github.com/JongoDB/pve-cookbook/releases/latest/download/SHA256SUMS
+sha256sum --ignore-missing -c SHA256SUMS && install -m 0755 galley-linux-amd64 /usr/local/bin/galley
+galley --listen :8443 --data /var/lib/galley
 ```
 
 `--create-token` creates `galley@pve` with `PVEAuditor` on `/` and the token `galley@pve!poller`
