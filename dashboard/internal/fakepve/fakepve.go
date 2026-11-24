@@ -47,7 +47,9 @@ type Server struct {
 	// TaskExit forces a task's exit status, keyed by mutation path.
 	TaskExit map[string]string
 	tasks    map[string]*fakeTask
-	Down     bool // respond 595 to everything (simulates pveproxy failure)
+	// NodeIP is the "ip" of each node in /cluster/status (host:port allowed in tests).
+	NodeIP map[string]string
+	Down   bool // respond 595 to everything (simulates pveproxy failure)
 	// Fail makes authenticated requests to these API paths (without the
 	// /api2/json prefix, e.g. "/cluster/status") answer 500. Mutate it with
 	// SetFail while the server is in use.
@@ -99,6 +101,7 @@ func New() *Server {
 	f.TokenPerms = map[string]int{"Sys.Audit": 1}
 	f.TaskExit = map[string]string{}
 	f.tasks = map[string]*fakeTask{}
+	f.NodeIP = map[string]string{"pve1": "192.0.2.11", "pve2": "192.0.2.12", "pve3": "192.0.2.13"}
 	f.Server = httptest.NewUnstartedServer(http.HandlerFunc(f.serve))
 	f.Server.TLS = &tls.Config{MinVersion: tls.VersionTLS12}
 	f.StartTLS()
@@ -343,7 +346,7 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 	case p == "/cluster/status":
 		write(w, 200, []map[string]any{
 			{"type": "cluster", "name": "pve-lab", "quorate": 1, "nodes": 3},
-			{"type": "node", "name": "pve1", "online": 1}, {"type": "node", "name": "pve2", "online": 1}, {"type": "node", "name": "pve3", "online": 1},
+			{"type": "node", "name": "pve1", "online": 1, "ip": f.NodeIP["pve1"]}, {"type": "node", "name": "pve2", "online": 1, "ip": f.NodeIP["pve2"]}, {"type": "node", "name": "pve3", "online": 1, "ip": f.NodeIP["pve3"]},
 		})
 	case p == "/cluster/resources":
 		res := []map[string]any{}
@@ -443,7 +446,7 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		f.mu.Unlock()
 		if f.Admins[user] {
-			perms["Sys.Modify"] = 1
+			perms["Sys.Modify"], perms["Sys.Console"], perms["Permissions.Modify"] = 1, 1, 1
 		}
 		write(w, 200, map[string]any{"/": perms})
 	default:

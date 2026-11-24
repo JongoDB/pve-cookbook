@@ -30,6 +30,10 @@ func (s *Server) createPlan(w http.ResponseWriter, r *http.Request, ss *session)
 		apiError(w, 409, "cluster_login_required", "log in to this cluster first")
 		return
 	}
+	if req.Action == "host.exec" && !hostAdmin(v) {
+		apiError(w, 403, "forbidden", hostAdminMsg)
+		return
+	}
 	p, err := s.plans.Build(r.Context(), ss.user, req, func(id int) bool { return v.guests[id] }, cl)
 	switch {
 	case errors.Is(err, plan.ErrTooMany):
@@ -70,6 +74,12 @@ func (s *Server) runPlan(w http.ResponseWriter, r *http.Request, ss *session) {
 		apiError(w, 409, "cluster_login_required", err.Error())
 		return
 	}
+	if hasHostSteps(p) {
+		if v := s.view(r.Context(), ss, p.ClusterID); v == nil || !hostAdmin(v) {
+			apiError(w, 403, "forbidden", hostAdminMsg)
+			return
+		}
+	}
 	p, err = s.plans.Take(id, ss.user, req.Confirm)
 	switch {
 	case errors.Is(err, plan.ErrNotFound):
@@ -102,7 +112,7 @@ func (s *Server) runPlan(w http.ResponseWriter, r *http.Request, ss *session) {
 			if e, err := s.store.UpdateAudit(entry.ID, "running", false, raw); err == nil {
 				s.broadcastAudit(e)
 			}
-		})
+		}, s.hostRunner(p.ClusterID))
 		if !ok && s.base.Err() != nil && len(results) > 0 {
 			results[len(results)-1].Error = "galley stopped while this step was running; check the PVE task log for the outcome"
 		}

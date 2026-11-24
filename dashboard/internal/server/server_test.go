@@ -154,6 +154,8 @@ type auditEntry struct {
 	Results   []plan.Result
 }
 
+var _ = plan.MethodSSH
+
 // runPlanID runs an existing plan and waits for it to finish.
 func (c *client) runPlanID(id string) auditEntry {
 	c.h.t.Helper()

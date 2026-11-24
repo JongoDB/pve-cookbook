@@ -174,6 +174,9 @@ func (s *Server) assistantTools() []assistant.ToolSpec {
 				"calls": map[string]any{"type": "array", "minItems": 1, "maxItems": 20, "items": map[string]any{"type": "object", "required": []string{"method", "path"},
 					"properties": map[string]any{"method": map[string]any{"type": "string", "enum": []string{"POST", "PUT", "DELETE"}}, "path": str("API path"), "body": map[string]any{"type": "object", "additionalProperties": map[string]any{"type": "string"}}}}}},
 			Required: []string{"cluster", "title", "calls"}},
+		{Name: "propose_host_command", Description: "Draft a shell command to run as root on a node (for what the PVE API cannot do: NIC settings, kernel parameters, packages, disks). Only administrators can apply it; it is NOT run until the user applies it in the Changes tab. Prefer the API (propose_change) whenever it can do the job.",
+			Properties: map[string]any{"cluster": str("cluster id"), "node": str("node name"), "command": str("shell command (bash)"), "reason": str("why this is needed, and its effect")},
+			Required:   []string{"cluster", "node", "command", "reason"}},
 	}
 }
 
@@ -364,6 +367,22 @@ func (s *Server) runTool(ctx context.Context, ss *session, call assistant.ToolCa
 		}
 		onChange(p)
 		return out(map[string]any{"status": "drafted, waiting for the user to review and apply it in the Changes tab", "changeId": p.ID, "destructive": p.Destructive, "confirmText": p.ConfirmText, "commands": p.CLI()})
+	case "propose_host_command":
+		var in struct{ Cluster, Node, Command, Reason string }
+		if err := decodeStrict(call.Input, &in); err != nil {
+			return fail(err)
+		}
+		v := s.view(ctx, ss, in.Cluster)
+		if !hostAdmin(v) {
+			return fail(errors.New("the user is not an administrator on this cluster, so host commands are unavailable; give the command for them to pass to an administrator"))
+		}
+		params, _ := json.Marshal(map[string]string{"node": in.Node, "command": in.Command, "reason": in.Reason})
+		p, err := s.plans.Build(ctx, ss.user, plan.Request{Action: "host.exec", ClusterID: in.Cluster, Params: params}, nil, nil)
+		if err != nil {
+			return fail(err)
+		}
+		onChange(p)
+		return out(map[string]any{"status": "drafted, waiting for the user to review and apply it", "changeId": p.ID, "confirmText": p.ConfirmText})
 	}
 	return fail(fmt.Errorf("unknown tool %q", call.Name))
 }

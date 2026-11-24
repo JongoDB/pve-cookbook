@@ -24,7 +24,7 @@ func fakeModel(t *testing.T) (*httptest.Server, *atomic.Int32) {
 			Tools    []any            `json:"tools"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
-		if len(body.Tools) != 7 {
+		if len(body.Tools) != 8 {
 			t.Errorf("tools offered: %d", len(body.Tools))
 		}
 		w.Header().Set("Content-Type", "text/event-stream")

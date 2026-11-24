@@ -27,6 +27,7 @@ type userView struct {
 	storage   map[string]bool // "node/storage"
 	sysAudit  bool            // Sys.Audit on / (cluster-wide state, all tasks)
 	sysModify bool            // Sys.Modify on / (cluster admin)
+	privs     map[string]bool // all privileges on /
 	err       error
 }
 
@@ -104,7 +105,7 @@ func (s *Server) view(ctx context.Context, ss *session, cid string) *userView {
 				nv.storage[r.Node+"/"+r.Storage] = true
 			}
 		}
-		nv.sysAudit, nv.sysModify = perms["Sys.Audit"], perms["Sys.Modify"]
+		nv.sysAudit, nv.sysModify, nv.privs = perms["Sys.Audit"], perms["Sys.Modify"], perms
 	}
 	s.mu.Lock()
 	s.views[key] = nv

@@ -58,7 +58,15 @@ type Result struct {
 	UPID       string `json:"upid,omitempty"`
 	ExitStatus string `json:"exitstatus,omitempty"`
 	Error      string `json:"error,omitempty"`
+	// Output of a host command (Method "SSH").
+	Output string `json:"output,omitempty"`
 }
+
+// HostRunner runs a shell command on a cluster node (see package hosts).
+type HostRunner func(ctx context.Context, node, command string) (output string, exit int, err error)
+
+// MethodSSH marks a step that runs Body["command"] on node Path over SSH.
+const MethodSSH = "SSH"
 
 // Target identifies a guest.
 type Target struct {
@@ -339,6 +347,35 @@ func (m *Manager) Build(ctx context.Context, user string, req Request, vis Visib
 		if err := m.buildAPICall(ctx, p, req); err != nil {
 			return nil, err
 		}
+	case "host.exec":
+		var prm struct {
+			Node    string `json:"node"`
+			Command string `json:"command"`
+			Reason  string `json:"reason"`
+		}
+		if err := json.Unmarshal(req.Params, &prm); err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrBadRequest, err)
+		}
+		prm.Command = strings.TrimSpace(prm.Command)
+		if !nodeRegexp.MatchString(prm.Node) || !contains(m.fleet.OnlineNodes(req.ClusterID), prm.Node) {
+			return nil, fmt.Errorf("%w: %q is not an online node of this cluster", ErrBadRequest, prm.Node)
+		}
+		if prm.Command == "" || len(prm.Command) > 8000 || strings.ContainsRune(prm.Command, 0) {
+			return nil, fmt.Errorf("%w: command required (max 8000 characters)", ErrBadRequest)
+		}
+		first, _, _ := strings.Cut(prm.Command, "\n")
+		if len(first) > 60 {
+			first = first[:60] + "…"
+		}
+		p.Steps = []Step{{Description: "Run as root on " + prm.Node, Method: MethodSSH, Path: prm.Node,
+			Body: map[string]string{"command": prm.Command}, CLI: "ssh root@" + prm.Node + " " + schema.Quote(prm.Command)}}
+		p.Title = "Run on " + prm.Node + ": " + first
+		if len(prm.Reason) <= 500 {
+			p.Summary = prm.Reason
+		}
+		p.Summary = strings.TrimSpace(p.Summary + " Runs as root outside the PVE API; PVE permissions do not limit it.")
+		p.Destructive = true
+		p.ConfirmText = "run on " + prm.Node
 	default:
 		return nil, fmt.Errorf("%w: unknown action %q", ErrBadRequest, req.Action)
 	}
@@ -426,7 +463,7 @@ var TaskPoll = time.Second
 // Execute runs the steps in order with the user's client, waiting for each
 // step's PVE task to finish and stopping at the first failure. progress is
 // called (if non-nil) whenever a result changes, with a copy of all results.
-func Execute(ctx context.Context, cl *pve.Client, p *Plan, progress func([]Result)) ([]Result, bool) {
+func Execute(ctx context.Context, cl *pve.Client, p *Plan, progress func([]Result), host HostRunner) ([]Result, bool) {
 	res := make([]Result, 0, len(p.Steps))
 	emit := func() {
 		if progress != nil {
@@ -434,6 +471,31 @@ func Execute(ctx context.Context, cl *pve.Client, p *Plan, progress func([]Resul
 		}
 	}
 	for i, s := range p.Steps {
+		if s.Method == MethodSSH {
+			r := Result{Step: i, Status: "running"}
+			res = append(res, r)
+			emit()
+			if host == nil {
+				r.Status, r.Error = "error", "host commands are not available"
+			} else {
+				out, code, err := host(ctx, s.Path, s.Body["command"])
+				r.Output, r.ExitStatus = out, fmt.Sprintf("exit %d", code)
+				switch {
+				case err != nil:
+					r.Status, r.Error = "error", err.Error()
+				case code != 0:
+					r.Status, r.Error = "error", fmt.Sprintf("command exited with status %d", code)
+				default:
+					r.Status, r.OK, r.ExitStatus = "ok", true, "OK"
+				}
+			}
+			res[len(res)-1] = r
+			emit()
+			if !r.OK {
+				return res, false
+			}
+			continue
+		}
 		form := url.Values{}
 		for k, v := range s.Body {
 			form.Set(k, v)
