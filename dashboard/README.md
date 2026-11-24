@@ -36,7 +36,8 @@ bash <(curl -fsSL https://github.com/JongoDB/pve-cookbook/releases/latest/downlo
   --id 150 --storage vm-pool --bridge vmbr0 --ip dhcp --create-token
 # a specific (or pre-release) version:  … galley-lxc.sh --version v0.1.0-rc.1 …
 
-# Or just the binary, anywhere with network access to the cluster (Linux amd64/arm64):
+# Or just the binary, anywhere with network access to the cluster (Linux amd64/arm64).
+# Minimal images (e.g. the Debian 13 LXC template) need: apt-get install -y curl ca-certificates
 curl -fsSLO https://github.com/JongoDB/pve-cookbook/releases/latest/download/galley-linux-amd64
 curl -fsSLO https://github.com/JongoDB/pve-cookbook/releases/latest/download/SHA256SUMS
 sha256sum --ignore-missing -c SHA256SUMS && install -m 0755 galley-linux-amd64 /usr/local/bin/galley
