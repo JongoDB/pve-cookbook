@@ -1,0 +1,71 @@
+import { useCallback, useEffect, useState } from 'react';
+import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
+import type { Api, Me } from './api/types';
+import { ApiError } from './api/http';
+import { AppProvider } from './state/app';
+import { Layout } from './components/Layout';
+import { ErrorBox } from './components/ui';
+import { Login, Setup } from './pages/Auth';
+import { Fleet } from './pages/Fleet';
+import { Guests } from './pages/Guests';
+import { Operations } from './pages/Operations';
+import { Audit } from './pages/Audit';
+import { Clusters } from './pages/Clusters';
+
+type Boot = { phase: 'loading' } | { phase: 'error'; message: string } | { phase: 'setup' } | { phase: 'login' } | { phase: 'ready'; me: Me };
+
+export function App({ api }: { api: Api }) {
+  const [boot, setBoot] = useState<Boot>({ phase: 'loading' });
+
+  const start = useCallback(async () => {
+    try {
+      const s = await api.setup();
+      if (s.needsSetup) { setBoot({ phase: 'setup' }); return; }
+      try {
+        setBoot({ phase: 'ready', me: await api.me() });
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 401) setBoot({ phase: 'login' });
+        else throw e;
+      }
+    } catch (e) {
+      setBoot({ phase: 'error', message: e instanceof Error ? e.message : String(e) });
+    }
+  }, [api]);
+
+  useEffect(() => { void start(); }, [start]);
+
+  const setMe = useCallback((m: Me | null) => setBoot(m ? { phase: 'ready', me: m } : { phase: 'login' }), []);
+
+  switch (boot.phase) {
+    case 'loading':
+      return <div className="boot muted">Connecting to galley…</div>;
+    case 'error':
+      return (
+        <div className="boot">
+          <ErrorBox message={`Cannot reach the galley API: ${boot.message}`} />
+          <button type="button" className="btn" onClick={() => void start()}>Retry</button>
+        </div>
+      );
+    case 'setup':
+      return <Setup api={api} onDone={() => setBoot({ phase: 'login' })} />;
+    case 'login':
+      return <Login api={api} onLogin={(m) => setBoot({ phase: 'ready', me: m })} />;
+    case 'ready':
+      return (
+        <BrowserRouter>
+          <AppProvider api={api} me={boot.me} setMe={setMe}>
+            <Layout>
+              <Routes>
+                <Route path="/" element={<Fleet />} />
+                <Route path="/guests" element={<Guests />} />
+                <Route path="/operations" element={<Operations />} />
+                <Route path="/audit" element={<Audit />} />
+                <Route path="/clusters" element={<Clusters />} />
+                <Route path="*" element={<Navigate to="/" replace />} />
+              </Routes>
+            </Layout>
+          </AppProvider>
+        </BrowserRouter>
+      );
+  }
+}

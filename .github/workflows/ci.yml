@@ -39,3 +39,32 @@ jobs:
       - name: no private identifiers
         run: |
           ! grep -rniE '192\.168\.86\.|BEGIN (RSA|OPENSSH) PRIVATE KEY|PVEAPIToken=[a-z0-9@!]+=[0-9a-f-]{36}' --exclude-dir=.git .
+  galley:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: dashboard/go.mod
+          cache-dependency-path: dashboard/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: dashboard/web/package-lock.json
+      - name: web (typecheck, lint, test, build)
+        working-directory: dashboard/web
+        run: npm ci && npm run typecheck && npm run lint && npm test && npm run build
+      - name: go vet + gofmt
+        run: go vet ./cmd/... ./internal/... && test -z "$(gofmt -l cmd internal)"
+      - name: go test (race)
+        run: go test -race -count=1 ./cmd/... ./internal/...
+      - name: build static binaries with embedded UI
+        run: |
+          for a in amd64 arm64; do CGO_ENABLED=0 GOOS=linux GOARCH=$a go build -trimpath -o /tmp/galley-$a ./cmd/galley; done
+          /tmp/galley-amd64 --version
+      - name: installer lint
+        run: shellcheck -S warning install/galley-lxc.sh

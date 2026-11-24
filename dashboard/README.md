@@ -1,7 +1,8 @@
 # galley — a cockpit for Proxmox VE admins
 
-> Status: **in design**. This document is the agreed specification. UI mockups will be
-> published for selection before any interface is built.
+> Status: **MVP** — fleet overview, guest inventory with bulk actions, ⌘K command palette,
+> plan pane with CLI equivalents, operations/task log, audit log, multi-cluster
+> registration with TLS pinning. Sections marked `v1` in the UI are next.
 
 galley is a single, self-hosted web app (one Go binary in a small LXC) for running one or
 many Proxmox VE clusters. It does **not** replace the PVE GUI or
@@ -22,6 +23,25 @@ detection, and safe bulk operations. Deep, rarely used settings link out to the 
 5. **Light.** No embedded time-series database. Live state comes from the PVE API (polled about every 5 s
    per cluster, pushed to browsers via SSE). Long-term metrics are handled by the monitoring
    recipes.
+
+## Run it
+
+```bash
+# Try it without Proxmox: an in-process fake cluster (log in as root / secret)
+cd dashboard && make web build && ./galley --demo --insecure-http --listen 127.0.0.1:8080
+
+# On a real cluster: run on any PVE node; creates an unprivileged Debian LXC
+bash dashboard/install/galley-lxc.sh --id 150 --storage vm-pool --bridge vmbr0 --ip dhcp --create-token
+```
+
+`--create-token` creates `galley@pve` with `PVEAuditor` on `/` and the token `galley@pve!poller`
+(the read-only poller credential) and prints the secret once. Open the printed URL, add the
+cluster's node addresses, confirm their certificate fingerprints, paste the token, then log
+in with your normal PVE account. Every change you make in galley runs as **you**.
+
+Development: `cd dashboard/web && npm run dev:mock` (UI only, mock API) or `npm run dev`
+(proxies `/api` to a local `galley --insecure-http --listen 127.0.0.1:8443`). Tests:
+`make test`. API contract: [`docs/api.md`](docs/api.md).
 
 ## Architecture
 
