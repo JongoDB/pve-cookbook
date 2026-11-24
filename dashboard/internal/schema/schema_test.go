@@ -83,7 +83,7 @@ func TestParseToleratesPVEQuirks(t *testing.T) {
 	    "node":{"type":"string"},
 	    "count":{"type":"integer","optional":"1","minimum":"0","maximum":"16777216"},
 	    "compression":{"type":"string","optional":1,"enum":null}}}}}}]}];`
-	s, err := Parse([]byte(doc))
+	s, err := schema.Parse([]byte(doc))
 	if err != nil {
 		t.Fatal(err)
 	}
