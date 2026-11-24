@@ -103,7 +103,7 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
         />
         {parsed.kind === 'command' && (
           <div className="palette-plan mono">
-            <div className="eyebrow">Plan preview · {ACTION_LABEL[parsed.action].toLowerCase()} · ↵ opens it in the plan pane</div>
+            <div className="eyebrow">Preview · {ACTION_LABEL[parsed.action].toLowerCase()} · ↵ builds the real plan in the plan pane</div>
             <div className="palette-cli">{parsed.preview}</div>
           </div>
         )}

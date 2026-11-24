@@ -14,12 +14,13 @@ detection, and safe bulk operations. Deep, rarely used settings link out to the 
 
 1. **Admin-first.** Dense, keyboard-driven (⌘K command palette), PVE terminology everywhere.
 2. **No parallel permission system.** You log in with PVE credentials (any realm: PAM, PVE,
-   OIDC). galley calls the API as you, so PVE ACLs and PVE's task log stay authoritative.
+   OpenID Connect via a PVE `openid` realm). galley reads and writes as you, so you only see
+   what your PVE permissions allow, and PVE's task log shows the real user.
 3. **Every write is a plan first.** Mutations show the exact API calls and the equivalent
    `pvesh`/`qm`/`pct` command, require typed confirmation when destructive, and are written
    to a copyable audit log. The admin always learns the CLI and can reproduce the action.
-4. **API-first.** The UI uses the same documented REST API (OpenAPI) that scripts use, and an
-   **MCP server** exposes the same guarded actions to AI agents.
+4. **API-first.** The UI uses the same documented REST API ([docs/api.md](docs/api.md)) that
+   scripts use. An MCP server for AI agents is planned.
 5. **Light.** No embedded time-series database. Live state comes from the PVE API (polled about every 5 s
    per cluster, pushed to browsers via SSE). Long-term metrics are handled by the monitoring
    recipes.
@@ -35,6 +36,8 @@ cd dashboard && make web build && ./galley --demo --insecure-http --listen 127.0
 bash <(curl -fsSL https://github.com/JongoDB/pve-cookbook/releases/latest/download/galley-lxc.sh) \
   --id 150 --storage vm-pool --bridge vmbr0 --ip dhcp --create-token
 # a specific (or pre-release) version:  … galley-lxc.sh --version v0.1.0-rc.1 …
+# upgrade an existing galley CT in place (sha256-verified download, or --binary PATH):
+#   … galley-lxc.sh --upgrade --id 150 [--version vX.Y.Z]
 
 # Or just the binary, anywhere with network access to the cluster (Linux amd64/arm64).
 # Minimal images (e.g. the Debian 13 LXC template) need: apt-get install -y curl ca-certificates
@@ -45,9 +48,12 @@ galley --listen :8443 --data /var/lib/galley
 ```
 
 `--create-token` creates `galley@pve` with `PVEAuditor` on `/` and the token `galley@pve!poller`
-(the read-only poller credential) and prints the secret once. Open the printed URL, add the
-cluster's node addresses, confirm their certificate fingerprints, paste the token, then log
-in with your normal PVE account. Every change you make in galley runs as **you**.
+(the read-only poller credential) and prints the secret once. The installer also prints a
+one-time **setup code** (galley writes it to `/var/lib/galley/setup-token` on first start, and
+logs it to `journalctl -u galley`); registering the first cluster requires it. Open the printed
+URL, enter the setup code, add the cluster's node addresses, confirm their certificate
+fingerprints, paste the token, then log in with your normal PVE account. Every change you make
+in galley runs as **you**.
 
 Development: `cd dashboard/web && npm run dev:mock` (UI only, mock API) or `npm run dev`
 (proxies `/api` to a local `galley --insecure-http --listen 127.0.0.1:8443`). Tests:
@@ -58,12 +64,12 @@ Development: `cd dashboard/web && npm run dev:mock` (UI only, mock API) or `npm 
 ```text
 browser ──HTTPS/SSE──► galley (Go, SQLite) ──HTTPS :8006──► cluster A (endpoints pve1,pve2,pve3; TLS pinned)
    ▲                      │  │                        └──► cluster B …
-   └── React/TS SPA ◄─────┘  └── MCP server (stdio / streamable HTTP) ◄── AI agents
+   └── React/TS SPA ◄─────┘
 ```
 
 - Per cluster: several API endpoints with automatic failover, and TLS fingerprints pinned on first use and confirmed by the admin.
-- Credentials: the user's PVE ticket for the session; optional per-user API tokens for extra clusters, stored encrypted at rest.
-- SQLite: cluster registry, pinned fingerprints, audit log, cached inventory, saved create profiles.
+- Credentials: a read-only `PVEAuditor` service token per cluster for the shared cache, and each user's own PVE ticket (renewed in the background, encrypted at rest) for everything shown to and done by that user.
+- SQLite (versioned migrations): cluster registry, pinned fingerprints, sessions, audit log, per-user preferences. Back up `/var/lib/galley` as a whole: `secret.key` decrypts the stored secrets.
 
 ## v1 features
 

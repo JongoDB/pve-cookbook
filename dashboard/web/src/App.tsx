@@ -11,8 +11,9 @@ import { Guests } from './pages/Guests';
 import { Operations } from './pages/Operations';
 import { Audit } from './pages/Audit';
 import { Clusters } from './pages/Clusters';
+import { SESSION_ENDED } from './lib/auth';
 
-type Boot = { phase: 'loading' } | { phase: 'error'; message: string } | { phase: 'setup' } | { phase: 'login' } | { phase: 'ready'; me: Me };
+type Boot = { phase: 'loading' } | { phase: 'error'; message: string } | { phase: 'setup' } | { phase: 'login'; notice?: string } | { phase: 'ready'; me: Me };
 
 export function App({ api }: { api: Api }) {
   const [boot, setBoot] = useState<Boot>({ phase: 'loading' });
@@ -34,6 +35,13 @@ export function App({ api }: { api: Api }) {
 
   useEffect(() => { void start(); }, [start]);
 
+  // Any 401 outside login (HttpApi reports them centrally) ends the session: back to login.
+  // Only acts while logged in, so the boot-time /api/me probe stays quiet.
+  useEffect(() => {
+    api.onUnauthorized(() => setBoot((b) => (b.phase === 'ready' ? { phase: 'login', notice: SESSION_ENDED } : b)));
+    return () => api.onUnauthorized(null);
+  }, [api]);
+
   const setMe = useCallback((m: Me | null) => setBoot(m ? { phase: 'ready', me: m } : { phase: 'login' }), []);
 
   switch (boot.phase) {
@@ -49,7 +57,7 @@ export function App({ api }: { api: Api }) {
     case 'setup':
       return <Setup api={api} onDone={() => setBoot({ phase: 'login' })} />;
     case 'login':
-      return <Login api={api} onLogin={(m) => setBoot({ phase: 'ready', me: m })} />;
+      return <Login api={api} notice={boot.notice} onLogin={(m) => setBoot({ phase: 'ready', me: m })} />;
     case 'ready':
       return (
         <BrowserRouter>

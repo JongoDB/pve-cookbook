@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -41,6 +42,8 @@ func main() {
 	interval := flag.Duration("poll", 5*time.Second, "cluster poll interval")
 	version := flag.Bool("version", false, "print version")
 	demo := flag.Bool("demo", false, "register an in-process fake cluster (log in as root / secret) — for trying galley without PVE")
+	var admins stringList
+	flag.Var(&admins, "admin", "PVE user (user@realm) allowed to add clusters; repeatable (default: users with Sys.Modify on / in every registered cluster)")
 	flag.Parse()
 	if *version {
 		fmt.Println(server.Version)
@@ -85,17 +88,25 @@ func main() {
 		log.Error("embedded UI", "err", err)
 		os.Exit(1)
 	}
+	api := server.New(st, poller, static, log, server.Options{DataDir: *data, SecureCookies: !*plainHTTP, Admins: admins})
 	srv := &http.Server{
 		Addr:              *listen,
-		Handler:           server.New(st, poller, static, log, !*plainHTTP).Handler(),
+		Handler:           api.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
+	srv.RegisterOnShutdown(api.StopStreams)
+	// Graceful stop: stop accepting requests, let running changes finish
+	// (up to 60s; the rest are recorded as interrupted), then exit.
+	stopped := make(chan struct{})
 	go func() {
+		defer close(stopped)
 		<-ctx.Done()
-		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		log.Info("shutting down")
+		sctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(sctx)
+		api.Shutdown(sctx)
 	}()
 
 	log.Info("galley starting", "version", server.Version, "listen", *listen, "data", *data)
@@ -116,7 +127,13 @@ func main() {
 		log.Error("serve", "err", err)
 		os.Exit(1)
 	}
+	<-stopped
 }
+
+type stringList []string
+
+func (l *stringList) String() string     { return strings.Join(*l, ",") }
+func (l *stringList) Set(v string) error { *l = append(*l, v); return nil }
 
 // ensureSelfSigned creates a 5-year ECDSA certificate on first start.
 func ensureSelfSigned(dir string) (string, string, error) {

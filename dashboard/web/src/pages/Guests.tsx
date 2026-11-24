@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import type { Guest, GuestTarget } from '../api/types';
 import { errMsg, useApp } from '../state/app';
@@ -7,6 +7,10 @@ import { bytes, uptime } from '../lib/format';
 import type { GuestAction } from '../lib/actions';
 
 const key = (g: Guest) => `${g.clusterId}:${g.vmid}`;
+/** Fleet ticks arrive every few seconds; the guest list refetches at most this often on them. */
+const GUEST_REFRESH_MS = 15_000;
+const hidden = () => typeof document !== 'undefined' && document.visibilityState === 'hidden';
+
 const statusTone = (s: string) => (s === 'running' ? 'ok' : s === 'paused' ? 'warn' : 'off');
 
 type Mode = null | 'snapshot' | 'migrate';
@@ -16,7 +20,7 @@ const POWER: [GuestAction, string][] = [
 ];
 
 export function Guests() {
-  const { api, fleet, openPlan, clusterName, me } = useApp();
+  const { api, fleet, openPlan, clusterName, me, lastAudit } = useApp();
   const [params, setParams] = useSearchParams();
   const q = params.get('q') ?? '';
   const cluster = params.get('cluster') ?? '';
@@ -30,12 +34,29 @@ export function Guests() {
   const [targets, setTargets] = useState<string[] | null>(null);
   const [target, setTarget] = useState('');
 
-  // Refetch on every fleet update so the table stays live.
+  // Keep the table live without hammering the API: refetch on fleet ticks at most every 15 s,
+  // immediately when filters change or a plan ran, and never while the tab is hidden.
+  const lastFetch = useRef(0);
+  const seq = useRef(0);
+  const refetch = useCallback((force: boolean) => {
+    if (hidden()) return;
+    if (!force && Date.now() - lastFetch.current < GUEST_REFRESH_MS) return;
+    lastFetch.current = Date.now();
+    const n = ++seq.current;
+    api.guests()
+      .then((g) => { if (n === seq.current) { setGuests(g); setErr(null); } })
+      .catch((e) => { if (n === seq.current) setErr(errMsg(e)); });
+  }, [api]);
+
+  useEffect(() => () => { seq.current++; }, []);
+  // (the search box filters client-side, so typing does not refetch)
+  useEffect(() => { refetch(true); }, [refetch, cluster, status, type, lastAudit?.id, lastAudit?.status]);
+  useEffect(() => { refetch(false); }, [refetch, fleet?.updatedAt]);
   useEffect(() => {
-    let alive = true;
-    api.guests().then((g) => { if (alive) { setGuests(g); setErr(null); } }).catch((e) => alive && setErr(errMsg(e)));
-    return () => { alive = false; };
-  }, [api, fleet?.updatedAt]);
+    const onVis = () => { if (!hidden()) refetch(false); };
+    document.addEventListener('visibilitychange', onVis);
+    return () => document.removeEventListener('visibilitychange', onVis);
+  }, [refetch]);
 
   const setParam = (k: string, v: string) => {
     const p = new URLSearchParams(params);

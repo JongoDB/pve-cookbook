@@ -4,7 +4,7 @@
 /** Public, pre-login: whether setup is needed and which clusters can be logged into. */
 export interface SetupInfo { needsSetup: boolean; clusters: { id: string; name: string }[] }
 
-export interface ApiErrorBody { error: string; code: string }
+export interface ApiErrorBody { error: string; code: string; /** seconds, with code "rate_limited" (429) */ retryAfter?: number }
 
 export interface Probe {
   host: string;
@@ -186,9 +186,26 @@ export interface PlanRequest {
   params: Record<string, unknown>;
 }
 
-export interface StepResult { step: number; ok: boolean; upid?: string; error?: string }
+export type StepStatus = 'running' | 'ok' | 'error';
 
-export interface RunResult { auditId: string; results: StepResult[] }
+export interface StepResult {
+  step: number;
+  ok: boolean;
+  upid?: string;
+  error?: string;
+  /** async runs: per-step progress (absent on the legacy synchronous shape) */
+  status?: StepStatus;
+  /** PVE task exit status, e.g. "OK" or "command 'qm start 120' failed: exit code 1" */
+  exitstatus?: string;
+}
+
+/**
+ * POST /api/plans/{id}/run. Either the synchronous 200 shape ({auditId, results} with every
+ * step finished) or the async 202 shape ({auditId, status:"running"}), after which progress
+ * arrives as `event: audit` frames whose id equals auditId. HttpApi normalises a missing
+ * `results` to [].
+ */
+export interface RunResult { auditId: string; status?: 'running' | 'done'; results: StepResult[] }
 
 export interface AuditEntry {
   id: string;
@@ -200,6 +217,8 @@ export interface AuditEntry {
   cli: string[];
   ok: boolean;
   results: StepResult[];
+  /** async runs: 'running' until every step has finished */
+  status?: 'running' | 'done';
 }
 
 export interface GuestTarget { vmid: number; node: string; type: GuestType }
@@ -208,7 +227,7 @@ export interface EventHandlers {
   fleet?: (f: Fleet) => void;
   tasks?: (t: Task[]) => void;
   audit?: (a: AuditEntry) => void;
-  /** live = SSE connected; polling = fallback */
+  /** live = SSE connected; polling = fallback while the stream is down (it keeps retrying) */
   mode?: (m: 'live' | 'polling') => void;
 }
 
@@ -216,8 +235,9 @@ export interface EventHandlers {
 export interface Api {
   health(): Promise<{ ok: boolean; version: string }>;
   setup(): Promise<SetupInfo>;
-  probe(endpoints: string[]): Promise<{ endpoints: Probe[] }>;
-  addCluster(req: AddClusterRequest): Promise<Cluster>;
+  /** setupToken: the installer's one-time setup code, required while no cluster is registered */
+  probe(endpoints: string[], setupToken?: string): Promise<{ endpoints: Probe[] }>;
+  addCluster(req: AddClusterRequest, setupToken?: string): Promise<Cluster>;
   clusters(): Promise<Cluster[]>;
   removeCluster(id: string): Promise<void>;
   login(req: LoginRequest): Promise<Me>;
@@ -232,4 +252,9 @@ export interface Api {
   runPlan(id: string, confirm?: string): Promise<RunResult>;
   audit(limit?: number): Promise<AuditEntry[]>;
   subscribe(h: EventHandlers): () => void;
+  /**
+   * Register (or clear, with null) the callback for any 401 outside of login: the session
+   * ended server-side and the app must return to the login screen.
+   */
+  onUnauthorized(fn: (() => void) | null): void;
 }

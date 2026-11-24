@@ -48,12 +48,15 @@ type Plan struct {
 	used  bool
 }
 
-// Result of one executed step.
+// Result of one executed step. Status is "running" while its PVE task runs,
+// then "ok" or "error"; OK mirrors Status=="ok" for older clients.
 type Result struct {
-	Step  int    `json:"step"`
-	OK    bool   `json:"ok"`
-	UPID  string `json:"upid,omitempty"`
-	Error string `json:"error,omitempty"`
+	Step       int    `json:"step"`
+	Status     string `json:"status"`
+	OK         bool   `json:"ok"`
+	UPID       string `json:"upid,omitempty"`
+	ExitStatus string `json:"exitstatus,omitempty"`
+	Error      string `json:"error,omitempty"`
 }
 
 // Target identifies a guest.
@@ -77,6 +80,7 @@ var (
 	ErrConfirm     = errors.New("confirmation text does not match")
 	ErrForbidden   = errors.New("plan belongs to another user")
 	ErrBadRequest  = errors.New("invalid plan request")
+	ErrTooMany     = errors.New("too many pending plans; run or discard some first")
 	snapNameRegexp = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{1,39}$`)
 	nodeRegexp     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.-]{0,62}$`)
 	jobRegexp      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$`)
@@ -84,6 +88,13 @@ var (
 
 // TTL is how long a plan stays runnable.
 const TTL = 10 * time.Minute
+
+// MaxPendingPerUser bounds memory used by unexecuted plans.
+const MaxPendingPerUser = 50
+
+// Visible reports whether the requesting user may see guest vmid in cluster.
+// A nil Visible allows everything (tests, internal callers).
+type Visible func(vmid int) bool
 
 // Manager builds and stores pending plans.
 type Manager struct {
@@ -108,7 +119,7 @@ func tool(t string) string {
 	return "qm"
 }
 
-func (m *Manager) resolve(cluster string, ts []Target) ([]Target, []fleet.Guest, error) {
+func (m *Manager) resolve(cluster string, ts []Target, vis Visible) ([]Target, []fleet.Guest, error) {
 	if len(ts) == 0 || len(ts) > 100 {
 		return nil, nil, fmt.Errorf("%w: 1–100 targets required", ErrBadRequest)
 	}
@@ -116,7 +127,7 @@ func (m *Manager) resolve(cluster string, ts []Target) ([]Target, []fleet.Guest,
 	gs := make([]fleet.Guest, 0, len(ts))
 	for _, t := range ts {
 		g, ok := m.fleet.Guest(cluster, t.VMID)
-		if !ok {
+		if !ok || (vis != nil && !vis(t.VMID)) {
 			return nil, nil, fmt.Errorf("%w: guest %d not found in cluster", ErrBadRequest, t.VMID)
 		}
 		// Authoritative node/type come from the cache, not the client.
@@ -136,7 +147,7 @@ func vmids(ts []Target) string {
 }
 
 // Build creates a plan for the user. It never calls mutating APIs.
-func (m *Manager) Build(ctx context.Context, user string, req Request) (*Plan, error) {
+func (m *Manager) Build(ctx context.Context, user string, req Request, vis Visible) (*Plan, error) {
 	p := &Plan{ID: newID(), Action: req.Action, ClusterID: req.ClusterID, CreatedAt: time.Now().Unix(), owner: user}
 	p.ExpiresAt = p.CreatedAt + int64(TTL.Seconds())
 	if m.fleet.ServiceClient(req.ClusterID) == nil {
@@ -148,7 +159,7 @@ func (m *Manager) Build(ctx context.Context, user string, req Request) (*Plan, e
 		if err := json.Unmarshal(req.Params, &prm); err != nil {
 			return nil, fmt.Errorf("%w: %v", ErrBadRequest, err)
 		}
-		ts, _, err := m.resolve(req.ClusterID, prm.Targets)
+		ts, _, err := m.resolve(req.ClusterID, prm.Targets, vis)
 		if err != nil {
 			return nil, err
 		}
@@ -178,7 +189,7 @@ func (m *Manager) Build(ctx context.Context, user string, req Request) (*Plan, e
 		if !nodeRegexp.MatchString(prm.Target) || !contains(m.fleet.OnlineNodes(req.ClusterID), prm.Target) {
 			return nil, fmt.Errorf("%w: target node %q is not an online node of this cluster", ErrBadRequest, prm.Target)
 		}
-		ts, gs, err := m.resolve(req.ClusterID, prm.Targets)
+		ts, gs, err := m.resolve(req.ClusterID, prm.Targets, vis)
 		if err != nil {
 			return nil, err
 		}
@@ -194,6 +205,8 @@ func (m *Manager) Build(ctx context.Context, user string, req Request) (*Plan, e
 			case t.Type == "qemu" && running && online:
 				body["online"] = "1"
 				cli += " --online"
+			case t.Type == "qemu" && running:
+				return nil, fmt.Errorf("%w: VM %d is running; shut it down first or migrate it online", ErrBadRequest, t.VMID)
 			case t.Type == "lxc" && running:
 				body["restart"] = "1"
 				cli += " --restart"
@@ -217,7 +230,7 @@ func (m *Manager) Build(ctx context.Context, user string, req Request) (*Plan, e
 		if !snapNameRegexp.MatchString(prm.Name) {
 			return nil, fmt.Errorf("%w: snapshot name must start with a letter, 2–40 chars of [A-Za-z0-9_-]", ErrBadRequest)
 		}
-		ts, _, err := m.resolve(req.ClusterID, prm.Targets)
+		ts, _, err := m.resolve(req.ClusterID, prm.Targets, vis)
 		if err != nil {
 			return nil, err
 		}
@@ -238,7 +251,7 @@ func (m *Manager) Build(ctx context.Context, user string, req Request) (*Plan, e
 		if err := json.Unmarshal(req.Params, &prm); err != nil {
 			return nil, fmt.Errorf("%w: %v", ErrBadRequest, err)
 		}
-		ts, gs, err := m.resolve(req.ClusterID, prm.Targets)
+		ts, gs, err := m.resolve(req.ClusterID, prm.Targets, vis)
 		if err != nil {
 			return nil, err
 		}
@@ -260,16 +273,34 @@ func (m *Manager) Build(ctx context.Context, user string, req Request) (*Plan, e
 			VMIDs []int
 			Job   string
 		}
-		if err := json.Unmarshal(req.Params, &prm); err != nil || len(prm.VMIDs) == 0 || !jobRegexp.MatchString(prm.Job) {
-			return nil, fmt.Errorf("%w: vmids and job required", ErrBadRequest)
+		if err := json.Unmarshal(req.Params, &prm); err != nil || len(prm.VMIDs) == 0 || len(prm.VMIDs) > 100 || !jobRegexp.MatchString(prm.Job) {
+			return nil, fmt.Errorf("%w: 1–100 vmids and a job are required", ErrBadRequest)
+		}
+		for _, id := range prm.VMIDs {
+			if _, ok := m.fleet.Guest(req.ClusterID, id); !ok || (vis != nil && !vis(id)) {
+				return nil, fmt.Errorf("%w: guest %d not found in cluster", ErrBadRequest, id)
+			}
 		}
 		var job struct {
 			All     int    `json:"all"`
 			VMID    string `json:"vmid"`
 			Exclude string `json:"exclude"`
+			Pool    string `json:"pool"`
+			Node    string `json:"node"`
+			Digest  string `json:"digest"`
 		}
 		if err := m.fleet.ServiceClient(req.ClusterID).Get(ctx, "/cluster/backup/"+url.PathEscape(prm.Job), &job); err != nil {
 			return nil, fmt.Errorf("%w: read job %s: %v", ErrBadRequest, prm.Job, err)
+		}
+		if job.Pool != "" {
+			return nil, fmt.Errorf("%w: job %s selects guests by pool %q; add the guests to that pool instead", ErrBadRequest, prm.Job, job.Pool)
+		}
+		if job.Node != "" {
+			for _, id := range prm.VMIDs {
+				if g, _ := m.fleet.Guest(req.ClusterID, id); g.Node != job.Node {
+					return nil, fmt.Errorf("%w: job %s only runs on node %s but guest %d is on %s", ErrBadRequest, prm.Job, job.Node, id, g.Node)
+				}
+			}
 		}
 		body := map[string]string{}
 		var cli string
@@ -287,6 +318,9 @@ func (m *Manager) Build(ctx context.Context, user string, req Request) (*Plan, e
 			body["vmid"] = joinIDs(ids)
 			cli = fmt.Sprintf("pvesh set /cluster/backup/%s --vmid %s", prm.Job, joinIDs(ids))
 		}
+		if job.Digest != "" { // PVE rejects the update if the job changed since this plan was built
+			body["digest"] = job.Digest
+		}
 		p.Steps = append(p.Steps, Step{Description: fmt.Sprintf("Include %s in backup job %s", joinIDs(prm.VMIDs), prm.Job), Method: http.MethodPut,
 			Path: "/cluster/backup/" + url.PathEscape(prm.Job), Body: body, CLI: cli})
 		p.Title = fmt.Sprintf("Protect %s with %s", joinIDs(prm.VMIDs), prm.Job)
@@ -295,9 +329,18 @@ func (m *Manager) Build(ctx context.Context, user string, req Request) (*Plan, e
 		return nil, fmt.Errorf("%w: unknown action %q", ErrBadRequest, req.Action)
 	}
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.gc()
+	n := 0
+	for _, q := range m.plans {
+		if q.owner == user && !q.used {
+			n++
+		}
+	}
+	if n >= MaxPendingPerUser {
+		return nil, ErrTooMany
+	}
 	m.plans[p.ID] = p
-	m.mu.Unlock()
 	return p, nil
 }
 
@@ -310,8 +353,8 @@ func (m *Manager) gc() {
 	}
 }
 
-// Take claims a plan for execution (single use) after checking owner and confirmation.
-func (m *Manager) Take(id, user, confirm string) (*Plan, error) {
+// Peek returns a pending plan for its owner without consuming it.
+func (m *Manager) Peek(id, user string) (*Plan, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	p := m.plans[id]
@@ -319,7 +362,34 @@ func (m *Manager) Take(id, user, confirm string) (*Plan, error) {
 		return nil, ErrNotFound
 	}
 	if p.owner != user {
-		return nil, ErrForbidden
+		return nil, ErrNotFound // do not reveal other users' plans
+	}
+	if p.used {
+		return nil, ErrUsed
+	}
+	return p, nil
+}
+
+// Discard drops a pending plan.
+func (m *Manager) Discard(id, user string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if p := m.plans[id]; p != nil && p.owner == user {
+		delete(m.plans, id)
+	}
+}
+
+// Take claims a plan for execution (single use) after checking owner and confirmation.
+func (m *Manager) Take(id, user, confirm string) (*Plan, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.gc()
+	p := m.plans[id]
+	if p == nil || time.Now().Unix() > p.ExpiresAt {
+		return nil, ErrNotFound
+	}
+	if p.owner != user {
+		return nil, ErrNotFound
 	}
 	if p.used {
 		return nil, ErrUsed
@@ -331,10 +401,22 @@ func (m *Manager) Take(id, user, confirm string) (*Plan, error) {
 	return p, nil
 }
 
-// Execute runs the steps in order with the user's client, stopping at the first failure.
-func Execute(ctx context.Context, cl *pve.Client, p *Plan) ([]Result, bool) {
+// TaskTimeout bounds how long Execute waits for one PVE task.
+var TaskTimeout = 30 * time.Minute
+
+// TaskPoll is how often Execute polls a running task.
+var TaskPoll = time.Second
+
+// Execute runs the steps in order with the user's client, waiting for each
+// step's PVE task to finish and stopping at the first failure. progress is
+// called (if non-nil) whenever a result changes, with a copy of all results.
+func Execute(ctx context.Context, cl *pve.Client, p *Plan, progress func([]Result)) ([]Result, bool) {
 	res := make([]Result, 0, len(p.Steps))
-	ok := true
+	emit := func() {
+		if progress != nil {
+			progress(append([]Result(nil), res...))
+		}
+	}
 	for i, s := range p.Steps {
 		form := url.Values{}
 		for k, v := range s.Body {
@@ -342,19 +424,37 @@ func Execute(ctx context.Context, cl *pve.Client, p *Plan) ([]Result, bool) {
 		}
 		var upid any
 		err := cl.Do(ctx, s.Method, s.Path, form, &upid)
-		r := Result{Step: i, OK: err == nil}
+		r := Result{Step: i, Status: "ok", OK: true}
 		if u, isStr := upid.(string); isStr && strings.HasPrefix(u, "UPID:") {
 			r.UPID = u
 		}
-		if err != nil {
-			r.Error = err.Error()
-			ok = false
+		if err == nil && r.UPID != "" {
+			r.Status, r.OK = "running", false
 			res = append(res, r)
-			break
+			emit()
+			tctx, cancel := context.WithTimeout(ctx, TaskTimeout)
+			exit, werr := cl.WaitTask(tctx, r.UPID, TaskPoll)
+			cancel()
+			r.ExitStatus = exit
+			switch {
+			case werr != nil:
+				err = fmt.Errorf("task did not finish: %w", werr)
+			case exit != "OK" && !strings.HasPrefix(exit, "WARNINGS"):
+				err = fmt.Errorf("task failed: %s", exit)
+			}
+			res = res[:len(res)-1]
 		}
+		if err != nil {
+			r.Status, r.OK, r.Error = "error", false, err.Error()
+			res = append(res, r)
+			emit()
+			return res, false
+		}
+		r.Status, r.OK = "ok", true
 		res = append(res, r)
+		emit()
 	}
-	return res, ok
+	return res, true
 }
 
 // CLI returns the plan's CLI lines.

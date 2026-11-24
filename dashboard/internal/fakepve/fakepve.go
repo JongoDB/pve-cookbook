@@ -37,7 +37,29 @@ type Server struct {
 	BackupJob map[string]any
 	NoBackup  []int
 	Ring1     bool
-	Down      bool // respond 595 to everything (simulates pveproxy failure)
+	// Restricted users see only these guests and hold no privileges on "/".
+	Restricted map[string][]int
+	// TokenPerms are the poller token's privileges on "/" (default Sys.Audit).
+	TokenPerms map[string]int
+	// TaskDuration is how long mutation tasks stay "running".
+	TaskDuration time.Duration
+	// TaskExit forces a task's exit status, keyed by mutation path.
+	TaskExit map[string]string
+	tasks    map[string]*fakeTask
+	Down     bool // respond 595 to everything (simulates pveproxy failure)
+	// Fail makes authenticated requests to these API paths (without the
+	// /api2/json prefix, e.g. "/cluster/status") answer 500. Mutate it with
+	// SetFail while the server is in use.
+	Fail map[string]bool
+	// Delay holds authenticated requests to these API paths for the given
+	// duration (or until the client gives up). Mutate it with SetDelay while
+	// the server is in use.
+	Delay map[string]time.Duration
+	// StorageConfig is served by GET /storage (the cluster storage
+	// configuration). Set "disable": 1 on an entry to model disabled storage.
+	StorageConfig []map[string]any
+	// HAServices are the "service" entries of /cluster/ha/status/current.
+	HAServices []map[string]any
 }
 
 // New starts a fake cluster with three nodes and a few guests.
@@ -58,18 +80,99 @@ func New() *Server {
 		BackupJob: map[string]any{"id": "nightly-all", "all": 1, "exclude": "131", "enabled": 1, "schedule": "01:30"},
 		NoBackup:  []int{131},
 		Ring1:     true,
+		Fail:      map[string]bool{},
+		Delay:     map[string]time.Duration{},
+		// nas-backup is enabled but unreachable: /cluster/resources reports it
+		// with status "unknown" on every node.
+		HAServices: []map[string]any{{"type": "service", "id": "vm:120", "sid": "vm:120", "node": "pve1", "state": "started"}},
+		StorageConfig: []map[string]any{
+			{"storage": "vm-pool", "type": "rbd", "content": "images,rootdir", "shared": 1},
+			{"storage": "local", "type": "dir", "content": "iso,vztmpl,backup", "shared": 0},
+			{"storage": "nas-backup", "type": "nfs", "content": "backup", "shared": 1},
+		},
 	}
 	f.TOTPUsers["mfa@pve"] = "123456"
 	f.Users["mfa@pve"] = "mfapass"
+	f.Users["dev@pve"] = "devpass"
+	f.Restricted = map[string][]int{"dev@pve": {121}}
+	f.TokenPerms = map[string]int{"Sys.Audit": 1}
+	f.TaskExit = map[string]string{}
+	f.tasks = map[string]*fakeTask{}
 	f.Server = httptest.NewUnstartedServer(http.HandlerFunc(f.serve))
 	f.Server.TLS = &tls.Config{MinVersion: tls.VersionTLS12}
 	f.StartTLS()
 	return f
 }
 
+type fakeTask struct {
+	done   time.Time
+	exit   string
+	effect func()
+	fired  bool
+}
+
+// settle applies the effects of finished tasks. Caller holds f.mu.
+func (f *Server) settle() {
+	now := time.Now()
+	for _, t := range f.tasks {
+		if !t.fired && !now.Before(t.done) {
+			t.fired = true
+			if t.effect != nil && t.exit == "OK" {
+				t.effect()
+			}
+		}
+	}
+}
+
+func (f *Server) guestLocked(vmid string) map[string]any {
+	for _, g := range f.Guests {
+		if fmt.Sprint(g["vmid"]) == vmid {
+			return g
+		}
+	}
+	return nil
+}
+
 // Endpoint returns this server as a pinned galley endpoint.
 func (f *Server) Endpoint() pve.Endpoint {
 	return pve.Endpoint{Host: strings.TrimPrefix(f.URL, "https://"), Fingerprint: pve.Fingerprint(f.Certificate())}
+}
+
+// Update runs fn with the server's lock held, so tests can change its
+// configuration (Down, Ring1, HAServices, StorageConfig, Fail, Delay, ...)
+// while requests are being served. fn must not call other Server methods.
+func (f *Server) Update(fn func(s *Server)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	fn(f)
+}
+
+// SetFail makes requests to path answer 500 (fail=true) or behave normally.
+func (f *Server) SetFail(path string, fail bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.Fail == nil {
+		f.Fail = map[string]bool{}
+	}
+	if fail {
+		f.Fail[path] = true
+	} else {
+		delete(f.Fail, path)
+	}
+}
+
+// SetDelay delays responses to path by d (0 removes the delay).
+func (f *Server) SetDelay(path string, d time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.Delay == nil {
+		f.Delay = map[string]time.Duration{}
+	}
+	if d > 0 {
+		f.Delay[path] = d
+	} else {
+		delete(f.Delay, path)
+	}
 }
 
 // Recorded returns a copy of recorded mutations.
@@ -100,7 +203,10 @@ func (f *Server) who(r *http.Request) string {
 }
 
 func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
-	if f.Down {
+	f.mu.Lock()
+	down := f.Down
+	f.mu.Unlock()
+	if down {
 		w.WriteHeader(595)
 		return
 	}
@@ -110,10 +216,51 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 		f.ticket(w, r)
 		return
 	}
+	switch {
+	case p == "/access/domains" && r.Method == http.MethodGet:
+		write(w, 200, []map[string]any{{"realm": "pam", "type": "pam", "comment": "Linux PAM"}, {"realm": "pve", "type": "pve", "comment": "Proxmox VE"}, {"realm": "sso", "type": "openid", "comment": "Company SSO"}})
+		return
+	case p == "/access/openid/auth-url" && r.Method == http.MethodPost:
+		if r.Form.Get("realm") != "sso" {
+			write(w, 400, nil)
+			return
+		}
+		write(w, 200, "https://idp.invalid/authorize?client_id=pve&state=st-"+fmt.Sprint(time.Now().UnixNano())+"&redirect_uri="+r.Form.Get("redirect-url"))
+		return
+	case p == "/access/openid/login" && r.Method == http.MethodPost:
+		if r.Form.Get("code") != "good" || !strings.HasPrefix(r.Form.Get("state"), "st-") {
+			write(w, 401, nil)
+			return
+		}
+		f.mu.Lock()
+		t := "PVE:alice@sso:O" + fmt.Sprint(len(f.tickets))
+		f.tickets[t] = "alice@sso"
+		f.mu.Unlock()
+		write(w, 200, map[string]any{"ticket": t, "CSRFPreventionToken": "csrf-alice", "username": "alice@sso"})
+		return
+	}
 	user := f.who(r)
 	if user == "" {
 		w.WriteHeader(401)
 		_, _ = w.Write([]byte(`{"data":null,"message":"authentication failure"}`))
+		return
+	}
+	f.mu.Lock()
+	fail, delay := f.Fail[p], f.Delay[p]
+	f.mu.Unlock()
+	if delay > 0 {
+		t := time.NewTimer(delay)
+		select {
+		case <-t.C:
+		case <-r.Context().Done():
+			t.Stop()
+			return
+		}
+	}
+	if fail {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(500)
+		_, _ = w.Write([]byte(`{"data":null,"message":"injected failure"}`))
 		return
 	}
 	if r.Method != http.MethodGet {
@@ -132,10 +279,56 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 			write(w, 200, nil)
 			return
 		}
-		write(w, 200, fmt.Sprintf("UPID:pve1:0000ABCD:00000001:%08X:fake:%s:%s:", time.Now().Unix(), strings.ReplaceAll(p, "/", "_"), user))
+		parts := strings.Split(strings.Trim(p, "/"), "/") // nodes/N/qemu/ID[/status/verb]
+		var effect func()
+		if len(parts) >= 4 && parts[0] == "nodes" {
+			f.mu.Lock()
+			f.settle()
+			g := f.guestLocked(parts[3])
+			if g != nil && r.Method == http.MethodDelete && g["status"] == "running" {
+				f.mu.Unlock()
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(500)
+				_, _ = w.Write([]byte(`{"data":null,"message":"VM ` + parts[3] + ` is running - destroy failed"}`))
+				return
+			}
+			if g != nil && len(parts) == 6 && parts[4] == "status" {
+				st := map[string]string{"start": "running", "stop": "stopped", "shutdown": "stopped"}[parts[5]]
+				if st != "" {
+					effect = func() { g["status"] = st }
+				}
+			}
+			f.mu.Unlock()
+		}
+		f.mu.Lock()
+		upid := fmt.Sprintf("UPID:%s:0000ABCD:%08X:%08X:fake:%s:%s:", nodeOf(p), len(f.Calls), time.Now().Unix(), strings.ReplaceAll(p, "/", "_"), user)
+		exit := f.TaskExit[p]
+		if exit == "" {
+			exit = "OK"
+		}
+		f.tasks[upid] = &fakeTask{done: time.Now().Add(f.TaskDuration), exit: exit, effect: effect}
+		f.mu.Unlock()
+		write(w, 200, upid)
 		return
 	}
+	f.mu.Lock()
+	f.settle()
+	f.mu.Unlock()
 	switch {
+	case strings.HasPrefix(p, "/nodes/") && strings.Contains(p, "/tasks/") && strings.HasSuffix(p, "/status"):
+		upid := strings.TrimSuffix(p[strings.Index(p, "/tasks/")+len("/tasks/"):], "/status")
+		f.mu.Lock()
+		t := f.tasks[upid]
+		f.mu.Unlock()
+		switch {
+		case t == nil:
+			write(w, 404, nil)
+		case time.Now().Before(t.done):
+			write(w, 200, map[string]any{"status": "running", "upid": upid})
+		default:
+			write(w, 200, map[string]any{"status": "stopped", "exitstatus": t.exit, "upid": upid})
+		}
+		return
 	case p == "/version":
 		write(w, 200, map[string]any{"version": "9.2.32", "release": "9.2"})
 	case p == "/cluster/status":
@@ -149,8 +342,19 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 			res = append(res, map[string]any{"type": "node", "node": n, "status": "online", "cpu": 0.12, "maxcpu": 40, "mem": 50 << 30, "maxmem": 503 << 30, "uptime": 3600})
 			res = append(res, map[string]any{"type": "storage", "node": n, "storage": "vm-pool", "plugintype": "rbd", "shared": 1, "status": "available", "disk": 1 << 40, "maxdisk": 10 << 40})
 			res = append(res, map[string]any{"type": "storage", "node": n, "storage": "local", "plugintype": "dir", "shared": 0, "status": "available", "disk": 85 << 30, "maxdisk": 100 << 30})
+			// PVE reports "unknown" for both disabled and unreachable storage.
+			res = append(res, map[string]any{"type": "storage", "id": "storage/" + n + "/nas-backup", "node": n, "storage": "nas-backup", "plugintype": "nfs", "shared": 1, "status": "unknown"})
+		}
+		f.mu.Lock()
+		allowed, restricted := f.Restricted[user]
+		f.mu.Unlock()
+		if restricted {
+			res = []map[string]any{}
 		}
 		for _, g := range f.Guests {
+			if restricted && !containsInt(allowed, g["vmid"]) {
+				continue
+			}
 			x := map[string]any{"maxcpu": 2, "maxmem": 4 << 30, "maxdisk": 32 << 30, "mem": 1 << 30, "cpu": 0.03, "uptime": 1000}
 			for k, v := range g {
 				x[k] = v
@@ -158,10 +362,26 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 			res = append(res, x)
 		}
 		write(w, 200, res)
+	case p == "/storage":
+		f.mu.Lock()
+		out := make([]map[string]any, 0, len(f.StorageConfig))
+		for _, sc := range f.StorageConfig {
+			m := map[string]any{}
+			for k, v := range sc {
+				m[k] = v
+			}
+			out = append(out, m)
+		}
+		f.mu.Unlock()
+		write(w, 200, out)
 	case p == "/cluster/ceph/status":
 		write(w, 200, map[string]any{"health": map[string]any{"status": "HEALTH_OK"}, "osdmap": map[string]any{"num_osds": 9, "num_up_osds": 9, "num_in_osds": 9}, "pgmap": map[string]any{"bytes_used": 3 << 40, "bytes_total": 31 << 40}})
 	case p == "/cluster/ha/status/current":
-		write(w, 200, []map[string]any{{"type": "quorum", "id": "quorum", "quorate": 1, "status": "OK"}, {"type": "service", "id": "vm:120", "state": "started"}})
+		out := []map[string]any{{"type": "quorum", "id": "quorum", "quorate": 1, "status": "OK"}}
+		f.mu.Lock()
+		out = append(out, f.HAServices...)
+		f.mu.Unlock()
+		write(w, 200, out)
 	case p == "/cluster/backup":
 		write(w, 200, []map[string]any{f.BackupJob})
 	case p == "/cluster/backup/nightly-all":
@@ -174,7 +394,10 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 		write(w, 200, out)
 	case p == "/cluster/config/nodes":
 		r1 := "192.0.2.1x"
-		if !f.Ring1 {
+		f.mu.Lock()
+		ring1 := f.Ring1
+		f.mu.Unlock()
+		if !ring1 {
 			r1 = ""
 		}
 		out := []map[string]any{}
@@ -200,6 +423,16 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 		}
 	case p == "/access/permissions":
 		perms := map[string]int{"Sys.Audit": 1}
+		f.mu.Lock()
+		if user == f.TokenID {
+			perms = map[string]int{}
+			for k, v := range f.TokenPerms {
+				perms[k] = v
+			}
+		} else if _, restricted := f.Restricted[user]; restricted {
+			perms = map[string]int{}
+		}
+		f.mu.Unlock()
 		if f.Admins[user] {
 			perms["Sys.Modify"] = 1
 		}
@@ -244,4 +477,21 @@ func (f *Server) ticket(w http.ResponseWriter, r *http.Request) {
 	t := "PVE:" + user + ":T" + fmt.Sprint(len(f.tickets))
 	f.tickets[t] = user
 	write(w, 200, map[string]any{"ticket": t, "CSRFPreventionToken": "csrf-" + user, "username": user})
+}
+
+func nodeOf(p string) string {
+	parts := strings.Split(strings.Trim(p, "/"), "/")
+	if len(parts) >= 2 && parts[0] == "nodes" {
+		return parts[1]
+	}
+	return "pve1"
+}
+
+func containsInt(xs []int, v any) bool {
+	for _, x := range xs {
+		if fmt.Sprint(x) == fmt.Sprint(v) {
+			return true
+		}
+	}
+	return false
 }
