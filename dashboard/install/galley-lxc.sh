@@ -95,6 +95,7 @@ if ((UPGRADE)); then
 set -e
 /usr/local/bin/galley.new --version >/dev/null || { rm -f /usr/local/bin/galley.new; echo "new binary does not run" >&2; exit 1; }
 mv -f /usr/local/bin/galley.new /usr/local/bin/galley
+test -f /etc/default/galley || echo 'GALLEY_ARGS=' >/etc/default/galley
 # units from older installers lack the flags file: add it
 if ! grep -q '^EnvironmentFile=-/etc/default/galley' /etc/systemd/system/galley.service; then
   sed -i 's#^ExecStart=/usr/local/bin/galley --listen :8443 --data /var/lib/galley$#EnvironmentFile=-/etc/default/galley\nExecStart=/usr/local/bin/galley --listen :8443 --data /var/lib/galley $GALLEY_ARGS#' /etc/systemd/system/galley.service
@@ -175,6 +176,7 @@ CapabilityBoundingSet=
 [Install]
 WantedBy=multi-user.target
 U
+echo 'GALLEY_ARGS=' >/etc/default/galley
 systemctl daemon-reload
 systemctl enable -q --now galley
 IN
