@@ -21,12 +21,12 @@ import (
 type Param struct {
 	Type        string            `json:"type,omitempty"`
 	Description string            `json:"description,omitempty"`
-	Optional    int               `json:"optional,omitempty"`
+	Optional    Int               `json:"optional,omitempty"`
 	Default     any               `json:"default,omitempty"`
 	Enum        []string          `json:"enum,omitempty"`
-	Minimum     *float64          `json:"minimum,omitempty"`
-	Maximum     *float64          `json:"maximum,omitempty"`
-	MaxLength   int               `json:"maxLength,omitempty"`
+	Minimum     *Float            `json:"minimum,omitempty"`
+	Maximum     *Float            `json:"maximum,omitempty"`
+	MaxLength   Int               `json:"maxLength,omitempty"`
 	Pattern     string            `json:"pattern,omitempty"`
 	Format      any               `json:"format,omitempty"`
 	TypeText    string            `json:"typetext,omitempty"`
@@ -41,11 +41,56 @@ type Method struct {
 	Method      string         `json:"method"`
 	Name        string         `json:"name,omitempty"`
 	Description string         `json:"description,omitempty"`
-	Protected   int            `json:"protected,omitempty"`
+	Protected   Int            `json:"protected,omitempty"`
 	Proxyto     string         `json:"proxyto,omitempty"`
 	Permissions map[string]any `json:"permissions,omitempty"`
 	Parameters  *Param         `json:"parameters,omitempty"`
 	Returns     *Param         `json:"returns,omitempty"`
+}
+
+// Int and Float accept JSON numbers, numeric strings ("1") and booleans:
+// PVE's apidoc writes some numeric fields as strings (e.g. "optional": "1",
+// "minimum": "0"), and one strict field would make the whole schema unusable.
+type Int int
+
+func (i *Int) UnmarshalJSON(b []byte) error {
+	f, err := flexNumber(b)
+	*i = Int(f)
+	return err
+}
+
+type Float float64
+
+func (f *Float) UnmarshalJSON(b []byte) error {
+	v, err := flexNumber(b)
+	*f = Float(v)
+	return err
+}
+
+func flexNumber(b []byte) (float64, error) {
+	var v any
+	if err := json.Unmarshal(b, &v); err != nil {
+		return 0, err
+	}
+	switch t := v.(type) {
+	case float64:
+		return t, nil
+	case bool:
+		if t {
+			return 1, nil
+		}
+		return 0, nil
+	case string:
+		if t == "" {
+			return 0, nil
+		}
+		f, err := strconv.ParseFloat(strings.TrimSpace(t), 64)
+		if err != nil {
+			return 0, nil // not a number: treat as unset rather than reject the schema
+		}
+		return f, nil
+	}
+	return 0, nil
 }
 
 // Node is one path in the API tree.
@@ -245,10 +290,10 @@ func checkValue(p *Param, v string) string {
 		if err != nil {
 			return "must be an integer"
 		}
-		if p.Minimum != nil && float64(n) < *p.Minimum {
+		if p.Minimum != nil && float64(n) < float64(*p.Minimum) {
 			return fmt.Sprintf("must be at least %v", *p.Minimum)
 		}
-		if p.Maximum != nil && float64(n) > *p.Maximum {
+		if p.Maximum != nil && float64(n) > float64(*p.Maximum) {
 			return fmt.Sprintf("must be at most %v", *p.Maximum)
 		}
 	case "number":
@@ -256,10 +301,10 @@ func checkValue(p *Param, v string) string {
 		if err != nil {
 			return "must be a number"
 		}
-		if p.Minimum != nil && f < *p.Minimum {
+		if p.Minimum != nil && f < float64(*p.Minimum) {
 			return fmt.Sprintf("must be at least %v", *p.Minimum)
 		}
-		if p.Maximum != nil && f > *p.Maximum {
+		if p.Maximum != nil && f > float64(*p.Maximum) {
 			return fmt.Sprintf("must be at most %v", *p.Maximum)
 		}
 	case "boolean":
@@ -281,7 +326,7 @@ func checkValue(p *Param, v string) string {
 			return "must be one of " + strings.Join(p.Enum, ", ")
 		}
 	}
-	if p.MaxLength > 0 && len(v) > p.MaxLength {
+	if p.MaxLength > 0 && len(v) > int(p.MaxLength) {
 		return fmt.Sprintf("longer than %d characters", p.MaxLength)
 	}
 	if p.Pattern != "" {

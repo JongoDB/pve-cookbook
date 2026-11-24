@@ -16,7 +16,7 @@ const apiSchema = [
             "vmid":{"type":"integer","minimum":100,"maximum":999999999,"description":"The (unique) ID of the VM."},
             "name":{"type":"string","optional":1,"maxLength":128},
             "memory":{"type":"string","optional":1,"description":"Memory in MiB."},
-            "balloon":{"type":"integer","optional":1,"minimum":0},
+            "balloon":{"type":"integer","optional":"1","minimum":"0"},
             "cores":{"type":"integer","optional":1,"minimum":1,"default":1},
             "sockets":{"type":"integer","optional":1,"minimum":1,"default":1},
             "cpu":{"type":"string","optional":1,"description":"Emulated CPU type."},

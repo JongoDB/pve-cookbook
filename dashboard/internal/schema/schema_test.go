@@ -73,3 +73,24 @@ func TestCLI(t *testing.T) {
 		t.Fatalf("got %s", got)
 	}
 }
+
+// PVE's real apidoc writes some numbers as strings ("optional": "1",
+// "minimum": "0") and some enums as null; one such field used to make the
+// whole schema fail to load on PVE 9.2.
+func TestParseToleratesPVEQuirks(t *testing.T) {
+	doc := `const apiSchema = [{"path":"/nodes","text":"nodes","leaf":0,"children":[{"path":"/nodes/{node}/x","text":"x","leaf":1,
+	  "info":{"POST":{"method":"POST","protected":"1","parameters":{"type":"object","properties":{
+	    "node":{"type":"string"},
+	    "count":{"type":"integer","optional":"1","minimum":"0","maximum":"16777216"},
+	    "compression":{"type":"string","optional":1,"enum":null}}}}}}]}];`
+	s, err := Parse([]byte(doc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Validate("POST", "/nodes/pve1/x", map[string]string{"count": "5"}); err != nil {
+		t.Fatalf("valid call rejected: %v", err)
+	}
+	if _, err := s.Validate("POST", "/nodes/pve1/x", map[string]string{"count": "-1"}); err == nil {
+		t.Fatal("minimum given as a string was not enforced")
+	}
+}
