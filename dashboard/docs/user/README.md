@@ -27,7 +27,7 @@ The parser (`docs/embed.go`, and `web/src/lib/docs.ts`) depends on this format.
 - One Markdown file per topic. The file name is the slug: lowercase words joined by hyphens, for example `hardware-and-gpus.md`. The slug is the page's URL (`/help/hardware-and-gpus`); do not rename files without a reason, since links and the assistant use slugs.
 - Every file starts with front matter, exactly like this:
 
-  ```
+  ```yaml
   ---
   title: Hardware and GPUs
   summary: One sentence: what this page helps with.

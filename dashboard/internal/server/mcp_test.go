@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 type mcpClient struct {
@@ -123,9 +124,21 @@ func TestMCPAgentScopes(t *testing.T) {
 	if isErr || !strings.Contains(text, "auditId") {
 		t.Fatalf("apply: %s", text)
 	}
-	last := h.fake.Recorded()[len(h.fake.Recorded())-1]
-	if !strings.HasSuffix(last.Path, "/qemu/300/status/start") || !strings.Contains(last.Token, "!galley-agent-") {
-		t.Fatalf("ran as: %+v", last)
+	// the change runs asynchronously: wait for the start call
+	var started bool
+	for i := 0; i < 200 && !started; i++ {
+		for _, c := range h.fake.Recorded() {
+			if strings.HasSuffix(c.Path, "/qemu/300/status/start") {
+				if !strings.Contains(c.Token, "!galley-agent-") {
+					t.Fatalf("ran as: %+v", c)
+				}
+				started = true
+			}
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if !started {
+		t.Fatal("the agent's change never started the guest")
 	}
 
 	// docs are resources
