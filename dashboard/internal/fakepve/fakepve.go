@@ -408,6 +408,13 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 		out = append(out, f.HAServices...)
 		f.mu.Unlock()
 		write(w, 200, out)
+	case p == "/cluster/nextid":
+		write(w, 200, "301")
+	case p == "/cluster/mapping/pci":
+		write(w, 200, []map[string]any{{"id": "gpu-a2-0", "description": "NVIDIA A2 #0", "map": []string{"node=pve1,path=0000:16:00.0,id=10de:25b6,iommugroup=10"}},
+			{"id": "gpu-a2-1", "description": "NVIDIA A2 #1", "map": []string{"node=pve1,path=0000:91:00.0,id=10de:25b6,iommugroup=1"}}})
+	case p == "/cluster/sdn/vnets":
+		write(w, 200, []map[string]any{{"vnet": "servers", "zone": "evpn1", "tag": 10000}, {"vnet": "lab", "zone": "evpn1", "tag": 10010}})
 	case p == "/cluster/backup":
 		write(w, 200, []map[string]any{f.BackupJob})
 	case p == "/cluster/backup/nightly-all":
@@ -439,6 +446,8 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 		write(w, 200, map[string]any{"enable": 1, "policy_in": "DROP"})
 	case p == "/cluster/tasks":
 		write(w, 200, []map[string]any{{"upid": "UPID:pve1:1:2:3:vzdump::root@pam:", "node": "pve1", "type": "vzdump", "id": "120", "user": "root@pam", "starttime": 1700000000, "endtime": 1700000100, "status": "OK"}})
+	case strings.HasPrefix(p, "/nodes/") && f.demoGet(w, p, user):
+		// handled by demoGet (detail-page reads)
 	case strings.HasSuffix(p, "/status") && strings.HasPrefix(p, "/nodes/"):
 		write(w, 200, map[string]any{"kversion": "Linux 7.0.14-30-pve #1 SMP PREEMPT_DYNAMIC", "pveversion": "pve-manager/9.2.32"})
 	case strings.HasSuffix(p, "/apt/update"):
@@ -535,7 +544,8 @@ func fakeRRD(path, timeframe string) []map[string]any {
 	for i := 0; i < 70; i++ {
 		t := now - int64(69-i)*step
 		x := float64(i)
-		wave := 0.5 + 0.4*math.Sin(x/7)
+		phase := float64(len(path)%7) + float64(strings.Count(path, "2"))*1.7 + float64(strings.Count(path, "3"))*3.1
+		wave := 0.5 + 0.4*math.Sin(x/7+phase)
 		m := map[string]any{"time": t}
 		switch {
 		case storage:
@@ -590,4 +600,118 @@ func (f *Server) consoleEcho(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+}
+
+// demoGet answers the per-node reads used by galley's detail pages, so the
+// demo mode is complete. It returns false for paths it does not handle.
+func (f *Server) demoGet(w http.ResponseWriter, p, user string) bool {
+	seg := strings.Split(strings.Trim(p, "/"), "/")
+	if len(seg) < 2 {
+		return false
+	}
+	node := seg[1]
+	f.mu.Lock()
+	allowed, restricted := f.Restricted[user]
+	guests := make([]map[string]any, len(f.Guests))
+	copy(guests, f.Guests)
+	f.mu.Unlock()
+	guestOK := func(id string) map[string]any {
+		for _, g := range guests {
+			if fmt.Sprint(g["vmid"]) == id && g["node"] == node && (!restricted || containsInt(allowed, g["vmid"])) {
+				return g
+			}
+		}
+		return nil
+	}
+	switch {
+	case len(seg) == 3 && seg[2] == "status":
+		if restricted {
+			write(w, 403, nil)
+			return true
+		}
+		write(w, 200, map[string]any{
+			"kversion": "Linux 7.0.14-30-pve #1 SMP PREEMPT_DYNAMIC", "pveversion": "pve-manager/9.2.32", "uptime": 47000,
+			"cpuinfo": map[string]any{"model": "Intel(R) Xeon(R) Gold 6338 CPU @ 2.00GHz", "cpus": 40, "sockets": 1, "cores": 20},
+			"loadavg": []string{"1.20", "1.05", "0.98"}, "cpu": 0.12, "wait": 0.002,
+			"memory":    map[string]any{"used": 52 << 30, "total": 503 << 30, "free": 451 << 30},
+			"swap":      map[string]any{"used": 0, "total": 8 << 30, "free": 8 << 30},
+			"rootfs":    map[string]any{"used": 8 << 30, "total": 100 << 30, "avail": 92 << 30},
+			"boot-info": map[string]any{"mode": "efi"}, "current-kernel": map[string]any{"release": "7.0.14-30-pve"},
+		})
+	case len(seg) == 3 && seg[2] == "network":
+		write(w, 200, []map[string]any{
+			{"iface": "vmbr0", "type": "bridge", "active": 1, "autostart": 1, "cidr": "192.0.2.1" + node[len(node)-1:] + "/24", "gateway": "192.0.2.1", "bridge_ports": "enp1s0f0"},
+			{"iface": "enp1s0f0", "type": "eth", "active": 1},
+			{"iface": "enp65s0f0", "type": "eth", "active": 1, "cidr": "10.15.15.1" + node[len(node)-1:] + "/24", "comments": "corosync / ceph mesh"},
+		})
+	case len(seg) == 4 && seg[2] == "disks" && seg[3] == "list":
+		write(w, 200, []map[string]any{
+			{"devpath": "/dev/nvme0n1", "model": "SAMSUNG MZQL2960HCJR", "size": 960 << 30, "health": "PASSED", "used": "BIOS boot", "type": "nvme", "wearout": 98},
+			{"devpath": "/dev/nvme1n1", "model": "SAMSUNG MZQL23T8HCLS", "size": 3840 << 30, "health": "PASSED", "used": "LVM", "type": "nvme", "wearout": 99},
+		})
+	case len(seg) == 4 && seg[2] == "hardware" && seg[3] == "pci":
+		out := []map[string]any{{"id": "0000:00:1f.6", "class": "0x020000", "vendor_name": "Intel Corporation", "device_name": "Ethernet Connection", "iommugroup": 14}}
+		if node == "pve1" {
+			out = append(out,
+				map[string]any{"id": "0000:16:00.0", "class": "0x030200", "vendor": "0x10de", "device": "0x25b6", "vendor_name": "NVIDIA Corporation", "device_name": "GA107GL [A2 / A16]", "iommugroup": 10, "mdev": 0},
+				map[string]any{"id": "0000:91:00.0", "class": "0x030200", "vendor": "0x10de", "device": "0x25b6", "vendor_name": "NVIDIA Corporation", "device_name": "GA107GL [A2 / A16]", "iommugroup": 1, "mdev": 0})
+		}
+		write(w, 200, out)
+	case len(seg) == 3 && seg[2] == "storage":
+		write(w, 200, []map[string]any{
+			{"storage": "vm-pool", "type": "rbd", "content": "images,rootdir", "active": 1, "enabled": 1, "shared": 1, "used": 1 << 40, "total": 10 << 40, "avail": 9 << 40},
+			{"storage": "local", "type": "dir", "content": "iso,vztmpl,backup", "active": 1, "enabled": 1, "used": 85 << 30, "total": 100 << 30, "avail": 15 << 30},
+		})
+	case len(seg) == 5 && seg[2] == "storage" && seg[4] == "content":
+		var out []map[string]any
+		switch seg[3] {
+		case "local":
+			out = []map[string]any{
+				{"volid": "local:iso/debian-13.1.0-amd64-netinst.iso", "content": "iso", "format": "iso", "size": 754 << 20, "ctime": 1790000000},
+				{"volid": "local:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst", "content": "vztmpl", "format": "tzst", "size": 123 << 20, "ctime": 1790000000},
+				{"volid": "local:backup/vzdump-qemu-120-2026_11_24-01_30_00.vma.zst", "content": "backup", "format": "vma.zst", "size": 9 << 30, "vmid": 120, "ctime": 1795483800},
+			}
+		default:
+			for _, g := range guests {
+				if g["template"] == nil {
+					out = append(out, map[string]any{"volid": fmt.Sprintf("%s:vm-%v-disk-0", seg[3], g["vmid"]), "content": "images", "format": "raw", "size": 32 << 30, "vmid": g["vmid"]})
+				}
+			}
+		}
+		write(w, 200, out)
+	case len(seg) == 3 && seg[2] == "tasks":
+		write(w, 200, []map[string]any{{"upid": "UPID:" + node + ":1:2:3:qmstart:120:root@pam:", "node": node, "type": "qmstart", "id": "120", "user": "root@pam", "starttime": 1795480000, "endtime": 1795480004, "status": "OK"}})
+	case len(seg) == 5 && (seg[2] == "qemu" || seg[2] == "lxc") && seg[4] == "config":
+		g := guestOK(seg[3])
+		if g == nil {
+			write(w, 403, nil)
+			return true
+		}
+		name := fmt.Sprint(g["name"])
+		if seg[2] == "lxc" {
+			write(w, 200, map[string]any{"hostname": name, "arch": "amd64", "cores": 2, "memory": 2048, "swap": 512, "ostype": "debian", "unprivileged": 1, "features": "nesting=1",
+				"rootfs": "vm-pool:vm-" + seg[3] + "-disk-0,size=8G", "net0": "name=eth0,bridge=servers,ip=dhcp,type=veth", "onboot": 1, "digest": "f00d" + seg[3]})
+			return true
+		}
+		cfg := map[string]any{"name": name, "cores": 4, "sockets": 1, "cpu": "host", "memory": "8192", "balloon": 0, "machine": "q35", "bios": "ovmf", "ostype": "l26",
+			"scsihw": "virtio-scsi-single", "scsi0": "vm-pool:vm-" + seg[3] + "-disk-0,iothread=1,discard=on,ssd=1,size=64G", "efidisk0": "vm-pool:vm-" + seg[3] + "-disk-1,efitype=4m,size=528K",
+			"net0": "virtio=BC:24:11:00:01:" + fmt.Sprintf("%02X", len(seg[3])) + ",bridge=servers,firewall=1", "boot": "order=scsi0", "agent": "1", "onboot": 1, "digest": "f00d" + seg[3]}
+		if seg[3] == "300" {
+			cfg["cores"], cfg["memory"] = 16, "65536"
+			cfg["hostpci0"] = "mapping=gpu-a2-0,pcie=1"
+		}
+		write(w, 200, cfg)
+	case len(seg) == 5 && (seg[2] == "qemu" || seg[2] == "lxc") && seg[4] == "snapshot":
+		if guestOK(seg[3]) == nil {
+			write(w, 403, nil)
+			return true
+		}
+		write(w, 200, []map[string]any{
+			{"name": "pre-upgrade", "description": "before 9.2", "snaptime": 1795300000},
+			{"name": "current", "parent": "pre-upgrade", "description": "You are here!", "running": 1},
+		})
+	default:
+		return false
+	}
+	return true
 }
