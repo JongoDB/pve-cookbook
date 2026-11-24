@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, useSyncExternalStore } from 'react';
 import type { Plan } from '../api/types';
 import { useApp } from '../state/app';
 import { sourceLabel } from '../lib/plan';
@@ -8,10 +8,12 @@ const REFRESH_MS = 30_000;
 
 /**
  * The user's pending changes (GET /api/plans): drafts by the assistant or agents, and changes
- * opened elsewhere. Refreshed when shown, on audit events, and every 30 s while visible.
+ * opened elsewhere. Refreshed when shown, on audit events, when the assistant drafts one, and every 30 s while visible.
  */
 export function usePendingPlans(): { plans: Plan[] | null; failed: boolean } {
-  const { api, lastAudit, planState } = useApp();
+  const { api, lastAudit, planState, chat } = useApp();
+  // the assistant drafting a change adds one: refresh at once, not on the next 30 s tick
+  const drafted = useSyncExternalStore(chat.subscribe, () => chat.get().turns.reduce((n, t) => n + t.parts.filter((p) => p.t === 'change').length, 0));
   const [plans, setPlans] = useState<Plan[] | null>(null);
   const [failed, setFailed] = useState(false);
   const current = planState.plan?.id;
@@ -20,7 +22,7 @@ export function usePendingPlans(): { plans: Plan[] | null; failed: boolean } {
     api.plans().then((p) => { setPlans(p); setFailed(false); }, () => setFailed(true));
   }, [api]);
 
-  useEffect(() => { load(); }, [load, lastAudit?.id, lastAudit?.status, current]);
+  useEffect(() => { load(); }, [load, lastAudit?.id, lastAudit?.status, current, drafted]);
   useEffect(() => {
     const t = setInterval(() => { if (document.visibilityState !== 'hidden') load(); }, REFRESH_MS);
     return () => clearInterval(t);

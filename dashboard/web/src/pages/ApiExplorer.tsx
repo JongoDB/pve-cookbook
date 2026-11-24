@@ -98,6 +98,13 @@ function PathDetail({ cluster, template, method, nodes, onMethod }: { cluster: s
   const info = useAsync(() => api.schema(cluster, template), `schema|${cluster}|${template}`);
   const vars = pathVars(template);
   const [values, setValues] = useState<Record<string, string>>(() => (vars.includes('node') && nodes[0] ? { node: nodes[0] } : {}) as Record<string, string>);
+  // Opened from a link before the node list arrived: default {node} once it does (the
+  // select shows the first node, so the value must be it too).
+  const firstNode = nodes[0];
+  const needsNode = vars.includes('node');
+  useEffect(() => {
+    if (needsNode && firstNode) setValues((x) => (x.node ? x : { ...x, node: firstNode }));
+  }, [needsNode, firstNode]);
   const concrete = fillPath(template, values);
 
   if (info.error) return <ApiErrorView error={info.error} clusterId={cluster} onRetry={info.reload} what="this path" />;

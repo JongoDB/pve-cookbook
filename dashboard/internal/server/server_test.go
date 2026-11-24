@@ -545,6 +545,72 @@ func TestMissingClusterLoginIsNot401(t *testing.T) {
 	}
 }
 
+// A cluster the user has not logged in to yet is still listed with a status
+// (the Clusters page reads status.reachable for every cluster).
+func TestClusterListStatusWithoutLogin(t *testing.T) {
+	h := newHarness(t)
+	h.setup()
+	root := h.login("root@pam", "secret")
+	f2 := fakepve.New()
+	t.Cleanup(f2.Close)
+	if err := h.st.AddCluster(store.Cluster{ID: "other", Name: "other", Endpoints: []pve.Endpoint{f2.Endpoint()}, TokenID: f2.TokenID, TokenSecret: f2.Secret, CreatedAt: 1}); err != nil {
+		t.Fatal(err)
+	}
+	h.refresh()
+	var cs []struct {
+		ID     string
+		Authed bool
+		Status *struct{ Reachable, Quorate bool }
+	}
+	if code := root.do("GET", "/api/clusters", nil, &cs); code != 200 || len(cs) != 2 {
+		t.Fatalf("clusters: %d %+v", code, cs)
+	}
+	for _, c := range cs {
+		if c.Status == nil {
+			t.Fatalf("cluster %s listed without status", c.ID)
+		}
+		if c.ID == "other" && (c.Authed || !c.Status.Reachable) {
+			t.Fatalf("other: %+v %+v", c, *c.Status)
+		}
+	}
+}
+
+// Removing a cluster keeps its history readable for galley admins: who
+// removed it is exactly what the audit log is for.
+func TestRemovedClusterStaysInAudit(t *testing.T) {
+	h := newHarness(t)
+	h.setup()
+	root := h.login("root@pam", "secret")
+	f2 := fakepve.New()
+	t.Cleanup(f2.Close)
+	if err := h.st.AddCluster(store.Cluster{ID: "other", Name: "other", Endpoints: []pve.Endpoint{f2.Endpoint()}, TokenID: f2.TokenID, TokenSecret: f2.Secret, CreatedAt: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if code := root.do("POST", "/api/clusters/other/login", map[string]any{"password": "secret"}, nil); code != 200 {
+		t.Fatalf("cluster login: %d", code)
+	}
+	if code := root.do("DELETE", "/api/clusters/other", nil, nil); code != 204 {
+		t.Fatalf("remove: %d", code)
+	}
+	var es []struct{ Action, ClusterID string }
+	root.do("GET", "/api/audit", nil, &es)
+	found := false
+	for _, e := range es {
+		found = found || (e.Action == "cluster.delete" && e.ClusterID == "other")
+	}
+	if !found {
+		t.Fatalf("the removal is not in the audit log: %+v", es)
+	}
+	dev := h.login("dev@pve", "devpass")
+	es = nil
+	dev.do("GET", "/api/audit", nil, &es)
+	for _, e := range es {
+		if e.ClusterID == "other" {
+			t.Fatalf("non-admin sees a removed cluster's history: %+v", e)
+		}
+	}
+}
+
 func TestOpenIDCallbackBoundToBrowser(t *testing.T) {
 	h := newHarness(t)
 	h.setup()

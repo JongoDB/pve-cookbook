@@ -153,10 +153,21 @@ func TestAgentTokenRevocation(t *testing.T) {
 	h.setup()
 	root := h.login("root@pam", "secret")
 	a := agentToken(t, root, "read")
-	var list []struct{ ID, Name string }
+	var list []struct {
+		ID, Name string
+		LastSeen int64
+	}
 	root.do("GET", "/api/agent-tokens", nil, &list)
 	if len(list) != 1 {
 		t.Fatalf("list: %+v", list)
+	}
+	if list[0].LastSeen != 0 { // the UI says "Never" until an agent uses it
+		t.Fatalf("a new token reports a use: %+v", list[0])
+	}
+	a.call("ping", map[string]any{})
+	root.do("GET", "/api/agent-tokens", nil, &list)
+	if list[0].LastSeen == 0 {
+		t.Fatalf("use not recorded: %+v", list[0])
 	}
 	if code := root.do("DELETE", "/api/agent-tokens/"+list[0].ID, nil, nil); code != 204 {
 		t.Fatalf("revoke: %d", code)

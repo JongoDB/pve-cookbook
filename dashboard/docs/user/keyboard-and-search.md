@@ -13,7 +13,7 @@ Press ⌘K on a Mac or Ctrl K elsewhere, or select **Ask, search or run a comman
 
 ## Search
 
-Type part of a name or a VMID. The palette finds:
+Type part of a name or a VMID. With several words (`local pve3`), each word has to match. The palette finds:
 
 - **guests** by name or VMID (with type, status, cluster and node);
 - **nodes** by name;

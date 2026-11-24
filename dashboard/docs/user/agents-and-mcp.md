@@ -43,6 +43,8 @@ Clusters you were not logged in to when you created the token are not available 
 
 If a cluster refuses to create a PVE token for you, galley lists it as a warning and creates the agent token for the other clusters. If no cluster accepts, no agent token is created.
 
+Your tokens are listed under **Your agent tokens** with their scope, when they were created and expire, and when an agent last used them (**Never** until the first use).
+
 Creating and revoking tokens is recorded in the audit log (`agent.create`, `agent.revoke`).
 
 ## Revoke an agent token

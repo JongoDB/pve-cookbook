@@ -11,7 +11,7 @@ import {
 import { deviceName, groupPeers, isDisplay, isGpu, mapEntries, mappingFor, mappingsOnNode, type PciDevice, type PciMapping } from '../lib/pci';
 import { ApiErrorView } from '../components/ClusterLogin';
 import { ClusterPicker, useClusterParam } from '../components/ClusterPicker';
-import { Badge, CopyButton } from '../components/ui';
+import { Badge, CopyButton, Empty } from '../components/ui';
 import { Tabs } from './GuestDetail';
 import { HelpLink } from '../components/HelpLink';
 
@@ -31,7 +31,7 @@ const CPU_TYPES = ['host', 'x86-64-v2-AES', 'x86-64-v3', 'x86-64-v4', 'kvm64'];
 
 export function Create() {
   useCrumbs([{ label: 'Create' }]);
-  const { me, fleet } = useApp();
+  const { me, fleet, clusterName } = useApp();
   const [params, setParams] = useSearchParams();
   const kind = (params.get('kind') === 'ct' ? 'ct' : 'vm') as Kind;
   const [cluster, setCluster] = useClusterParam();
@@ -48,7 +48,13 @@ export function Create() {
       <Tabs tabs={KINDS} value={kind} onChange={setKind} label="What to create" idPrefix="create" />
       <div role="tabpanel" id="create-panel" aria-labelledby={`create-tab-${kind}`}>
         {!authed ? <ApiErrorView error={new ApiError(409, 'cluster_login_required', '')} clusterId={cluster} />
-          : !nodes.length ? <div className="muted" role="status">Loading nodes</div>
+          : !fleet ? <div className="muted" role="status">Loading nodes</div>
+            : !nodes.length ? (
+              <Empty title={`No online node of ${clusterName(cluster)} is visible to you`}>
+                galley builds a create request for a node your PVE account can see. Ask a PVE administrator for access to the nodes
+                (Sys.Audit on /nodes), or pick another cluster.
+              </Empty>
+            )
             : kind === 'vm' ? <VmWizard key={`vm-${cluster}`} cluster={cluster} nodes={nodes.map((n) => n.name)} />
               : <CtWizard key={`ct-${cluster}`} cluster={cluster} nodes={nodes.map((n) => n.name)} />}
       </div>

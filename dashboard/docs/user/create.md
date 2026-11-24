@@ -12,6 +12,7 @@ The **Create** page builds a new VM or container step by step. It does not creat
 - Log in to the cluster you want to create on. With several clusters, choose it under **Cluster** at the top.
 - You need `VM.Allocate` (on `/vms` or the target pool), `Datastore.AllocateSpace` on the storages you choose, and the right to use the bridge or VNet (`SDN.Use`). For a GPU through a PCI mapping you need `Mapping.Use` on that mapping.
 - Choose **Virtual machine** or **Container** with the tabs at the top.
+- The wizard builds the request for a node you can see. If your PVE account sees no online node of the cluster, the page says so instead; ask a PVE administrator for `Sys.Audit` on `/nodes`.
 
 ## How the wizard works
 

@@ -483,7 +483,9 @@ func (s *Server) listClusters(w http.ResponseWriter, r *http.Request, ss *sessio
 	for _, c := range cs {
 		v := vs[c.ID]
 		m := s.clusterView(c, v != nil && v.sysAudit)
-		if v != nil && !v.sysAudit {
+		// Without Sys.Audit, or without a login to this cluster yet, the user still
+		// gets its reachability (the Clusters page shows every cluster).
+		if v == nil || !v.sysAudit {
 			st := s.fleet.Status(c.ID)
 			m["status"] = map[string]any{"reachable": st.Reachable, "quorate": st.Quorate, "lastPoll": st.LastPoll}
 		}
@@ -640,6 +642,11 @@ func (s *Server) securityEvent(user, cid, action, title string, ok bool, detail 
 func (s *Server) auditVisible(ctx context.Context, ss *session, e store.AuditEntry, vs map[string]*userView) bool {
 	v := vs[e.ClusterID]
 	if v == nil {
+		// A removed cluster's history (who added, changed and removed it) stays
+		// readable for galley admins; nobody else can be checked against it any more.
+		if _, err := s.store.Cluster(e.ClusterID); err != nil && e.ClusterID != "" {
+			return s.galleyAdmin(ctx, ss)
+		}
 		return false
 	}
 	if e.ActorUser == v.pveUser {

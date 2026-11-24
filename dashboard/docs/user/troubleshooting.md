@@ -47,6 +47,7 @@ Check:
 - **Disk list not available** or **PCI devices not available**: these lists need `Sys.Audit` on the node or on `/`.
 - **Your PVE account does not have permission for this.** PVE refused the read. Ask an administrator for the privilege PVE named.
 - The **Hosts** and **Settings** entries appear only for users with the rights they need.
+- **Something went wrong**: a page failed to show. The navigation, the drawer and changes that are running keep working. Reload the page; if it happens again, [send feedback](feedback.md) with the page address and what you did before.
 
 ## A change failed
 

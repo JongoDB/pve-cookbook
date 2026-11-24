@@ -16,6 +16,7 @@ plain words, written for the person using galley. Link help pages as
 - **Hardware and GPUs.** See PCI devices and IOMMU groups, create PCI mappings and attach GPUs. [Hardware and GPUs](/help/hardware-and-gpus)
 - **Consoles and host commands.** Open VM displays and terminals in galley; administrators can run reviewed commands on nodes. [Consoles](/help/consoles)
 - **Help, What's new and feedback.** The full user guide is built in (**Help**), this dialog shows what changed after each update, and **Send feedback** files an issue on GitHub.
+- **Fixes found by the new end-to-end tests.** The Clusters page no longer goes blank while you are not yet logged in to a newly added cluster; a removed cluster's history stays in the audit log for galley admins; searches with several words (`qemu config`) match each word; the **API** page opened from a link fills in `{node}`; **Create** says so when your account sees no node; new agent tokens show **Never** as last used; the Changes count updates as soon as the assistant drafts a change; and a page that fails to show says so instead of blanking galley. [Troubleshooting](/help/troubleshooting)
 - **Safer logins.** Stored PVE logins are encrypted with a key only your browser holds, and lapse when you stop using galley. [Security](/help/security)
 
 ## 0.1.0 — 2026-11-10

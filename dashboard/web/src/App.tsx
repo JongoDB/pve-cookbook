@@ -5,6 +5,7 @@ import { ApiError } from './api/http';
 import { AppProvider } from './state/app';
 import { Layout } from './components/Layout';
 import { ErrorBox } from './components/ui';
+import { PageBoundary } from './components/ErrorBoundary';
 import { Login, Setup } from './pages/Auth';
 import { Overview } from './pages/Overview';
 import { Guests } from './pages/Guests';
@@ -75,30 +76,32 @@ export function App({ api }: { api: Api }) {
         <BrowserRouter>
           <AppProvider api={api} me={boot.me} setMe={setMe}>
             <Layout>
-              <Routes>
-                <Route path="/" element={<Overview />} />
-                <Route path="/guests" element={<Guests />} />
-                <Route path="/guests/:cluster/:vmid" element={<GuestDetail />} />
-                <Route path="/nodes" element={<Nodes />} />
-                <Route path="/nodes/:cluster/:node" element={<NodeDetail />} />
-                <Route path="/storage" element={<StorageList />} />
-                <Route path="/storage/:cluster/:storage" element={<StorageDetail />} />
-                <Route path="/protection" element={<Protection />} />
-                <Route path="/activity" element={<Activity />} />
-                <Route path="/operations" element={<Navigate to="/activity" replace />} />
-                <Route path="/audit" element={<Audit />} />
-                <Route path="/clusters" element={<Clusters />} />
-                <Route path="/create" element={<Create />} />
-                <Route path="/hardware" element={<Hardware />} />
-                <Route path="/hosts" element={<Hosts />} />
-                <Route path="/api-explorer" element={<ApiExplorer />} />
-                <Route path="/settings" element={<Settings />} />
-                <Route path="/agents" element={<Agents />} />
-                <Route path="/help" element={<HelpIndex />} />
-                <Route path="/help/:slug" element={<HelpDoc />} />
-                <Route path="/console/:cluster/:type/:node/:vmid?" element={<Console />} />
-                <Route path="*" element={<Navigate to="/" replace />} />
-              </Routes>
+              <PageBoundary>
+                <Routes>
+                  <Route path="/" element={<Overview />} />
+                  <Route path="/guests" element={<Guests />} />
+                  <Route path="/guests/:cluster/:vmid" element={<GuestDetail />} />
+                  <Route path="/nodes" element={<Nodes />} />
+                  <Route path="/nodes/:cluster/:node" element={<NodeDetail />} />
+                  <Route path="/storage" element={<StorageList />} />
+                  <Route path="/storage/:cluster/:storage" element={<StorageDetail />} />
+                  <Route path="/protection" element={<Protection />} />
+                  <Route path="/activity" element={<Activity />} />
+                  <Route path="/operations" element={<Navigate to="/activity" replace />} />
+                  <Route path="/audit" element={<Audit />} />
+                  <Route path="/clusters" element={<Clusters />} />
+                  <Route path="/create" element={<Create />} />
+                  <Route path="/hardware" element={<Hardware />} />
+                  <Route path="/hosts" element={<Hosts />} />
+                  <Route path="/api-explorer" element={<ApiExplorer />} />
+                  <Route path="/settings" element={<Settings />} />
+                  <Route path="/agents" element={<Agents />} />
+                  <Route path="/help" element={<HelpIndex />} />
+                  <Route path="/help/:slug" element={<HelpDoc />} />
+                  <Route path="/console/:cluster/:type/:node/:vmid?" element={<Console />} />
+                  <Route path="*" element={<Navigate to="/" replace />} />
+                </Routes>
+              </PageBoundary>
             </Layout>
           </AppProvider>
         </BrowserRouter>

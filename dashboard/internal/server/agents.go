@@ -106,7 +106,8 @@ func (s *Server) createAgentToken(w http.ResponseWriter, r *http.Request, ss *se
 	k := newSessionSecret()
 	id := randHex(32)
 	exp := now.Add(time.Duration(req.Days) * 24 * time.Hour).Unix()
-	st := store.Session{ID: id, User: ss.user, Home: ss.home, CSRF: randHex(24), Created: now.Unix(), LastSeen: now.Unix(),
+	// LastSeen stays 0 until an agent uses the token (the Agents page shows "Never").
+	st := store.Session{ID: id, User: ss.user, Home: ss.home, CSRF: randHex(24), Created: now.Unix(),
 		Expires: exp, Kind: "agent", Name: req.Name, Scope: req.Scope, KeyCheck: s.store.KeyCheck(k)}
 	if err := s.store.PutSession(st); err != nil {
 		apiError(w, 500, "store", err.Error())

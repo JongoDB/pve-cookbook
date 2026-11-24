@@ -12,7 +12,7 @@ galley loads the API schema from the cluster itself, so the explorer always matc
 ## Find a path
 
 1. Open **API** in the navigation. With several clusters, choose one under **Cluster**.
-2. Type in **Search paths and descriptions**, for example `qemu config`, `firewall` or `ha`. The list shows matching paths with their methods (**GET**, **POST**, **PUT**, **DELETE**).
+2. Type in **Search paths and descriptions**, for example `qemu config`, `firewall` or `ha`. With several words, each word has to match, in any order. The list shows matching paths with their methods (**GET**, **POST**, **PUT**, **DELETE**).
 3. Select a path.
 
 The path's page shows:

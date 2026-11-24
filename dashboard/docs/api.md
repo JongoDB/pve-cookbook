@@ -67,7 +67,7 @@ galley holds no authority of its own over clusters. Threat model and rationale:
 | `GET /api/realms?cluster=id` | – | PVE realms (for the login form; `type:"openid"` offers SSO) |
 | `POST /api/clusters/probe` | `{"endpoints":["192.0.2.11","192.0.2.12:8006"]}` | `{"endpoints":[Probe]}` |
 | `POST /api/clusters` | `{"name","endpoints":[{"host","fingerprint"}],"tokenId":"galley@pve!poller","tokenSecret","shareLogin"?}` | `201 Cluster` |
-| `GET /api/clusters` | – | `[Cluster]` (endpoints/token id only where the user has `Sys.Audit`) |
+| `GET /api/clusters` | – | `[Cluster]` (endpoints/token id only where the user has `Sys.Audit`; every cluster has `status` with at least `reachable`, `quorate`, `lastPoll`, also before the user logs in to it) |
 | `PUT /api/clusters/{id}` | `{"name"?,"endpoints"?,"shareLogin"?,"credentialMode"?:"ticket"\|"token","hostTransport"?:"pve"\|"ssh"}` | `Cluster` — rename, re-pin certificates after renewal, toggle login sharing, choose how user logins and host commands work |
 | `DELETE /api/clusters/{id}` | – | `204` |
 
@@ -282,7 +282,8 @@ AI agents and scripts use galley without the browser, as the user who created th
   `{"token":"glly_…","id","name","scope","expires","clusters","warnings"}` — the token is shown once.
   galley mints a PVE API token per cluster the user is logged in to (inheriting their permissions,
   expiring with the agent token) and stores it encrypted under a secret that only the agent token
-  carries. `GET /api/agent-tokens` lists, `DELETE /api/agent-tokens/{id}` revokes (and deletes the PVE tokens).
+  carries. `GET /api/agent-tokens` lists (`[{"id","name","scope","created","lastSeen","expires"}]`,
+  `lastSeen` 0 until an agent uses the token), `DELETE /api/agent-tokens/{id}` revokes (and deletes the PVE tokens).
 - Authenticate with `Authorization: Bearer glly_…` (no CSRF header needed). Agent tokens may read
   (GET), query metrics, draft changes (scope `draft`: `POST /api/plans`, `DELETE /api/plans/{id}`)
   and apply them (scope `apply`: `POST /api/plans/{id}/run`). Galley administration — clusters,
@@ -384,7 +385,8 @@ user can see.
 
 `user` is the galley session's identity, `actorUser` the PVE identity the change ran as.
 Entries are scoped to their cluster: you see an entry if you are logged in to that cluster
-and either hold `Sys.Audit` on `/` there or `actorUser` is you.
+and either hold `Sys.Audit` on `/` there or `actorUser` is you. Entries of a cluster that was
+removed from galley are visible to galley admins only.
 Besides plans, the log records logins (`auth.login`, including failures with the client IP)
 and cluster administration (`cluster.add`, `cluster.update`, `cluster.delete`). Users see
 their own entries; `Sys.Audit` on `/` of a cluster shows everyone's entries for it.

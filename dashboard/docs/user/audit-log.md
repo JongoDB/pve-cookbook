@@ -36,6 +36,8 @@ Entries belong to a cluster. You see an entry if you are logged in to that clust
 - you hold `Sys.Audit` on `/` of that cluster, which shows everyone's entries for it; or
 - the entry ran as you.
 
+When a cluster is removed from galley, nobody can be checked against it any more: its entries, including who added, changed and removed it, stay visible to galley admins only.
+
 Host-command output is stored as plain text and is visible to the user who ran it and to holders of `Sys.Audit`. Do not print secrets in host commands.
 
 ## The Recent changes widget
