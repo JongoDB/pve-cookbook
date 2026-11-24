@@ -110,10 +110,10 @@ func (s *Server) consoleSocket(w http.ResponseWriter, r *http.Request, ss *sessi
 		apiError(w, 404, "not_found", "console link expired; open the console again")
 		return
 	}
-	cl, cr, err := s.userClient(r.Context(), ss, ct.cluster)
+	cl, _, err := s.userClient(r.Context(), ss, ct.cluster)
 	if err != nil {
 		apiError(w, 409, "cluster_login_required", err.Error())
 		return
 	}
-	cl.WebsocketProxy(ct.path, ct.query, cr.Secret).ServeHTTP(w, r)
+	cl.WebsocketProxy(ct.path, ct.query).ServeHTTP(w, r)
 }

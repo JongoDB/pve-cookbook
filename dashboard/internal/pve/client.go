@@ -525,9 +525,10 @@ func (c *Client) GetStatic(ctx context.Context, path string, max int64) ([]byte,
 }
 
 // WebsocketProxy returns a handler that forwards a browser websocket (console)
-// to path on the cluster's active endpoint, authenticated with the user's
-// ticket, over the same pinned TLS. Byte streams are passed through unchanged.
-func (c *Client) WebsocketProxy(path string, q url.Values, ticket string) http.Handler {
+// to path on the cluster's active endpoint, authenticated with this client's
+// credentials (the user's ticket or token), over the same pinned TLS. Byte
+// streams are passed through unchanged.
+func (c *Client) WebsocketProxy(path string, q url.Values) http.Handler {
 	c.mu.Lock()
 	ep := c.endpoints[*c.active]
 	c.mu.Unlock()
@@ -539,9 +540,12 @@ func (c *Client) WebsocketProxy(path string, q url.Values, ticket string) http.H
 			pr.Out.URL = u
 			pr.Out.Host = u.Host
 			pr.Out.Header.Del("Cookie")
+			pr.Out.Header.Del("Authorization")
 			pr.Out.Header.Del("Origin")
 			pr.Out.Header.Del("X-Galley-CSRF")
-			pr.Out.AddCookie(&http.Cookie{Name: "PVEAuthCookie", Value: ticket}) // same encoding as API calls
+			if c.auth != nil {
+				c.auth.apply(pr.Out) // GET: ticket cookie or token header, no CSRF needed
+			}
 		},
 		Transport:     c.http.Transport,
 		FlushInterval: -1,

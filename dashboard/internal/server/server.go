@@ -1,10 +1,13 @@
 // Package server exposes galley's HTTP API (docs/api.md), live events, and the SPA.
 //
-// Security model: galley holds no authority of its own over clusters. Each
-// human logs in with their PVE identity; galley keeps that user's PVE ticket
-// (encrypted, renewed in the background) and every read shown to the user and
-// every change is checked or executed with it. The per-cluster service token
-// only feeds the shared cache, which is filtered per user before display.
+// Security model (docs/security.md): galley holds no authority of its own over
+// clusters. Each human logs in with their PVE identity; galley keeps that
+// user's PVE ticket (or a short-lived per-session API token) sealed under a
+// per-session secret that only the user's cookie carries, and every read shown
+// to the user and every change is checked or executed with it. The secret is
+// kept in memory only while the session is in use, so stored credentials of
+// idle sessions cannot be decrypted (or renewed) by anyone. The per-cluster
+// service token only feeds the shared cache, which is filtered per user.
 package server
 
 import (
@@ -34,11 +37,12 @@ import (
 var Version = "0.1.0-dev"
 
 const (
-	cookieName      = "galley_session"
-	sessionIdle     = 8 * time.Hour
-	sessionAbsolute = 24 * time.Hour
-	viewTTL         = 30 * time.Second
-	maxSSEPerSess   = 4
+	cookieName    = "galley_session"
+	viewTTL       = 30 * time.Second
+	maxSSEPerSess = 4
+	// Default session lifetimes (flags --session-idle, --session-max).
+	DefaultSessionIdle = 4 * time.Hour
+	DefaultSessionMax  = 12 * time.Hour
 )
 
 // Options configures a Server.
@@ -53,6 +57,11 @@ type Options struct {
 	// PublicURL is galley's external base URL (for OpenID redirects). When
 	// empty it is derived from the request's Host header.
 	PublicURL string
+	// SessionIdle ends a session after this long without requests (default 4h).
+	SessionIdle time.Duration
+	// SessionMax ends a session this long after login, however active (default
+	// 12h). Per-session API tokens (credentialMode "token") expire with it.
+	SessionMax time.Duration
 }
 
 // Server wires the API.
@@ -85,6 +94,7 @@ type Server struct {
 	consoles   map[string]consoleTicket
 	limiter    *limiter
 	auditSubs  map[chan store.AuditEntry]*session
+	keys       map[string]*heldKey // session hash -> session secret, while in use
 
 	// newClient is swappable in tests.
 	newClient func(eps []pve.Endpoint, a pve.Auth) *pve.Client
@@ -92,8 +102,15 @@ type Server struct {
 
 // New creates a server and starts its background maintenance.
 func New(st *store.Store, f *fleet.Poller, static fs.FS, log *slog.Logger, opt Options) *Server {
+	if opt.SessionIdle <= 0 {
+		opt.SessionIdle = DefaultSessionIdle
+	}
+	if opt.SessionMax <= 0 {
+		opt.SessionMax = DefaultSessionMax
+	}
+	opt.SessionIdle = min(opt.SessionIdle, opt.SessionMax)
 	ctx, cancel := context.WithCancel(context.Background())
-	s := &Server{store: st, fleet: f, plans: plan.NewManager(f), static: static, log: log, opt: opt,
+	s := &Server{keys: map[string]*heldKey{}, store: st, fleet: f, plans: plan.NewManager(f), static: static, log: log, opt: opt,
 		base: ctx, cancel: cancel,
 		clients: map[string]*pve.Client{}, views: map[string]*userView{}, renewing: map[string]*sync.Mutex{},
 		sseCount: map[string]int{}, lastTouch: map[string]time.Time{}, oidc: map[string]oidcPending{}, consoles: map[string]consoleTicket{},
@@ -328,15 +345,14 @@ func (s *Server) dropClient(cid string) {
 	s.mu.Unlock()
 }
 
-// maintain renews user tickets before they expire and purges dead sessions.
+// maintain renews the tickets of sessions in use before they expire and
+// purges dead sessions.
 func (s *Server) maintain() {
 	t := time.NewTicker(5 * time.Minute)
 	defer t.Stop()
 	for {
 		s.renewDue()
-		if creds, err := s.store.PurgeExpiredSessions(time.Now().Unix()); err == nil && len(creds) > 0 {
-			s.log.Info("expired sessions purged", "credentials", len(creds))
-		}
+		s.purgeExpired()
 		s.plansGC()
 		select {
 		case <-s.base.Done():
@@ -366,10 +382,11 @@ func (s *Server) plansGC() {
 		}
 	}
 	for k, t := range s.lastTouch {
-		if now.Sub(t) > sessionIdle {
+		if now.Sub(t) > s.opt.SessionIdle {
 			delete(s.lastTouch, k)
 		}
 	}
+	s.gcKeysLocked(now)
 	s.limiter.gc(now)
 }
 

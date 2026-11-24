@@ -1,7 +1,8 @@
-// Package hosts runs commands on PVE nodes over SSH, for the work the PVE API
-// cannot do (NIC flow control, kernel parameters, disk wipes, package holds).
-// galley uses its own ed25519 key and only connects to hosts whose key an
-// admin pinned after comparing fingerprints.
+// Package hosts runs commands on PVE nodes, for the work the PVE API cannot do
+// (NIC flow control, kernel parameters, disk wipes, package holds). By default
+// through PVE's own node terminal as the acting user (RunTerm, no galley-held
+// credential); optionally over SSH with galley's own ed25519 key, only to
+// hosts whose key an admin pinned after comparing fingerprints (Run).
 package hosts
 
 import (

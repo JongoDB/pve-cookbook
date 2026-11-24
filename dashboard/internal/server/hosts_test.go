@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/JongoDB/pve-cookbook/dashboard/internal/fakepve"
+	"github.com/JongoDB/pve-cookbook/dashboard/internal/hosts"
 	"github.com/JongoDB/pve-cookbook/dashboard/internal/plan"
 	"golang.org/x/crypto/ssh"
 )
@@ -97,6 +98,20 @@ func TestHostCommands(t *testing.T) {
 	if code := dev.do("GET", "/api/clusters/pve-lab/hosts", nil, nil); code != 403 {
 		t.Fatalf("non-admin sees hosts: %d", code)
 	}
+	// SSH is opt-in: no key exists until a galley admin switches the transport.
+	var hl0 map[string]any
+	if code := root.do("GET", "/api/clusters/pve-lab/hosts", nil, &hl0); code != 200 || hl0["transport"] != "pve" || hl0["authorizedKey"] != nil {
+		t.Fatalf("default transport: %d %v", code, hl0)
+	}
+	if _, err := h.st.GetSetting("hosts.key.pve-lab"); err == nil {
+		t.Fatal("SSH key created without opting in")
+	}
+	if code := dev.do("PUT", "/api/clusters/pve-lab", map[string]any{"hostTransport": "ssh"}, nil); code != 403 {
+		t.Fatalf("non-admin enabled SSH: %d", code)
+	}
+	if code := root.do("PUT", "/api/clusters/pve-lab", map[string]any{"hostTransport": "ssh"}, nil); code != 200 {
+		t.Fatalf("enable SSH: %d", code)
+	}
 	var hl struct{ AuthorizedKey, Install string }
 	if code := root.do("GET", "/api/clusters/pve-lab/hosts", nil, &hl); code != 200 || !strings.HasPrefix(hl.AuthorizedKey, "restrict ssh-ed25519 ") {
 		t.Fatalf("hosts: %d %+v", code, hl)
@@ -166,5 +181,63 @@ func TestHostCommands(t *testing.T) {
 	if n != 2 {
 		t.Fatalf("commands run: %d", n)
 	}
+	// switching back to the PVE terminal destroys galley's SSH key
+	if code := root.do("PUT", "/api/clusters/pve-lab", map[string]any{"hostTransport": "pve"}, nil); code != 200 {
+		t.Fatalf("disable SSH: %d", code)
+	}
+	if _, err := h.st.GetSetting("hosts.key.pve-lab"); err == nil {
+		t.Fatal("SSH key kept after switching to the PVE transport")
+	}
 	_ = plan.MethodSSH
+}
+
+func TestHostCommandsThroughPVETerminal(t *testing.T) {
+	h := newHarness(t)
+	h.setup()
+	var mu sync.Mutex
+	big := strings.Repeat("x", hosts.MaxOutput+1000)
+	h.fake.Update(func(f *fakepve.Server) {
+		f.HostRun = func(cmd string) (string, int) {
+			mu.Lock()
+			defer mu.Unlock()
+			switch cmd {
+			case "false":
+				return "", 3
+			case "flood":
+				return big, 0
+			}
+			return "out: " + cmd + "\nline two", 0 // no trailing newline
+		}
+	})
+	root := h.login("root@pam", "secret")
+	cmd := "ethtool -A enp1s0 rx on tx on && echo 'quotes \"and\" $vars; ^C \x03'\n" + strings.Repeat(" # long line", 600)
+	e := root.runAndWait("host.exec", map[string]any{"node": "pve1", "command": cmd, "reason": "flow control"}, "run on pve1")
+	if !e.OK || e.Results[0].Output != "out: "+cmd+"\nline two" {
+		t.Fatalf("exec: %+v", e)
+	}
+	if got := h.fake.HostCommands(); len(got) != 1 || got[0] != "pve1: "+cmd {
+		t.Fatalf("node ran %q", got)
+	}
+	e = root.runAndWait("host.exec", map[string]any{"node": "pve2", "command": "false"}, "run on pve2")
+	if e.OK || e.Results[0].ExitStatus != "exit 3" {
+		t.Fatalf("failing command: %+v", e)
+	}
+	e = root.runAndWait("host.exec", map[string]any{"node": "pve1", "command": "flood"}, "run on pve1")
+	if !e.OK || len(e.Results[0].Output) > hosts.MaxOutput+100 || !strings.HasSuffix(e.Results[0].Output, "(output truncated)") {
+		t.Fatalf("output not capped: ok=%v len=%d", e.OK, len(e.Results[0].Output))
+	}
+	// no SSH key was ever created
+	if _, err := h.st.GetSetting("hosts.key.pve-lab"); err == nil {
+		t.Fatal("SSH key created")
+	}
+	// A host admin who is not root@pam gets PVE's login prompt: refused clearly.
+	h.fake.Update(func(f *fakepve.Server) { f.Admins["ops@pve"] = true })
+	ops := h.login("ops@pve", "opspass")
+	e = ops.runAndWait("host.exec", map[string]any{"node": "pve1", "command": "id"}, "run on pve1")
+	if e.OK || !strings.Contains(e.Results[0].Error, "root@pam") {
+		t.Fatalf("non-root terminal: %+v", e)
+	}
+	if got := h.fake.HostCommands(); len(got) != 3 {
+		t.Fatalf("commands typed into a login prompt ran: %q", got)
+	}
 }

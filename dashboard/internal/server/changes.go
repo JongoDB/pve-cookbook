@@ -103,9 +103,14 @@ func (s *Server) runPlan(w http.ResponseWriter, r *http.Request, ss *session) {
 	s.broadcastAudit(entry)
 	s.log.Info("change started", "audit", entry.ID, "user", ss.user, "as", cr.PVEUser, "action", p.Action, "title", p.Title)
 
+	// The run keeps the session secret (and so the ability to renew its
+	// ticket) until it finishes, even if the user goes idle or galley's cache
+	// would otherwise drop it.
+	release := s.holdKey(store.HashID(ss.id), ss.key)
 	s.inflight.Add(1)
 	go func() {
 		defer s.inflight.Done()
+		defer release()
 		ctx, cancel := context.WithTimeout(s.base, maxRun)
 		defer cancel()
 		results, ok := plan.Execute(ctx, cl, p, func(rs []plan.Result) {
@@ -113,7 +118,7 @@ func (s *Server) runPlan(w http.ResponseWriter, r *http.Request, ss *session) {
 			if e, err := s.store.UpdateAudit(entry.ID, "running", false, raw); err == nil {
 				s.broadcastAudit(e)
 			}
-		}, s.hostRunner(p.ClusterID))
+		}, s.hostRunner(p.ClusterID, cl))
 		if !ok && s.base.Err() != nil && len(results) > 0 {
 			results[len(results)-1].Error = "galley stopped while this step was running; check the PVE task log for the outcome"
 		}
@@ -160,6 +165,10 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request, ss *session) {
 	au := make(chan store.AuditEntry, 16)
 	s.auditSubs[au] = ss
 	s.mu.Unlock()
+	// An open stream (a tab showing galley) keeps the session in use: its
+	// tickets keep being renewed until the stream closes or the session ends.
+	release := s.holdKey(store.HashID(ss.id), ss.key)
+	defer release()
 	defer func() {
 		s.mu.Lock()
 		delete(s.auditSubs, au)

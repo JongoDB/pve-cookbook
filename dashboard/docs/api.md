@@ -5,15 +5,21 @@ MCP server. Times are Unix seconds. Sizes are bytes. CPU is a 0–1 fraction (as
 
 ## Auth model
 
-galley holds no authority of its own over clusters.
+galley holds no authority of its own over clusters. Threat model and rationale:
+[`security.md`](security.md).
 
 - **Service token (per cluster, read-only):** feeds the background poller's shared cache.
   Registration refuses tokens that hold any write privilege (`Sys.Modify`, `VM.PowerMgmt`,
   `VM.Allocate`, …) and requires `Sys.Audit` on `/` — i.e. the `PVEAuditor` role
   (`recipes/admin/users-roles-tokens.md`). Never used for anything a user sees unfiltered.
 - **User identity = PVE identity:** `POST /api/login` (password, TOTP/recovery code) or
-  OpenID Connect through a PVE `openid` realm. galley stores the user's PVE ticket per cluster
-  (AES-GCM encrypted), renews it in the background, and uses it for:
+  OpenID Connect through a PVE `openid` realm. Per cluster, galley keeps either the user's PVE
+  ticket (`credentialMode: "ticket"`, default) or a per-session API token it creates at login
+  with that ticket (`credentialMode: "token"`; see below). The credential is sealed under a key
+  derived from a per-session secret that only the session cookie carries. galley keeps the secret
+  in memory only while the session is in use (30 min after the last request, while an event
+  stream is open, while a change runs). Only then are tickets renewed in the background. The
+  credential is used for:
   - **every read shown to that user** — cache data is filtered by what PVE returns from
     `/cluster/resources` and `/access/permissions` for that user (re-checked every 30 s);
     cluster-wide state (Ceph, HA, corosync, all tasks, audit of other users) needs
@@ -22,8 +28,17 @@ galley holds no authority of its own over clusters.
 - **One session = one identity.** Adding a cluster login to a session must use the same
   `user@realm`. Credentials are reused on other clusters only between clusters an admin
   marked `shareLogin` (same realm, e.g. LDAP/AD).
-- **Sessions** are stored server-side (hashed id), survive restarts, idle-expire after 8 h and
-  hard-expire after 24 h. Cookie `galley_session`: HttpOnly, Secure, SameSite=Lax.
+- **Sessions** are stored server-side (hashed id). They idle-expire after 4 h and hard-expire 12 h
+  after login (`--session-idle`, `--session-max`). Cookie `galley_session`: HttpOnly, Secure,
+  SameSite=Lax. Its value is opaque to clients: it carries the session id and the secret that
+  unlocks the session's stored credentials. Sessions survive restarts, but nothing can be
+  decrypted until the browser's next request.
+- **Lapsed cluster logins:** if a session stays unused (no request, no open event stream) long
+  enough for its 2 h ticket to expire, the galley session stays valid, but that cluster's login
+  lapses. Requests for it answer `409 cluster_login_required`, and `Me` shows
+  `"authed":false,"loginExpired":true` for it. Ask for the password and call
+  `POST /api/clusters/{id}/login`. The same happens when PVE stops accepting the credential (for
+  example, a token revoked in PVE).
 - **CSRF:** authenticated mutations need `X-Galley-CSRF: <csrf>` from `GET /api/me`. All
   mutations (including login and setup) must be `Content-Type: application/json` and must not
   carry a cross-site `Origin` / `Sec-Fetch-Site`.
@@ -32,7 +47,8 @@ galley holds no authority of its own over clusters.
   30 attempts per minute; an unreachable cluster does not count) → `429 {"code":"rate_limited","retryAfter":seconds}` + `Retry-After`.
 - **Admin rights:** renaming or removing a cluster needs `Sys.Modify` on `/` *of that
   cluster*. Adding a cluster, changing a cluster's endpoints (they decide where passwords are
-  sent) or enabling `shareLogin` needs a **galley admin**: `Sys.Modify` on `/` in every
+  sent), enabling `shareLogin`, or changing `credentialMode` or `hostTransport` needs a
+  **galley admin**: `Sys.Modify` on `/` in every
   registered cluster, or `galley --admin cluster:user@realm` while logged in to that cluster
   as that user.
 - A login is rejected if the cluster answers for a different user than the one requested.
@@ -52,7 +68,7 @@ galley holds no authority of its own over clusters.
 | `POST /api/clusters/probe` | `{"endpoints":["192.0.2.11","192.0.2.12:8006"]}` | `{"endpoints":[Probe]}` |
 | `POST /api/clusters` | `{"name","endpoints":[{"host","fingerprint"}],"tokenId":"galley@pve!poller","tokenSecret","shareLogin"?}` | `201 Cluster` |
 | `GET /api/clusters` | – | `[Cluster]` (endpoints/token id only where the user has `Sys.Audit`) |
-| `PUT /api/clusters/{id}` | `{"name"?,"endpoints"?,"shareLogin"?}` | `Cluster` — rename, re-pin certificates after renewal, toggle login sharing |
+| `PUT /api/clusters/{id}` | `{"name"?,"endpoints"?,"shareLogin"?,"credentialMode"?:"ticket"\|"token","hostTransport"?:"pve"\|"ssh"}` | `Cluster` — rename, re-pin certificates after renewal, toggle login sharing, choose how user logins and host commands work |
 | `DELETE /api/clusters/{id}` | – | `204` |
 
 **First run:** while no cluster is registered, galley writes a one-time setup code to
@@ -62,7 +78,19 @@ file is removed once the first cluster is registered.
 
 `Probe` = `{"host","reachable":bool,"fingerprint":"AB:CD:…"(sha256 of leaf cert),"trustedBySystem":bool,"error"?}`
 
-`Cluster` = `{"id","name","authed","admin","endpoints"?,"tokenId"?,"shareLogin"?,"status":{"reachable","quorate","nodes","nodesOnline","activeEndpoint","lastPoll","error"?}}`
+`Cluster` = `{"id","name","authed","admin","credentialMode","endpoints"?,"tokenId"?,"shareLogin"?,"hostTransport"?,"status":{"reachable","quorate","nodes","nodesOnline","activeEndpoint","lastPoll","error"?}}`
+
+- `credentialMode` (applies to new logins):
+  - `"ticket"` (default): galley keeps the user's PVE ticket and renews it while the session is
+    in use.
+  - `"token"`: at login galley uses the ticket once to create the API token
+    `user@realm!galley-<random>` (`privsep=0`, comment `galley session`, expiring at the
+    session's maximum lifetime), then discards the ticket. The token is visible and revocable in
+    PVE. galley revokes it on logout, or at the user's next login if PVE refuses
+    self-revocation. Operations that PVE reserves for a `root@pam` *ticket* (for example raw
+    `hostpci` devices without a mapping) fail in this mode.
+- `hostTransport` (see Host commands): `"pve"` (default; PVE's node terminal as the user) or
+  `"ssh"` (galley's SSH key). Switching from `ssh` to `pve` deletes galley's SSH key.
 
 TLS: an endpoint is accepted if its certificate verifies against system roots **or** its
 leaf SHA-256 fingerprint equals the pinned one. Reads fail over across endpoints in order;
@@ -81,7 +109,13 @@ so a change is never sent twice.
 | `GET /api/me` | – | `Me` or `401` |
 | `GET/PUT /api/prefs/{key}` | any JSON ≤ 64 KiB | per-user preferences (e.g. dashboard layout) |
 
-`Me` = `{"user":"root@pam","csrf","version","galleyAdmin":bool,"expires","clusters":[{"id","name","authed":bool,"admin":bool}]}`
+`Me` = `{"user":"root@pam","csrf","version","galleyAdmin":bool,"expires","maxExpires","clusters":[{"id","name","authed":bool,"admin":bool,"loginExpired":bool,"credentialMode"}]}`
+
+- `expires` is the current idle expiry, and `maxExpires` the hard limit.
+- `loginExpired` means the session had a login for that cluster that lapsed or was refused by
+  PVE. Prompt for that cluster's password.
+- A login to a `token`-mode cluster can fail with `502 credential_failed` if PVE refuses to create
+  the token.
 
 For SSO, the PVE `openid` realm's IdP client must allow
 `https://<galley-host>/api/login/openid/callback` as a redirect URI. Run galley with
@@ -192,18 +226,35 @@ user (`VM.Console` / `Sys.Console` apply), for a console ticket →
 
 For what the API cannot do (NIC flow control, kernel parameters, disks, packages). Needs
 administrator rights on `/` of that cluster (`Sys.Modify`, `Sys.Console`, `Permissions.Modify`).
+Each cluster has one of two transports (`hostTransport`):
 
-- `GET /api/clusters/{id}/hosts` → nodes with their pinned SSH endpoint, galley's public key
-  (`restrict ssh-ed25519 …`) and the line that installs it cluster-wide
-  (`/etc/pve/priv/authorized_keys`).
+- **`pve` (default):** galley opens PVE's own node terminal (`termproxy` + `vncwebsocket`) as the
+  acting user and runs the command there. It types the command base64-encoded between unique
+  markers and captures the output and exit status. galley holds no credential for this. PVE gives
+  a passwordless root shell **only to `root@pam`**, so with this transport run host commands from
+  a session logged in as `root@pam` on that cluster. For anyone else the step fails with an
+  explanation, and nothing is typed into PVE's login prompt. Output has carriage returns removed.
+- **`ssh` (opt-in, galley admin):** galley's per-cluster SSH key and pinned host keys, as below.
+  Any administrator can then run host commands, at the cost of galley storing a root credential.
+
+Endpoints:
+
+- `GET /api/clusters/{id}/hosts` → `{"transport","nodes":[{"node","online","pin"?}]}`. With the
+  `ssh` transport it also returns galley's public key (`"authorizedKey": "restrict ssh-ed25519 …"`)
+  and the line that installs it cluster-wide (`"install"`, into
+  `/etc/pve/priv/authorized_keys`). The key is created only when SSH is enabled.
 - `POST /api/clusters/{id}/hosts/{node}/scan` → `{"addr","fingerprint"}` read from the node's SSH
   server — compare with `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on the node.
-- `PUT /api/clusters/{id}/hosts/{node} {"fingerprint"}` pins it after galley re-reads the key
-  from the node's own cluster address (from `/cluster/status`; it cannot be pointed elsewhere)
-  and it matches; `DELETE` unpins. galley uses a separate SSH key per cluster.
-- Change action `host.exec {"node","command","reason"?}` — always needs typed confirmation
-  `run on <node>`; output (≤ 256 KiB) and exit status are recorded in the audit log, visible only
-  to the actor and administrators. Connections to a host whose key differs from the pin are refused.
+- `PUT /api/clusters/{id}/hosts/{node} {"fingerprint"}` (SSH transport) pins the key after galley
+  re-reads it from the node's own cluster address and it matches. The address comes from
+  `/cluster/status`, so a pin cannot point elsewhere. `DELETE` unpins. galley uses a separate SSH
+  key per cluster.
+- Change action `host.exec {"node","command","reason"?}`:
+  - It always needs the typed confirmation `run on <node>`.
+  - Output (≤ 256 KiB) and exit status are recorded in the audit log, visible only to the actor
+    and administrators.
+  - Commands run as `bash -c <command>` with stdin from `/dev/null`, and are limited to 30 minutes.
+  - SSH: connections to a host whose key differs from the pin are refused.
 
 ## Assistant
 
@@ -266,7 +317,8 @@ marked `error` with a note to check the PVE task log.
 
 `unknown` means galley stopped following a task that may still be running in PVE (after
 6 hours, or a galley restart). Long changes keep working across ticket renewals: every
-request presents the user's current ticket.
+request presents the user's current ticket. A running change keeps the session's secret in
+memory until it finishes, so it keeps renewing even if the user closes the tab.
 
 `DELETE /api/plans/{id}` discards a pending plan. Plans expire after 10 minutes, run at most
 once, are visible only to their owner (max 50 pending per user), and only target guests the

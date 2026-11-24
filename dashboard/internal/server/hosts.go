@@ -4,18 +4,30 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"net/url"
 	"regexp"
+	"strconv"
 	"sync"
 	"time"
 
 	"github.com/JongoDB/pve-cookbook/dashboard/internal/hosts"
 	"github.com/JongoDB/pve-cookbook/dashboard/internal/plan"
+	"github.com/JongoDB/pve-cookbook/dashboard/internal/pve"
 	"github.com/JongoDB/pve-cookbook/dashboard/internal/store"
 )
 
-// Host access is root on the node, beyond PVE's permission model, so it is
-// limited to administrators: Sys.Modify, Sys.Console and Permissions.Modify on /.
+// Host commands run as root on a node, beyond PVE's permission model, so they
+// are limited to administrators: Sys.Modify, Sys.Console and Permissions.Modify on /.
+//
+// Transports (cluster setting hostTransport):
+//   - "pve" (default): PVE's own node terminal (termproxy), opened as the
+//     acting user. galley holds no credential for it; PVE authorizes it
+//     (Sys.Console) and gives a root shell only to root@pam.
+//   - "ssh" (opt-in): galley's per-cluster SSH key, authorized as root on the
+//     nodes, to pinned host keys. It works for any galley administrator, but
+//     the key is a standing root credential stored by galley.
 const hostAdminMsg = "host commands need administrator rights on / (Sys.Modify, Sys.Console and Permissions.Modify)"
 
 func hostAdmin(v *userView) bool {
@@ -77,8 +89,16 @@ func (s *Server) savePins(p map[string]map[string]HostPin) error {
 	return s.store.PutSetting(hostPinsSetting, string(b))
 }
 
-func (s *Server) hostRunner(cid string) plan.HostRunner {
+// hostRunner runs host commands of one change; cl is the acting user's client.
+func (s *Server) hostRunner(cid string, cl *pve.Client) plan.HostRunner {
 	return func(ctx context.Context, node, command string) (string, int, error) {
+		c, err := s.store.Cluster(cid)
+		if err != nil {
+			return "", -1, err
+		}
+		if defaultTransport(c.HostTransport) != "ssh" {
+			return s.termRun(ctx, cl, node, command)
+		}
 		pin, ok := s.hostPins()[cid][node]
 		if !ok {
 			return "", -1, errors.New("no confirmed SSH host key for " + node + "; pin it on the Hosts page first")
@@ -92,6 +112,38 @@ func (s *Server) hostRunner(cid string) plan.HostRunner {
 		res, err := hosts.Run(cctx, k, pin.Addr, pin.Fingerprint, command)
 		return res.Output, res.Exit, err
 	}
+}
+
+// termRun runs command in a PVE node terminal opened as the user (see hosts.RunTerm).
+func (s *Server) termRun(ctx context.Context, cl *pve.Client, node, command string) (string, int, error) {
+	if !hostRe.MatchString(node) {
+		return "", -1, errors.New("invalid node name")
+	}
+	cctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
+	defer cancel()
+	var res struct {
+		Port   any    `json:"port"`
+		Ticket string `json:"ticket"`
+		User   string `json:"user"`
+	}
+	octx, ocancel := context.WithTimeout(cctx, 20*time.Second)
+	err := cl.Do(octx, http.MethodPost, "/nodes/"+node+"/termproxy", url.Values{}, &res)
+	ocancel()
+	if err != nil {
+		return "", -1, fmt.Errorf("PVE refused a terminal on %s (needs Sys.Console): %w", node, err)
+	}
+	port := fmt.Sprint(res.Port)
+	if _, err := strconv.Atoi(port); err != nil || res.Ticket == "" {
+		return "", -1, errors.New("PVE returned no terminal port")
+	}
+	dctx, dcancel := context.WithTimeout(cctx, 20*time.Second)
+	ws, err := cl.DialWebsocket(dctx, "/nodes/"+node+"/vncwebsocket", url.Values{"port": {port}, "vncticket": {res.Ticket}})
+	dcancel()
+	if err != nil {
+		return "", -1, fmt.Errorf("could not connect to the terminal of %s: %w", node, err)
+	}
+	r, err := hosts.RunTerm(cctx, ws, res.User, res.Ticket, command)
+	return r.Output, r.Exit, err
 }
 
 // nodeAddr finds a node's cluster address from /cluster/status.
@@ -124,15 +176,16 @@ func (s *Server) requireHostAdmin(w http.ResponseWriter, r *http.Request, ss *se
 	return true
 }
 
-// GET /api/clusters/{id}/hosts → nodes, their pinned SSH endpoint, and galley's public key.
+// GET /api/clusters/{id}/hosts → the host transport, nodes, their pinned SSH
+// endpoint and (SSH transport only) galley's public key.
 func (s *Server) listHosts(w http.ResponseWriter, r *http.Request, ss *session) {
 	cid := r.PathValue("id")
 	if !s.requireHostAdmin(w, r, ss, cid) {
 		return
 	}
-	k, err := s.hostKey(cid)
+	c, err := s.store.Cluster(cid)
 	if err != nil {
-		apiError(w, 500, "hosts", err.Error())
+		apiError(w, 404, "not_found", "unknown cluster")
 		return
 	}
 	pins := s.hostPins()[cid]
@@ -145,10 +198,24 @@ func (s *Server) listHosts(w http.ResponseWriter, r *http.Request, ss *session) 
 		}
 		nodes = append(nodes, e)
 	}
+	transport := defaultTransport(c.HostTransport)
+	out := map[string]any{"transport": transport, "nodes": nodes}
+	if transport != "ssh" {
+		// No key exists (or is created) unless an admin opts in to SSH.
+		out["note"] = "Host commands run in PVE's node terminal as the acting user; PVE gives a passwordless root shell only to root@pam."
+		writeJSON(w, 200, out)
+		return
+	}
+	k, err := s.hostKey(cid)
+	if err != nil {
+		apiError(w, 500, "hosts", err.Error())
+		return
+	}
 	ak := k.AuthorizedKey()
-	writeJSON(w, 200, map[string]any{"nodes": nodes, "authorizedKey": ak,
-		// /root/.ssh/authorized_keys on PVE nodes links to the cluster-wide /etc/pve/priv/authorized_keys.
-		"install": "echo '" + ak + "' >> /etc/pve/priv/authorized_keys"})
+	out["authorizedKey"] = ak
+	// /root/.ssh/authorized_keys on PVE nodes links to the cluster-wide /etc/pve/priv/authorized_keys.
+	out["install"] = "echo '" + ak + "' >> /etc/pve/priv/authorized_keys"
+	writeJSON(w, 200, out)
 }
 
 // POST /api/clusters/{id}/hosts/{node}/scan → {addr, fingerprint} to compare before pinning.

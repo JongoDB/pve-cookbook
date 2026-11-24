@@ -1,13 +1,16 @@
 // Package store persists galley state in SQLite: registered clusters (service
 // token encrypted at rest), user sessions and their per-cluster PVE credentials
-// (encrypted), and the audit log. Schema changes are versioned migrations.
+// (envelope-encrypted per session, see SessionKey), and the audit log. Schema
+// changes are versioned migrations.
 package store
 
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hkdf"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
@@ -32,8 +35,16 @@ type Cluster struct {
 	TokenSecret string         `json:"-"`
 	// ShareLogin: a login on another cluster may reuse the same credentials here
 	// (clusters that share a realm, e.g. the same LDAP/AD). Off by default.
-	ShareLogin bool  `json:"shareLogin"`
-	CreatedAt  int64 `json:"createdAt"`
+	ShareLogin bool `json:"shareLogin"`
+	// CredentialMode is how galley holds a user's login to this cluster:
+	// "ticket" (default; the user's PVE ticket, renewed while the user is
+	// active) or "token" (a short-lived per-session API token created at login).
+	CredentialMode string `json:"credentialMode"`
+	// HostTransport is how host commands reach nodes: "pve" (default; PVE's
+	// node terminal as the user, no galley-held credential) or "ssh" (galley's
+	// per-cluster SSH key, opt-in).
+	HostTransport string `json:"hostTransport"`
+	CreatedAt     int64  `json:"createdAt"`
 	// BrokenSecret is set when the stored token cannot be decrypted (key changed).
 	BrokenSecret bool `json:"brokenSecret,omitempty"`
 }
@@ -63,6 +74,9 @@ type Session struct {
 	Created  int64
 	LastSeen int64
 	Expires  int64
+	// KeyCheck verifies the session secret K presented with the id (see
+	// Store.KeyCheck); it reveals nothing about K.
+	KeyCheck string
 }
 
 // Cred is a session's credential for one cluster.
@@ -80,6 +94,7 @@ type Cred struct {
 type Store struct {
 	db  *sql.DB
 	gcm cipher.AEAD
+	key []byte // instance key: input (with a session secret) to per-session keys
 }
 
 // ErrNotFound is returned when a row does not exist.
@@ -109,7 +124,7 @@ func Open(dir string) (*Store, error) {
 	}
 	// WAL allows concurrent readers with one writer; serialise writers in the pool.
 	db.SetMaxOpenConns(4)
-	s := &Store{db: db, gcm: gcm}
+	s := &Store{db: db, gcm: gcm, key: key}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, err
@@ -186,6 +201,19 @@ var migrations = []string{
 	 ALTER TABLE sessions ADD COLUMN home TEXT NOT NULL DEFAULT '';`,
 	// 4: instance settings (assistant provider, host access key); values sealed
 	`CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated INTEGER NOT NULL);`,
+	// 5: per-session envelope encryption of user credentials. Credentials sealed
+	// with the instance key alone are dropped (their users log in again).
+	// Clusters gain a credential mode and a host-command transport; clusters
+	// that already have an SSH key keep using SSH until an admin switches.
+	`DELETE FROM session_creds;
+	 DELETE FROM sessions;
+	 ALTER TABLE sessions ADD COLUMN key_check TEXT NOT NULL DEFAULT '';
+	 ALTER TABLE clusters ADD COLUMN credential_mode TEXT NOT NULL DEFAULT 'ticket';
+	 ALTER TABLE clusters ADD COLUMN host_transport TEXT NOT NULL DEFAULT 'pve';
+	 UPDATE clusters SET host_transport = 'ssh' WHERE ('hosts.key.' || id) IN (SELECT key FROM settings);
+	 CREATE TABLE token_revocations (
+	   cluster_id TEXT NOT NULL, pve_user TEXT NOT NULL, token_id TEXT NOT NULL,
+	   reason TEXT NOT NULL, created INTEGER NOT NULL, PRIMARY KEY (cluster_id, token_id));`,
 }
 
 func (s *Store) migrate() error {
@@ -264,15 +292,23 @@ func (s *Store) AddCluster(c Cluster) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Exec(`INSERT INTO clusters(id,name,endpoints,token_id,token_secret,share_login,created_at) VALUES(?,?,?,?,?,?,?)`,
-		c.ID, c.Name, string(ep), c.TokenID, sec, c.ShareLogin, c.CreatedAt)
+	_, err = s.db.Exec(`INSERT INTO clusters(id,name,endpoints,token_id,token_secret,share_login,credential_mode,host_transport,created_at) VALUES(?,?,?,?,?,?,?,?,?)`,
+		c.ID, c.Name, string(ep), c.TokenID, sec, c.ShareLogin, defaultStr(c.CredentialMode, "ticket"), defaultStr(c.HostTransport, "pve"), c.CreatedAt)
 	return err
 }
 
-// UpdateCluster changes name, endpoints (pins) and share flag.
+func defaultStr(v, d string) string {
+	if v == "" {
+		return d
+	}
+	return v
+}
+
+// UpdateCluster changes name, endpoints (pins), share flag, credential mode and host transport.
 func (s *Store) UpdateCluster(c Cluster) error {
 	ep, _ := json.Marshal(c.Endpoints)
-	res, err := s.db.Exec(`UPDATE clusters SET name=?, endpoints=?, share_login=? WHERE id=?`, c.Name, string(ep), c.ShareLogin, c.ID)
+	res, err := s.db.Exec(`UPDATE clusters SET name=?, endpoints=?, share_login=?, credential_mode=?, host_transport=? WHERE id=?`,
+		c.Name, string(ep), c.ShareLogin, defaultStr(c.CredentialMode, "ticket"), defaultStr(c.HostTransport, "pve"), c.ID)
 	if err != nil {
 		return err
 	}
@@ -288,9 +324,11 @@ func (s *Store) DeleteCluster(id string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`DELETE FROM session_creds WHERE cluster_id=?`, id); err != nil {
-		tx.Rollback()
-		return err
+	for _, q := range []string{`DELETE FROM session_creds WHERE cluster_id=?`, `DELETE FROM token_revocations WHERE cluster_id=?`} {
+		if _, err := tx.Exec(q, id); err != nil {
+			tx.Rollback()
+			return err
+		}
 	}
 	if _, err := tx.Exec(`DELETE FROM clusters WHERE id=?`, id); err != nil {
 		tx.Rollback()
@@ -302,7 +340,7 @@ func (s *Store) DeleteCluster(id string) error {
 // Clusters lists clusters. A row whose secret cannot be decrypted is returned
 // with BrokenSecret set instead of failing the whole listing.
 func (s *Store) Clusters() ([]Cluster, error) {
-	rows, err := s.db.Query(`SELECT id,name,endpoints,token_id,token_secret,share_login,created_at FROM clusters ORDER BY name`)
+	rows, err := s.db.Query(`SELECT id,name,endpoints,token_id,token_secret,share_login,credential_mode,host_transport,created_at FROM clusters ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -311,7 +349,7 @@ func (s *Store) Clusters() ([]Cluster, error) {
 	for rows.Next() {
 		var c Cluster
 		var ep, sec string
-		if err := rows.Scan(&c.ID, &c.Name, &ep, &c.TokenID, &sec, &c.ShareLogin, &c.CreatedAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.Name, &ep, &c.TokenID, &sec, &c.ShareLogin, &c.CredentialMode, &c.HostTransport, &c.CreatedAt); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal([]byte(ep), &c.Endpoints); err != nil {
@@ -340,6 +378,82 @@ func (s *Store) Cluster(id string) (Cluster, error) {
 }
 
 // ---- sessions ----
+//
+// Envelope encryption of user credentials. Each session has a random secret K
+// (SessionKeySize bytes) that lives only in the browser's session cookie and,
+// while the session is in use, in galley's memory. A session's credentials are
+// sealed with a key derived from K *and* the instance key: the database plus
+// secret.key (a backup, a stolen disk) are not enough to recover any user's PVE
+// login. Only a hash of the session id and a verifier of K are stored.
+
+// SessionKeySize is the length of a session secret K.
+const SessionKeySize = 32
+
+// ErrNoKey is returned when a session secret is missing or malformed.
+var ErrNoKey = errors.New("store: session secret required")
+
+func (s *Store) derive(k []byte, info string) ([]byte, error) {
+	if len(k) != SessionKeySize {
+		return nil, ErrNoKey
+	}
+	return hkdf.Key(sha256.New, k, s.key, info, 32)
+}
+
+func (s *Store) sessionAEAD(k []byte) (cipher.AEAD, error) {
+	dk, err := s.derive(k, "galley session credentials v1")
+	if err != nil {
+		return nil, err
+	}
+	blk, err := aes.NewCipher(dk)
+	if err != nil {
+		return nil, err
+	}
+	return cipher.NewGCM(blk)
+}
+
+// KeyCheck returns a verifier of K for this instance (stored with the session,
+// so a request with the right id but a wrong K is refused). It is a one-way
+// derivation and does not help decrypt anything.
+func (s *Store) KeyCheck(k []byte) string {
+	dk, err := s.derive(k, "galley session key check v1")
+	if err != nil {
+		return ""
+	}
+	return hex.EncodeToString(dk)
+}
+
+// CheckKey reports whether k is the secret of session ss.
+func (s *Store) CheckKey(ss Session, k []byte) bool {
+	want := s.KeyCheck(k)
+	return want != "" && ss.KeyCheck != "" && subtle.ConstantTimeCompare([]byte(want), []byte(ss.KeyCheck)) == 1
+}
+
+// credAD binds a sealed value to its row and field, so values cannot be moved
+// between clusters or fields of the same session.
+func credAD(hash, cid, field string) []byte {
+	return []byte(hash + "\x00" + cid + "\x00" + field)
+}
+
+func sealWith(a cipher.AEAD, plain string, ad []byte) (string, error) {
+	nonce := make([]byte, a.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(a.Seal(nonce, nonce, []byte(plain), ad)), nil
+}
+
+func openWith(a cipher.AEAD, enc string, ad []byte) (string, error) {
+	raw, err := base64.StdEncoding.DecodeString(enc)
+	if err != nil || len(raw) < a.NonceSize() {
+		return "", fmt.Errorf("store: corrupt secret")
+	}
+	n := a.NonceSize()
+	p, err := a.Open(nil, raw[:n], raw[n:], ad)
+	if err != nil {
+		return "", fmt.Errorf("store: cannot decrypt credential (wrong session secret)")
+	}
+	return string(p), nil
+}
 
 // HashID hashes a session id for storage/lookup.
 func HashID(id string) string {
@@ -349,17 +463,17 @@ func HashID(id string) string {
 
 // PutSession creates or replaces a session.
 func (s *Store) PutSession(ss Session) error {
-	_, err := s.db.Exec(`INSERT INTO sessions(id_hash,user,home,csrf,created,last_seen,expires) VALUES(?,?,?,?,?,?,?)
-	  ON CONFLICT(id_hash) DO UPDATE SET user=excluded.user, home=excluded.home, csrf=excluded.csrf, last_seen=excluded.last_seen, expires=excluded.expires`,
-		HashID(ss.ID), ss.User, ss.Home, ss.CSRF, ss.Created, ss.LastSeen, ss.Expires)
+	_, err := s.db.Exec(`INSERT INTO sessions(id_hash,user,home,csrf,created,last_seen,expires,key_check) VALUES(?,?,?,?,?,?,?,?)
+	  ON CONFLICT(id_hash) DO UPDATE SET user=excluded.user, home=excluded.home, csrf=excluded.csrf, last_seen=excluded.last_seen, expires=excluded.expires, key_check=excluded.key_check`,
+		HashID(ss.ID), ss.User, ss.Home, ss.CSRF, ss.Created, ss.LastSeen, ss.Expires, ss.KeyCheck)
 	return err
 }
 
 // GetSession loads a session by raw id; expired sessions are deleted and reported missing.
 func (s *Store) GetSession(id string) (Session, error) {
 	var ss Session
-	err := s.db.QueryRow(`SELECT user,home,csrf,created,last_seen,expires FROM sessions WHERE id_hash=?`, HashID(id)).
-		Scan(&ss.User, &ss.Home, &ss.CSRF, &ss.Created, &ss.LastSeen, &ss.Expires)
+	err := s.db.QueryRow(`SELECT user,home,csrf,created,last_seen,expires,key_check FROM sessions WHERE id_hash=?`, HashID(id)).
+		Scan(&ss.User, &ss.Home, &ss.CSRF, &ss.Created, &ss.LastSeen, &ss.Expires, &ss.KeyCheck)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ss, ErrNotFound
 	}
@@ -374,6 +488,13 @@ func (s *Store) GetSession(id string) (Session, error) {
 	return ss, nil
 }
 
+// SessionLive reports whether the session with this hash exists and has not expired.
+func (s *Store) SessionLive(hash string) bool {
+	var exp int64
+	err := s.db.QueryRow(`SELECT expires FROM sessions WHERE id_hash=?`, hash).Scan(&exp)
+	return err == nil && exp >= time.Now().Unix()
+}
+
 // TouchSession updates last-seen and slides the expiry.
 func (s *Store) TouchSession(id string, lastSeen, expires int64) error {
 	_, err := s.db.Exec(`UPDATE sessions SET last_seen=?, expires=? WHERE id_hash=?`, lastSeen, expires, HashID(id))
@@ -386,55 +507,136 @@ func (s *Store) DeleteSession(id string) error {
 	return err
 }
 
-// PurgeExpiredSessions deletes expired sessions and returns their credentials.
-func (s *Store) PurgeExpiredSessions(now int64) ([]Cred, error) {
-	rows, err := s.db.Query(`SELECT c.cluster_id,c.pve_user,c.kind,c.token_id,c.secret,c.csrf,c.expires
-	  FROM session_creds c JOIN sessions s ON s.id_hash=c.session_hash WHERE s.expires < ?`, now)
+// CredMeta describes a stored credential without its secret (which needs the
+// session's K to decrypt).
+type CredMeta struct {
+	SessionHash string
+	ClusterID   string
+	PVEUser     string
+	Kind        string
+	TokenID     string
+	Expires     int64
+}
+
+const credMetaCols = `c.session_hash,c.cluster_id,c.pve_user,c.kind,c.token_id,c.expires`
+
+func scanMetas(rows *sql.Rows, err error) ([]CredMeta, error) {
 	if err != nil {
 		return nil, err
 	}
-	creds, err := s.scanCreds(rows)
+	defer rows.Close()
+	out := []CredMeta{}
+	for rows.Next() {
+		var m CredMeta
+		if err := rows.Scan(&m.SessionHash, &m.ClusterID, &m.PVEUser, &m.Kind, &m.TokenID, &m.Expires); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// PurgeExpiredSessions deletes expired sessions and returns their credentials' metadata.
+func (s *Store) PurgeExpiredSessions(now int64) ([]CredMeta, error) {
+	metas, err := scanMetas(s.db.Query(`SELECT `+credMetaCols+` FROM session_creds c JOIN sessions s ON s.id_hash=c.session_hash WHERE s.expires < ?`, now))
 	if err != nil {
 		return nil, err
 	}
 	_, err = s.db.Exec(`DELETE FROM sessions WHERE expires < ?`, now)
-	return creds, err
+	return metas, err
 }
 
-// PutCred stores (encrypted) a session's credential for a cluster.
-func (s *Store) PutCred(sessionID string, c Cred) error {
-	sec, err := s.seal(c.Secret)
+// CredMetas lists a session's credentials without decrypting them.
+func (s *Store) CredMetas(sessionID string) ([]CredMeta, error) {
+	return scanMetas(s.db.Query(`SELECT `+credMetaCols+` FROM session_creds c WHERE c.session_hash=?`, HashID(sessionID)))
+}
+
+// CredsExpiringBefore lists credentials of live sessions that expire before t
+// (metadata only: renewal needs the session's K, which only memory holds).
+func (s *Store) CredsExpiringBefore(t int64) ([]CredMeta, error) {
+	return scanMetas(s.db.Query(`SELECT `+credMetaCols+` FROM session_creds c JOIN sessions s ON s.id_hash=c.session_hash
+	  WHERE c.expires < ? AND s.expires > ?`, t, time.Now().Unix()))
+}
+
+func (s *Store) sealCred(hash string, k []byte, c Cred) (string, string, error) {
+	a, err := s.sessionAEAD(k)
 	if err != nil {
-		return err
+		return "", "", err
 	}
-	csrf, err := s.seal(c.CSRF)
+	sec, err := sealWith(a, c.Secret, credAD(hash, c.ClusterID, "secret"))
+	if err != nil {
+		return "", "", err
+	}
+	csrf, err := sealWith(a, c.CSRF, credAD(hash, c.ClusterID, "csrf"))
+	return sec, csrf, err
+}
+
+// PutCred stores a session's credential for a cluster, sealed under the session secret k.
+func (s *Store) PutCred(sessionID string, k []byte, c Cred) error {
+	hash := HashID(sessionID)
+	sec, csrf, err := s.sealCred(hash, k, c)
 	if err != nil {
 		return err
 	}
 	_, err = s.db.Exec(`INSERT INTO session_creds(session_hash,cluster_id,pve_user,kind,token_id,secret,csrf,expires) VALUES(?,?,?,?,?,?,?,?)
 	  ON CONFLICT(session_hash,cluster_id) DO UPDATE SET pve_user=excluded.pve_user, kind=excluded.kind, token_id=excluded.token_id,
 	  secret=excluded.secret, csrf=excluded.csrf, expires=excluded.expires`,
-		HashID(sessionID), c.ClusterID, c.PVEUser, c.Kind, c.TokenID, sec, csrf, c.Expires)
+		hash, c.ClusterID, c.PVEUser, c.Kind, c.TokenID, sec, csrf, c.Expires)
+	return err
+}
+
+// PutCredByHash replaces the secret of an existing credential (renewal). It
+// never re-creates a credential that was deleted meanwhile (e.g. by logout).
+func (s *Store) PutCredByHash(hash string, k []byte, c Cred) error {
+	sec, csrf, err := s.sealCred(hash, k, c)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`UPDATE session_creds SET secret=?, csrf=?, expires=? WHERE session_hash=? AND cluster_id=?`, sec, csrf, c.Expires, hash, c.ClusterID)
 	return err
 }
 
 // DeleteCred removes one credential.
 func (s *Store) DeleteCred(sessionID, clusterID string) error {
-	_, err := s.db.Exec(`DELETE FROM session_creds WHERE session_hash=? AND cluster_id=?`, HashID(sessionID), clusterID)
+	return s.DeleteCredByHash(HashID(sessionID), clusterID)
+}
+
+// DeleteCredByHash removes a credential by session hash.
+func (s *Store) DeleteCredByHash(hash, clusterID string) error {
+	_, err := s.db.Exec(`DELETE FROM session_creds WHERE session_hash=? AND cluster_id=?`, hash, clusterID)
 	return err
 }
 
-// Creds lists a session's credentials.
-func (s *Store) Creds(sessionID string) ([]Cred, error) {
-	rows, err := s.db.Query(`SELECT cluster_id,pve_user,kind,token_id,secret,csrf,expires FROM session_creds WHERE session_hash=?`, HashID(sessionID))
+// Creds lists a session's credentials, decrypted with the session secret k.
+// Credentials that k does not open are left out.
+func (s *Store) Creds(sessionID string, k []byte) ([]Cred, error) {
+	hash := HashID(sessionID)
+	rows, err := s.db.Query(`SELECT cluster_id,pve_user,kind,token_id,secret,csrf,expires FROM session_creds WHERE session_hash=?`, hash)
 	if err != nil {
 		return nil, err
 	}
-	return s.scanCreds(rows)
+	return s.scanCreds(rows, hash, k)
 }
 
-func (s *Store) scanCreds(rows *sql.Rows) ([]Cred, error) {
+// CredByHash returns one credential of a session identified by its hash.
+func (s *Store) CredByHash(hash string, k []byte, clusterID string) (Cred, error) {
+	rows, err := s.db.Query(`SELECT cluster_id,pve_user,kind,token_id,secret,csrf,expires FROM session_creds WHERE session_hash=? AND cluster_id=?`, hash, clusterID)
+	if err != nil {
+		return Cred{}, err
+	}
+	cs, err := s.scanCreds(rows, hash, k)
+	if err != nil {
+		return Cred{}, err
+	}
+	if len(cs) == 0 {
+		return Cred{}, ErrNotFound
+	}
+	return cs[0], nil
+}
+
+func (s *Store) scanCreds(rows *sql.Rows, hash string, k []byte) ([]Cred, error) {
 	defer rows.Close()
+	a, aerr := s.sessionAEAD(k)
 	out := []Cred{}
 	for rows.Next() {
 		var c Cred
@@ -442,16 +644,78 @@ func (s *Store) scanCreds(rows *sql.Rows) ([]Cred, error) {
 		if err := rows.Scan(&c.ClusterID, &c.PVEUser, &c.Kind, &c.TokenID, &sec, &csrf, &c.Expires); err != nil {
 			return nil, err
 		}
+		if aerr != nil {
+			continue // no usable session secret: nothing can be decrypted
+		}
 		var err error
-		if c.Secret, err = s.unseal(sec); err != nil {
+		if c.Secret, err = openWith(a, sec, credAD(hash, c.ClusterID, "secret")); err != nil {
 			continue // undecryptable credential: treat as absent
 		}
-		if c.CSRF, err = s.unseal(csrf); err != nil {
+		if c.CSRF, err = openWith(a, csrf, credAD(hash, c.ClusterID, "csrf")); err != nil {
 			continue
 		}
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+// ---- per-session API tokens that could not be revoked yet ----
+
+// TokenRevocation is a galley-created PVE API token still to be deleted.
+type TokenRevocation struct {
+	ClusterID string
+	PVEUser   string
+	TokenID   string // full id user@realm!name
+	Reason    string
+	Created   int64
+}
+
+// AddTokenRevocation records a token galley could not revoke (it is deleted
+// with the user's next login ticket on that cluster, or expires on its own).
+func (s *Store) AddTokenRevocation(r TokenRevocation) error {
+	if r.Created == 0 {
+		r.Created = time.Now().Unix()
+	}
+	_, err := s.db.Exec(`INSERT INTO token_revocations(cluster_id,pve_user,token_id,reason,created) VALUES(?,?,?,?,?)
+	  ON CONFLICT(cluster_id,token_id) DO UPDATE SET reason=excluded.reason`, r.ClusterID, r.PVEUser, r.TokenID, r.Reason, r.Created)
+	return err
+}
+
+// TokenRevocations lists pending revocations for a user on a cluster ("" = all users).
+func (s *Store) TokenRevocations(clusterID, user string) ([]TokenRevocation, error) {
+	rows, err := s.db.Query(`SELECT cluster_id,pve_user,token_id,reason,created FROM token_revocations
+	  WHERE cluster_id=? AND (?='' OR pve_user=?) ORDER BY created`, clusterID, user, user)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []TokenRevocation{}
+	for rows.Next() {
+		var r TokenRevocation
+		if err := rows.Scan(&r.ClusterID, &r.PVEUser, &r.TokenID, &r.Reason, &r.Created); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// PruneTokenRevocations drops entries recorded before t (their tokens have expired).
+func (s *Store) PruneTokenRevocations(t int64) error {
+	_, err := s.db.Exec(`DELETE FROM token_revocations WHERE created < ?`, t)
+	return err
+}
+
+// DeleteSetting removes a setting.
+func (s *Store) DeleteSetting(key string) error {
+	_, err := s.db.Exec(`DELETE FROM settings WHERE key=?`, key)
+	return err
+}
+
+// DeleteTokenRevocation drops a pending revocation (done, or the token expired).
+func (s *Store) DeleteTokenRevocation(clusterID, tokenID string) error {
+	_, err := s.db.Exec(`DELETE FROM token_revocations WHERE cluster_id=? AND token_id=?`, clusterID, tokenID)
+	return err
 }
 
 // ---- audit ----
@@ -547,73 +811,6 @@ func (s *Store) PutPref(user, key string, value json.RawMessage) error {
 	_, err := s.db.Exec(`INSERT INTO user_prefs(user,key,value,updated) VALUES(?,?,?,?)
 	  ON CONFLICT(user,key) DO UPDATE SET value=excluded.value, updated=excluded.updated`, user, key, string(value), time.Now().Unix())
 	return err
-}
-
-// SessionCred is a credential with its owning session hash (for background renewal).
-type SessionCred struct {
-	SessionHash string
-	Cred
-}
-
-// CredsExpiringBefore lists credentials of live sessions that expire before t.
-func (s *Store) CredsExpiringBefore(t int64) ([]SessionCred, error) {
-	rows, err := s.db.Query(`SELECT c.session_hash,c.cluster_id,c.pve_user,c.kind,c.token_id,c.secret,c.csrf,c.expires
-	  FROM session_creds c JOIN sessions s ON s.id_hash=c.session_hash WHERE c.expires < ? AND s.expires > ?`, t, time.Now().Unix())
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var out []SessionCred
-	for rows.Next() {
-		var sc SessionCred
-		var sec, csrf string
-		if err := rows.Scan(&sc.SessionHash, &sc.ClusterID, &sc.PVEUser, &sc.Kind, &sc.TokenID, &sec, &csrf, &sc.Expires); err != nil {
-			return nil, err
-		}
-		var e1, e2 error
-		sc.Secret, e1 = s.unseal(sec)
-		sc.CSRF, e2 = s.unseal(csrf)
-		if e1 == nil && e2 == nil {
-			out = append(out, sc)
-		}
-	}
-	return out, rows.Err()
-}
-
-// PutCredByHash stores a credential for a session identified by its hash.
-func (s *Store) PutCredByHash(hash string, c Cred) error {
-	sec, err := s.seal(c.Secret)
-	if err != nil {
-		return err
-	}
-	csrf, err := s.seal(c.CSRF)
-	if err != nil {
-		return err
-	}
-	_, err = s.db.Exec(`UPDATE session_creds SET secret=?, csrf=?, expires=? WHERE session_hash=? AND cluster_id=?`, sec, csrf, c.Expires, hash, c.ClusterID)
-	return err
-}
-
-// DeleteCredByHash removes a credential by session hash.
-func (s *Store) DeleteCredByHash(hash, clusterID string) error {
-	_, err := s.db.Exec(`DELETE FROM session_creds WHERE session_hash=? AND cluster_id=?`, hash, clusterID)
-	return err
-}
-
-// CredByHash returns one credential of a session identified by its hash.
-func (s *Store) CredByHash(hash, clusterID string) (Cred, error) {
-	rows, err := s.db.Query(`SELECT cluster_id,pve_user,kind,token_id,secret,csrf,expires FROM session_creds WHERE session_hash=? AND cluster_id=?`, hash, clusterID)
-	if err != nil {
-		return Cred{}, err
-	}
-	cs, err := s.scanCreds(rows)
-	if err != nil {
-		return Cred{}, err
-	}
-	if len(cs) == 0 {
-		return Cred{}, ErrNotFound
-	}
-	return cs[0], nil
 }
 
 // InterruptRunning marks audit entries left "running" by a previous process:

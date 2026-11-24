@@ -18,21 +18,31 @@ import (
 
 type session struct {
 	id, user, home, csrf string
-	expires              int64
+	created, expires     int64
+	// key is the session secret K from the cookie: it unlocks the session's
+	// stored credentials (see sessions.go). Never logged or stored.
+	key []byte
 }
 
 type handler func(w http.ResponseWriter, r *http.Request, s *session)
 
-// session loads the request's session from the store, sliding its idle expiry.
+// session loads the request's session from the store (the cookie must carry
+// the session's secret K), sliding its idle expiry and keeping K in memory
+// while the session is in use.
 func (s *Server) session(r *http.Request) *session {
 	c, err := r.Cookie(cookieName)
-	if err != nil || len(c.Value) < 32 {
-		return nil
-	}
-	st, err := s.store.GetSession(c.Value)
 	if err != nil {
 		return nil
 	}
+	id, k, ok := parseCookie(c.Value)
+	if !ok {
+		return nil
+	}
+	st, err := s.store.GetSession(id)
+	if err != nil || !s.store.CheckKey(st, k) {
+		return nil
+	}
+	s.rememberKey(store.HashID(id), k)
 	now := time.Now()
 	s.mu.Lock()
 	touch := now.Sub(s.lastTouch[st.ID]) > time.Minute
@@ -41,11 +51,11 @@ func (s *Server) session(r *http.Request) *session {
 	}
 	s.mu.Unlock()
 	if touch {
-		exp := min(st.Created+int64(sessionAbsolute.Seconds()), now.Add(sessionIdle).Unix())
+		exp := min(st.Created+int64(s.opt.SessionMax.Seconds()), now.Add(s.opt.SessionIdle).Unix())
 		_ = s.store.TouchSession(st.ID, now.Unix(), exp)
 		st.Expires = exp
 	}
-	return &session{id: st.ID, user: st.User, home: st.Home, csrf: st.CSRF, expires: st.Expires}
+	return &session{id: st.ID, user: st.User, home: st.Home, csrf: st.CSRF, created: st.Created, expires: st.Expires, key: k}
 }
 
 func (s *Server) authed(h handler) http.HandlerFunc {
@@ -147,7 +157,7 @@ func (s *Server) clusterAdmin(ctx context.Context, ss *session, cid string) bool
 var errNoCred = errors.New("not logged in to this cluster")
 
 func (s *Server) cred(ss *session, cid string) (store.Cred, error) {
-	cs, err := s.store.Creds(ss.id)
+	cs, err := s.store.Creds(ss.id, ss.key)
 	if err != nil {
 		return store.Cred{}, err
 	}
@@ -160,6 +170,8 @@ func (s *Server) cred(ss *session, cid string) (store.Cred, error) {
 }
 
 // userClient returns a client acting as the session's PVE user on cluster cid.
+// The client holds a copy of the session secret, so a change that runs for
+// hours keeps renewing its ticket even after the user went idle.
 func (s *Server) userClient(ctx context.Context, ss *session, cid string) (*pve.Client, store.Cred, error) {
 	base, c, err := s.baseClient(cid)
 	if err != nil {
@@ -170,8 +182,16 @@ func (s *Server) userClient(ctx context.Context, ss *session, cid string) (*pve.
 		return nil, cr, fmt.Errorf("not logged in to %s", c.Name)
 	}
 	hash := store.HashID(ss.id)
+	if cr.Kind == "token" {
+		if time.Now().Unix() >= cr.Expires {
+			_ = s.store.DeleteCredByHash(hash, cid)
+			return nil, cr, fmt.Errorf("your login to %s expired; log in again", c.Name)
+		}
+		return base.WithAuth(pve.TokenAuth{ID: cr.TokenID, Secret: cr.Secret}), cr, nil
+	}
+	k := append([]byte(nil), ss.key...)
 	if time.Until(time.Unix(cr.Expires, 0)) < 30*time.Minute {
-		if cr, err = s.renew(ctx, hash, cr); err != nil {
+		if cr, err = s.renew(ctx, hash, k, cr); err != nil {
 			return nil, cr, fmt.Errorf("your login to %s expired; log in again", c.Name)
 		}
 	}
@@ -184,11 +204,11 @@ func (s *Server) userClient(ctx context.Context, ss *session, cid string) (*pve.
 		mu.Lock()
 		defer mu.Unlock()
 		if time.Until(time.Unix(current.Expires, 0)) < 45*time.Minute {
-			if fresh, err := s.store.CredByHash(hash, cid2); err == nil {
+			if fresh, err := s.store.CredByHash(hash, k, cid2); err == nil {
 				current = fresh
 			}
 			if time.Until(time.Unix(current.Expires, 0)) < 30*time.Minute {
-				if r, err := s.renew(s.base, hash, current); err == nil {
+				if r, err := s.renew(s.base, hash, k, current); err == nil {
 					current = r
 				}
 			}
@@ -199,8 +219,9 @@ func (s *Server) userClient(ctx context.Context, ss *session, cid string) (*pve.
 }
 
 // renew exchanges a still-valid ticket for a fresh one (PVE accepts a valid
-// ticket as the password), serialised per session and cluster.
-func (s *Server) renew(ctx context.Context, hash string, cr store.Cred) (store.Cred, error) {
+// ticket as the password), serialised per session and cluster. It needs the
+// session secret k to read and re-seal the credential.
+func (s *Server) renew(ctx context.Context, hash string, k []byte, cr store.Cred) (store.Cred, error) {
 	key := hash + "\x00" + cr.ClusterID
 	s.mu.Lock()
 	m := s.renewing[key]
@@ -212,13 +233,16 @@ func (s *Server) renew(ctx context.Context, hash string, cr store.Cred) (store.C
 	m.Lock()
 	defer m.Unlock()
 	// Another caller may have renewed while we waited: work from the stored copy.
-	if fresh, err := s.store.CredByHash(hash, cr.ClusterID); err == nil {
+	if fresh, err := s.store.CredByHash(hash, k, cr.ClusterID); err == nil {
 		cr = fresh
 		if time.Until(time.Unix(cr.Expires, 0)) > 45*time.Minute {
 			return cr, nil
 		}
 	} else {
 		return cr, errNoCred
+	}
+	if cr.Kind != "ticket" {
+		return cr, nil
 	}
 	base, _, err := s.baseClient(cr.ClusterID)
 	if err != nil {
@@ -239,21 +263,40 @@ func (s *Server) renew(ctx context.Context, hash string, cr store.Cred) (store.C
 		return cr, err
 	}
 	cr.Secret, cr.CSRF, cr.Expires = t.Ticket, t.CSRF, t.Expires.Unix()
-	return cr, s.store.PutCredByHash(hash, cr)
+	return cr, s.store.PutCredByHash(hash, k, cr)
 }
 
-// renewDue renews every live session's tickets that expire within 40 minutes,
-// so sessions survive restarts and idle tabs without re-login.
+// renewDue renews tickets that expire within 40 minutes — only for sessions
+// whose secret is in memory (used in the last keyIdle, or with an open event
+// stream or running change). Tickets of other sessions cannot be decrypted
+// and lapse in PVE; the user's next request gets 409 cluster_login_required
+// for that cluster (the galley session itself stays valid).
 func (s *Server) renewDue() {
 	due, err := s.store.CredsExpiringBefore(time.Now().Add(40 * time.Minute).Unix())
 	if err != nil {
 		s.log.Error("list credentials for renewal", "err", err)
 		return
 	}
-	for _, sc := range due {
-		if _, err := s.renew(s.base, sc.SessionHash, sc.Cred); err != nil {
-			s.log.Info("ticket renewal failed", "cluster", sc.ClusterID, "user", sc.PVEUser, "err", err)
+	skipped := 0
+	for _, m := range due {
+		if m.Kind != "ticket" {
+			continue
 		}
+		k := s.cachedKey(m.SessionHash)
+		if k == nil {
+			skipped++
+			continue
+		}
+		cr, err := s.store.CredByHash(m.SessionHash, k, m.ClusterID)
+		if err != nil {
+			continue
+		}
+		if _, err := s.renew(s.base, m.SessionHash, k, cr); err != nil {
+			s.log.Info("ticket renewal failed", "cluster", m.ClusterID, "user", m.PVEUser, "err", err)
+		}
+	}
+	if skipped > 0 {
+		s.log.Debug("tickets of idle sessions left to lapse", "count", skipped)
 	}
 }
 
@@ -340,7 +383,14 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	authed := []string{c.ID}
-	_ = s.store.PutCred(ss.id, ticketCred(c.ID, t))
+	if err := s.addLogin(ctx, ss, c, t); err != nil {
+		_ = s.store.DeleteSession(ss.id)
+		s.forgetKey(store.HashID(ss.id))
+		http.SetCookie(w, &http.Cookie{Name: cookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: s.opt.SecureCookies, SameSite: http.SameSiteLaxMode})
+		s.log.Warn("login: storing the credential failed", "user", t.User, "cluster", c.ID, "err", err)
+		apiError(w, 502, "credential_failed", err.Error())
+		return
+	}
 	// Opt-in credential sharing: only between clusters an admin marked as sharing a realm.
 	if c.ShareLogin {
 		if cs, err := s.store.Clusters(); err == nil {
@@ -358,7 +408,10 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 						return
 					}
 					if ot, err := ob.Login(ctx, user, req.Password, ""); err == nil && ot.User == user {
-						_ = s.store.PutCred(ss.id, ticketCred(o.ID, ot))
+						if err := s.addLogin(ctx, ss, &o, ot); err != nil {
+							s.log.Warn("shared login: storing the credential failed", "cluster", o.ID, "err", err)
+							return
+						}
 						mu.Lock()
 						authed = append(authed, o.ID)
 						mu.Unlock()
@@ -377,15 +430,20 @@ func ticketCred(cid string, t *pve.Ticket) store.Cred {
 	return store.Cred{ClusterID: cid, PVEUser: t.User, Kind: "ticket", Secret: t.Ticket, CSRF: t.CSRF, Expires: t.Expires.Unix()}
 }
 
+// startSession creates a session with a fresh secret K and sets the cookie
+// "<id>.<K>". Only hash(id) and a verifier of K are stored.
 func (s *Server) startSession(w http.ResponseWriter, user, home string) (*session, error) {
 	now := time.Now()
-	st := store.Session{ID: randHex(32), User: user, Home: home, CSRF: randHex(24), Created: now.Unix(), LastSeen: now.Unix(), Expires: now.Add(sessionIdle).Unix()}
+	k := newSessionSecret()
+	st := store.Session{ID: randHex(32), User: user, Home: home, CSRF: randHex(24), Created: now.Unix(), LastSeen: now.Unix(),
+		Expires: now.Add(s.opt.SessionIdle).Unix(), KeyCheck: s.store.KeyCheck(k)}
 	if err := s.store.PutSession(st); err != nil {
 		return nil, err
 	}
-	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: st.ID, Path: "/", HttpOnly: true, Secure: s.opt.SecureCookies,
-		SameSite: http.SameSiteLaxMode, MaxAge: int(sessionAbsolute.Seconds())})
-	return &session{id: st.ID, user: user, home: home, csrf: st.CSRF, expires: st.Expires}, nil
+	s.rememberKey(store.HashID(st.ID), k)
+	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: cookieValue(st.ID, k), Path: "/", HttpOnly: true, Secure: s.opt.SecureCookies,
+		SameSite: http.SameSiteLaxMode, MaxAge: int(s.opt.SessionMax.Seconds())})
+	return &session{id: st.ID, user: user, home: home, csrf: st.CSRF, created: st.Created, expires: st.Expires, key: k}, nil
 }
 
 // clusterLogin adds a credential for another cluster to the session. The PVE
@@ -437,13 +495,25 @@ func (s *Server) clusterLogin(w http.ResponseWriter, r *http.Request, ss *sessio
 		return
 	}
 	s.limiter.succeed("ip|"+clientIP(r), userKey)
-	_ = s.store.PutCred(ss.id, ticketCred(c.ID, t))
+	if old, err := s.cred(ss, c.ID); err == nil {
+		s.revokeToken(ctx, old, "replaced by a new login")
+	}
+	if err := s.addLogin(ctx, ss, c, t); err != nil {
+		apiError(w, 502, "credential_failed", err.Error())
+		return
+	}
 	s.dropView(ss.id, c.ID)
 	writeJSON(w, 200, s.meView(r.Context(), ss))
 }
 
-func (s *Server) logout(w http.ResponseWriter, _ *http.Request, ss *session) {
+func (s *Server) logout(w http.ResponseWriter, r *http.Request, ss *session) {
+	if creds, err := s.store.Creds(ss.id, ss.key); err == nil {
+		for _, cr := range creds {
+			s.revokeToken(r.Context(), cr, "logout")
+		}
+	}
 	_ = s.store.DeleteSession(ss.id)
+	s.forgetKey(store.HashID(ss.id))
 	s.mu.Lock()
 	for k := range s.views {
 		if strings.HasPrefix(k, ss.id+"\x00") {
@@ -458,23 +528,34 @@ func (s *Server) logout(w http.ResponseWriter, _ *http.Request, ss *session) {
 
 func (s *Server) meView(ctx context.Context, ss *session) map[string]any {
 	cs, _ := s.store.Clusters()
-	creds, _ := s.store.Creds(ss.id)
-	have := map[string]bool{}
+	creds, _ := s.store.Creds(ss.id, ss.key)
+	metas, _ := s.store.CredMetas(ss.id)
+	now := time.Now().Unix()
+	have, stored := map[string]bool{}, map[string]bool{}
 	for _, c := range creds {
-		have[c.ClusterID] = true
+		have[c.ClusterID] = c.Expires > now
+	}
+	for _, m := range metas {
+		stored[m.ClusterID] = true
 	}
 	list := make([]map[string]any, 0, len(cs))
 	for _, c := range cs {
-		e := map[string]any{"id": c.ID, "name": c.Name, "authed": have[c.ID], "admin": false}
+		// loginExpired: this session had a login here that lapsed (e.g. its
+		// ticket expired while the session was idle): ask for the password again.
+		e := map[string]any{"id": c.ID, "name": c.Name, "authed": have[c.ID], "admin": false,
+			"loginExpired": stored[c.ID] && !have[c.ID], "credentialMode": defaultMode(c.CredentialMode)}
 		if have[c.ID] {
 			if v := s.view(ctx, ss, c.ID); v != nil {
 				e["admin"] = v.sysModify
+			} else if _, err := s.cred(ss, c.ID); err != nil {
+				// PVE refused the login just now (expired, or revoked in PVE)
+				e["authed"], e["loginExpired"] = false, true
 			}
 		}
 		list = append(list, e)
 	}
 	return map[string]any{"user": ss.user, "csrf": ss.csrf, "clusters": list, "version": Version,
-		"galleyAdmin": s.galleyAdmin(ctx, ss), "expires": ss.expires}
+		"galleyAdmin": s.galleyAdmin(ctx, ss), "expires": ss.expires, "maxExpires": ss.created + int64(s.opt.SessionMax.Seconds())}
 }
 
 func (s *Server) me(w http.ResponseWriter, r *http.Request, ss *session) {
@@ -604,7 +685,13 @@ func (s *Server) openidCallback(w http.ResponseWriter, r *http.Request) {
 		fail("could not create a session")
 		return
 	}
-	_ = s.store.PutCred(ss.id, ticketCred(c.ID, t))
+	if err := s.addLogin(ctx, ss, c, t); err != nil {
+		_ = s.store.DeleteSession(ss.id)
+		s.forgetKey(store.HashID(ss.id))
+		http.SetCookie(w, &http.Cookie{Name: cookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, Secure: s.opt.SecureCookies, SameSite: http.SameSiteLaxMode})
+		fail("signed in, but galley could not store the login: " + err.Error())
+		return
+	}
 	s.securityEvent(t.User, c.ID, "auth.login", "Logged in as "+t.User+" with single sign-on", true, map[string]string{"ip": clientIP(r)})
 	http.Redirect(w, r, "/", http.StatusSeeOther)
 }

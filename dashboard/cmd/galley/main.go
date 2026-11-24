@@ -45,7 +45,13 @@ func main() {
 	var admins stringList
 	flag.Var(&admins, "admin", "galley admin as cluster:user@realm (logged in to that cluster as that user); repeatable. Default: users with Sys.Modify on / in every registered cluster")
 	publicURL := flag.String("public-url", "", "external base URL of galley, e.g. https://galley.example.com (used for single sign-on redirects)")
+	sessionIdle := flag.Duration("session-idle", server.DefaultSessionIdle, "end a galley session after this long without requests")
+	sessionMax := flag.Duration("session-max", server.DefaultSessionMax, "end a galley session this long after login, however active (per-session API tokens expire with it)")
 	flag.Parse()
+	if *sessionIdle <= 0 || *sessionMax <= 0 || *sessionIdle > *sessionMax || *sessionMax > 7*24*time.Hour {
+		fmt.Fprintln(os.Stderr, "--session-idle and --session-max must be positive, idle ≤ max, and max ≤ 168h")
+		os.Exit(2)
+	}
 	for _, a := range admins {
 		if c, u, ok := strings.Cut(a, ":"); !ok || c == "" || !strings.Contains(u, "@") {
 			fmt.Fprintf(os.Stderr, "--admin %q: use cluster:user@realm\n", a)
@@ -95,7 +101,8 @@ func main() {
 		log.Error("embedded UI", "err", err)
 		os.Exit(1)
 	}
-	api := server.New(st, poller, static, log, server.Options{DataDir: *data, SecureCookies: !*plainHTTP, Admins: admins, PublicURL: *publicURL})
+	api := server.New(st, poller, static, log, server.Options{DataDir: *data, SecureCookies: !*plainHTTP, Admins: admins, PublicURL: *publicURL,
+		SessionIdle: *sessionIdle, SessionMax: *sessionMax})
 	srv := &http.Server{
 		Addr:              *listen,
 		Handler:           api.Handler(),

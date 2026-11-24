@@ -11,6 +11,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -23,7 +24,17 @@ type Call struct {
 	Method, Path string
 	Form         map[string]string
 	User         string
+	Token        string // user API token id the call was made with ("" = ticket)
 }
+
+// UserToken is a user API token created through /access/users/{user}/token.
+type UserToken struct {
+	ID, User, Secret, Comment string
+	Expire                    int64
+	Privsep                   bool
+}
+
+type termTicket struct{ user, node string }
 
 // Server is a fake cluster API endpoint.
 type Server struct {
@@ -65,6 +76,16 @@ type Server struct {
 	StorageConfig []map[string]any
 	// HAServices are the "service" entries of /cluster/ha/status/current.
 	HAServices []map[string]any
+	// TokenSelfRevoke lets a user token delete itself (otherwise only the
+	// user's ticket can delete it).
+	TokenSelfRevoke bool
+	// HostRun answers commands run through a node terminal (see TermShell).
+	HostRun func(cmd string) (string, int)
+
+	userTokens  map[string]*UserToken // full id -> token
+	termTickets map[string]termTicket
+	hostCmds    []string
+	tokenSeq    int
 }
 
 // New starts a fake cluster with three nodes and a few guests.
@@ -103,6 +124,8 @@ func New() *Server {
 	f.TokenPerms = map[string]int{"Sys.Audit": 1}
 	f.TaskExit = map[string]string{}
 	f.tasks = map[string]*fakeTask{}
+	f.userTokens = map[string]*UserToken{}
+	f.termTickets = map[string]termTicket{}
 	f.NodeIP = map[string]string{"pve1": "192.0.2.11", "pve2": "192.0.2.12", "pve3": "192.0.2.13"}
 	f.Server = httptest.NewUnstartedServer(http.HandlerFunc(f.serve))
 	f.Server.TLS = &tls.Config{MinVersion: tls.VersionTLS12}
@@ -194,9 +217,39 @@ func write(w http.ResponseWriter, code int, data any) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"data": data})
 }
 
+// UserTokens returns the user API tokens that currently exist.
+func (f *Server) UserTokens() []UserToken {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := []UserToken{}
+	for _, t := range f.userTokens {
+		out = append(out, *t)
+	}
+	return out
+}
+
+// tokenOf returns the user token a request authenticates with (nil if none).
+func (f *Server) tokenOf(r *http.Request) *UserToken {
+	a, ok := strings.CutPrefix(r.Header.Get("Authorization"), "PVEAPIToken=")
+	if !ok {
+		return nil
+	}
+	id, sec, _ := strings.Cut(a, "=")
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	t := f.userTokens[id]
+	if t == nil || t.Secret != sec || (t.Expire > 0 && time.Now().Unix() >= t.Expire) {
+		return nil
+	}
+	return t
+}
+
 func (f *Server) who(r *http.Request) string {
 	if a := r.Header.Get("Authorization"); a == "PVEAPIToken="+f.TokenID+"="+f.Secret {
 		return f.TokenID
+	}
+	if t := f.tokenOf(r); t != nil {
+		return t.User // privsep=0: the token acts with its user's permissions
 	}
 	if c, err := r.Cookie("PVEAuthCookie"); err == nil {
 		f.mu.Lock()
@@ -275,6 +328,10 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if strings.HasSuffix(p, "/vncwebsocket") && r.Method == http.MethodGet {
+		if seg := strings.Split(strings.Trim(p, "/"), "/"); len(seg) == 3 && strings.HasPrefix(r.URL.Query().Get("vncticket"), "PVETERM:") {
+			f.termSocket(w, r, seg[1], user)
+			return
+		}
 		f.consoleEcho(w, r)
 		return
 	}
@@ -283,7 +340,25 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 			write(w, 403, nil)
 			return
 		}
+		seg := strings.Split(strings.Trim(p, "/"), "/")
+		if len(seg) == 3 && seg[2] == "termproxy" { // node shell
+			if !f.Admins[user] {
+				write(w, 403, nil) // Sys.Console on /nodes/{node}
+				return
+			}
+			f.mu.Lock()
+			f.tokenSeq++
+			t := fmt.Sprintf("PVETERM:%d:%s", f.tokenSeq, user)
+			f.termTickets[t] = termTicket{user: user, node: seg[1]}
+			f.mu.Unlock()
+			write(w, 200, map[string]any{"port": 5900 + f.tokenSeq, "ticket": t, "user": user, "upid": "UPID:" + seg[1] + ":termproxy"})
+			return
+		}
 		write(w, 200, map[string]any{"port": 5900, "ticket": "PVEVNC:fake:" + user, "user": user})
+		return
+	}
+	if strings.HasPrefix(p, "/access/users/") && strings.Contains(p, "/token/") && (r.Method == http.MethodPost || r.Method == http.MethodDelete) {
+		f.userToken(w, r, p, user)
 		return
 	}
 	if r.Method != http.MethodGet {
@@ -295,8 +370,12 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 		for k := range r.Form {
 			form[k] = r.Form.Get(k)
 		}
+		tokID := ""
+		if t := f.tokenOf(r); t != nil {
+			tokID = t.ID
+		}
 		f.mu.Lock()
-		f.Calls = append(f.Calls, Call{Method: r.Method, Path: p, Form: form, User: user})
+		f.Calls = append(f.Calls, Call{Method: r.Method, Path: p, Form: form, User: user, Token: tokID})
 		f.mu.Unlock()
 		if p == "/cluster/backup/nightly-all" && r.Method == http.MethodPut {
 			write(w, 200, nil)
@@ -476,6 +555,59 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(404)
 		_, _ = w.Write([]byte(`{"data":null,"message":"no such path"}`))
 	}
+}
+
+// userToken creates (POST) or deletes (DELETE) /access/users/{user}/token/{name}.
+// A user manages their own tokens with a ticket; tokens cannot create tokens.
+func (f *Server) userToken(w http.ResponseWriter, r *http.Request, p, caller string) {
+	rest := strings.TrimPrefix(p, "/access/users/")
+	user, name, _ := strings.Cut(rest, "/token/")
+	tok := f.tokenOf(r)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	full := user + "!" + name
+	f.Calls = append(f.Calls, Call{Method: r.Method, Path: p, User: caller, Token: tok.idOrEmpty()})
+	if caller != user {
+		write(w, 403, nil)
+		return
+	}
+	switch r.Method {
+	case http.MethodPost:
+		if tok != nil {
+			write(w, 403, nil)
+			return
+		}
+		if _, exists := f.userTokens[full]; exists {
+			write(w, 400, nil)
+			return
+		}
+		exp, _ := strconv.ParseInt(r.Form.Get("expire"), 10, 64)
+		f.tokenSeq++
+		t := &UserToken{ID: full, User: user, Secret: fmt.Sprintf("%08d-0000-4000-8000-%012d", f.tokenSeq, f.tokenSeq), Comment: r.Form.Get("comment"),
+			Expire: exp, Privsep: r.Form.Get("privsep") != "0"}
+		f.userTokens[full] = t
+		write(w, 200, map[string]any{"full-tokenid": full, "value": t.Secret, "info": map[string]any{"expire": exp, "privsep": 0}})
+	case http.MethodDelete:
+		if tok != nil && !(f.TokenSelfRevoke && tok.ID == full) {
+			write(w, 403, nil)
+			return
+		}
+		if _, ok := f.userTokens[full]; !ok {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(500)
+			_, _ = w.Write([]byte(`{"data":null,"message":"no such token '` + name + `' for user '` + user + `'"}`))
+			return
+		}
+		delete(f.userTokens, full)
+		write(w, 200, nil)
+	}
+}
+
+func (t *UserToken) idOrEmpty() string {
+	if t == nil {
+		return ""
+	}
+	return t.ID
 }
 
 func (f *Server) ticket(w http.ResponseWriter, r *http.Request) {
@@ -714,4 +846,11 @@ func (f *Server) demoGet(w http.ResponseWriter, p, user string) bool {
 		return false
 	}
 	return true
+}
+
+// DeleteUserTokens removes every user API token (as an administrator could in the GUI).
+func (f *Server) DeleteUserTokens() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.userTokens = map[string]*UserToken{}
 }
