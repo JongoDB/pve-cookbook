@@ -7,6 +7,7 @@ import { IconMenu } from './Icons';
 import { Logo } from './ui';
 import { ClusterLoginForm } from './ClusterLogin';
 import { sessionEndWarning } from '../lib/auth';
+import { AppDialogs } from './AppDialogs';
 
 export const PAGES: { to: string; label: string; group?: 'tools' | 'bottom' }[] = [
   { to: '/', label: 'Overview' },
@@ -33,7 +34,7 @@ export const visiblePage = (p: { to: string }, me: { galleyAdmin?: boolean; clus
 const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);
 
 function UserMenu() {
-  const { me, api, setMe } = useApp();
+  const { me, api, setMe, setDialog, feedback } = useApp();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   const btn = useRef<HTMLButtonElement>(null);
@@ -55,6 +56,8 @@ function UserMenu() {
             {me.galleyAdmin ? 'galley admin' : 'Signed in with your PVE account'}
             {me.version ? <div>galley {me.version}</div> : null}
           </div>
+          <button type="button" role="menuitem" onClick={() => { setOpen(false); btn.current?.focus(); setDialog('whats-new'); }}>What&apos;s new</button>
+          {feedback?.enabled && <button type="button" role="menuitem" onClick={() => { setOpen(false); btn.current?.focus(); setDialog('feedback'); }}>Send feedback</button>}
           <button type="button" role="menuitem" onClick={async () => { try { await api.logout(); } finally { setMe(null); } }}>Log out</button>
         </div>
       )}
@@ -191,6 +194,7 @@ export function Layout({ children }: { children: ReactNode }) {
       </div>
 
       {paletteOpen && <CommandPalette onClose={() => setPaletteOpen(false)} />}
+      <AppDialogs />
     </div>
   );
 }

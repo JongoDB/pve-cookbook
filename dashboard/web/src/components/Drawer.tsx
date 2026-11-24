@@ -2,8 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useApp, type DrawerTab } from '../state/app';
 import type { Plan } from '../api/types';
-import { canRun, commandCli, galleySettings, isGalleyStep, runFinished, sourceLabel, stepStatus } from '../lib/plan';
-import { PendingChanges } from './PendingChanges';
+import { canRun, commandCli, galleySettings, isGalleyStep, runFinished, sourceLabel, stepStatus, viaText } from '../lib/plan';
+import { PendingChanges, usePendingCount } from './PendingChanges';
 import { ago } from '../lib/format';
 import { ClusterLoginForm } from './ClusterLogin';
 import { IconActivity, IconAssistant, IconChanges, IconFold } from './Icons';
@@ -20,15 +20,16 @@ const TABS: { id: DrawerTab; label: string; icon: () => JSX.Element }[] = [
 export const EXPLAIN_CHANGES = 'Nothing in galley touches a cluster until you apply it here. Each change shows the exact commands it runs, as you.';
 
 export function Drawer() {
-  const { drawerTab, drawerFolded, openDrawer, setDrawerFolded, changePending, tasks, runningChanges } = useApp();
+  const { drawerTab, drawerFolded, openDrawer, setDrawerFolded, tasks, runningChanges } = useApp();
   const tabRefs = useRef<Record<string, HTMLButtonElement | null>>({});
   const running = tasks.filter((t) => !t.endtime).length + runningChanges.length;
+  const waiting = usePendingCount();
 
   // Escape folds the overlay drawer on narrow screens.
   useEffect(() => {
     if (drawerFolded) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && window.innerWidth < 1100 && !document.querySelector('.palette-backdrop')) setDrawerFolded(true);
+      if (e.key === 'Escape' && window.innerWidth < 1100 && !document.querySelector('.palette-backdrop, .modal-backdrop')) setDrawerFolded(true);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -39,9 +40,9 @@ export function Drawer() {
       <aside className="rail" aria-label="Drawer">
         {TABS.map((t) => (
           <button key={t.id} type="button" onClick={() => openDrawer(t.id)} title={t.label}
-            aria-label={`Open ${t.label}${t.id === 'changes' && changePending ? ', 1 change waiting' : t.id === 'activity' && running ? `, ${running} running` : ''}`}>
+            aria-label={`Open ${t.label}${t.id === 'changes' && waiting ? `, ${waiting} change${waiting === 1 ? '' : 's'} waiting` : t.id === 'activity' && running ? `, ${running} running` : ''}`}>
             <t.icon />
-            {t.id === 'changes' && changePending && <span className="dot-badge" aria-hidden="true">1</span>}
+            {t.id === 'changes' && waiting > 0 && <span className="dot-badge" aria-hidden="true">{waiting}</span>}
           </button>
         ))}
       </aside>
@@ -74,7 +75,7 @@ export function Drawer() {
             onKeyDown={(e) => onTabKey(e, i)}
           >
             {t.label}
-            {t.id === 'changes' && changePending && <span className="count-badge"><span className="sr-only">waiting: </span>1</span>}
+            {t.id === 'changes' && waiting > 0 && <span className="count-badge"><span className="sr-only">waiting: </span>{waiting}</span>}
           </button>
         ))}
         <button type="button" className="icon-btn fold" aria-label="Fold the drawer" onClick={() => setDrawerFolded(true)}><IconFold /></button>
@@ -264,7 +265,7 @@ function ActivityPanel() {
         {live.length === 0 && runningChanges.length === 0 ? <p className="explain">Nothing is running.</p> : (
           <ul className="activity-list">
             {runningChanges.map((a) => (
-              <li key={a.id}><span className="badge badge-info">Change</span><span className="grow">{a.title}<div className="ws">{clusterName(a.clusterId)}, step {Math.min(a.results.length, a.cli.length) || 1} of {a.cli.length}</div></span></li>
+              <li key={a.id}><span className="badge badge-info">Change</span><span className="grow">{a.title}<div className="ws">{clusterName(a.clusterId)}, {a.actorUser ?? a.user}{viaText(a.via) ? ` ${viaText(a.via)}` : ''}, step {Math.min(a.results.length, a.cli.length) || 1} of {a.cli.length}</div></span></li>
             ))}
             {live.map((t) => (
               <li key={t.upid}><span className="badge badge-info">Task</span><span className="grow">{t.type}{t.id ? ` ${t.id}` : ''}<div className="ws">{clusterName(t.clusterId)}/{t.node}, {t.user}, started {ago(t.starttime)}</div></span></li>

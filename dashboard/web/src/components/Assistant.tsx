@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useLocation } from 'react-router-dom';
 import type { Plan, ToolEvent } from '../api/types';
 import { useApp } from '../state/app';
 import { useAsync } from '../lib/hooks';
@@ -8,13 +8,21 @@ import { commandCli, galleySettings } from '../lib/plan';
 import { ApiErrorView } from './ClusterLogin';
 import { Markdown } from './Markdown';
 import { HelpLink } from './HelpLink';
+import { splitSuggestions, startersFor } from '../lib/suggestions';
 
-const EXAMPLES = [
-  'What needs my attention right now?',
-  'Attach the second A2 GPU to llm-vllm',
-  'What failed in the last hour, and why?',
-  'How do changes work?',
-];
+/** Starter questions for the page the user is on (the guest's name on a guest page). */
+function useStarters(): string[] {
+  const { guests } = useApp();
+  const { pathname } = useLocation();
+  const m = /^\/guests\/([^/]+)\/(\d+)\/?$/.exec(pathname);
+  let name: string | undefined;
+  if (m) {
+    let cluster = m[1];
+    try { cluster = decodeURIComponent(cluster); } catch { /* keep as is */ }
+    name = guests?.find((g) => g.clusterId === cluster && g.vmid === Number(m[2]))?.name;
+  }
+  return startersFor(pathname, name);
+}
 
 export function AssistantPanel() {
   const { api, me, chat } = useApp();
@@ -46,6 +54,7 @@ function Chat({ notice, model }: { notice: string; model: string }) {
   const list = useRef<HTMLDivElement>(null);
   const input = useRef<HTMLTextAreaElement>(null);
   const stick = useRef(true);
+  const starters = useStarters();
 
   // Follow the answer while it streams, unless the admin scrolled up to read.
   useEffect(() => {
@@ -74,13 +83,13 @@ function Chat({ notice, model }: { notice: string; model: string }) {
         {state.turns.length === 0 && (
           <div className="chat-examples">
             <span className="muted small">Try</span>
-            {EXAMPLES.map((x) => <button key={x} type="button" className="chip-btn" onClick={() => send(x)}>{x}</button>)}
+            {starters.map((x) => <button key={x} type="button" className="chip-btn" onClick={() => send(x)}>{x}</button>)}
             <HelpLink slug="assistant" label="How the assistant works" />
           </div>
         )}
-        {state.turns.map((t) => (t.role === 'user'
+        {state.turns.map((t, i) => (t.role === 'user'
           ? <div key={t.id} className="msg msg-user"><span className="sr-only">You: </span>{t.text}</div>
-          : <AssistantTurn key={t.id} turn={t} />))}
+          : <AssistantTurn key={t.id} turn={t} onPick={i === state.turns.length - 1 && !state.busy && !state.full ? send : undefined} />))}
       </div>
       {state.full ? (
         <div className="notice notice-info chat-full"><div className="grow">This conversation is full.</div><button type="button" className="btn btn-sm btn-primary" onClick={newConversation}>New conversation</button></div>
@@ -104,19 +113,34 @@ function Chat({ notice, model }: { notice: string; model: string }) {
   );
 }
 
-function AssistantTurn({ turn }: { turn: ChatTurn }) {
+/**
+ * One answer. The model's closing <suggestions> block is never shown as text (not even half
+ * streamed); on the last answer its items become buttons that send them as the next message.
+ */
+function AssistantTurn({ turn, onPick }: { turn: ChatTurn; onPick?: (text: string) => void }) {
   const empty = turn.parts.length === 0;
+  let lastText = -1;
+  turn.parts.forEach((p, i) => { if (p.t === 'text') lastText = i; });
+  const split = turn.parts.map((p, i) => (p.t === 'text' ? splitSuggestions(p.text, !turn.done && i === lastText) : null));
+  const suggestions = onPick && turn.done && !turn.error && !turn.stopped
+    ? [...new Set(split.flatMap((x) => x?.suggestions ?? []))].slice(0, 4)
+    : [];
   return (
     <div className="msg msg-assistant">
       <span className="sr-only">Assistant: </span>
       {turn.parts.map((p, i) => {
-        if (p.t === 'text') return <Markdown key={i} text={p.text} />;
+        if (p.t === 'text') return split[i]!.text.trim() ? <Markdown key={i} text={split[i]!.text} /> : null;
         if (p.t === 'tool') return <ToolLine key={p.tool.id || i} tool={p.tool} />;
         return <ChangeCard key={p.plan.id} plan={p.plan} />;
       })}
       {!turn.done && empty && <div className="muted small" role="status">Thinking</div>}
       {turn.stopped && <div className="muted small">Stopped.</div>}
       {turn.error && <div className="notice notice-error small" role="alert"><div className="grow">{turn.error.message}</div></div>}
+      {suggestions.length > 0 && (
+        <div className="chat-suggestions" role="group" aria-label="Suggested replies">
+          {suggestions.map((x) => <button key={x} type="button" className="chip-btn" onClick={() => onPick!(x)}>{x}</button>)}
+        </div>
+      )}
     </div>
   );
 }

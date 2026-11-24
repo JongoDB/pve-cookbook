@@ -705,3 +705,28 @@ details > summary { cursor: pointer; color: var(--text-2); }
 .revoke-confirm { display: inline-flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
 .agents-page .panel { max-width: 960px; }
 .agents-page .table td:not(.right) { white-space: nowrap; }
+
+/* ---------- dialogs (What's new, Send feedback) ---------- */
+.modal-backdrop { position: fixed; inset: 0; z-index: 70; background: rgba(5, 9, 14, 0.6); display: flex; justify-content: center; align-items: flex-start; padding: 10vh 16px 16px; overflow-y: auto; }
+.modal { width: min(560px, 100%); max-height: 80vh; display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--line-2); border-radius: var(--r-lg); box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55); }
+.modal-wide { width: min(680px, 100%); }
+.modal:focus-visible { outline: none; }
+.dialog-head { display: flex; align-items: center; gap: 12px; padding: 16px 18px 12px 20px; border-bottom: 1px solid var(--line); }
+.dialog-head h2 { flex: 1; min-width: 0; font-size: 18px; }
+.dialog-body { padding: 16px 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 14px; min-height: 0; }
+.dialog-foot { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 8px; padding: 12px 20px 16px; border-top: 1px solid var(--line); }
+.release-date { color: var(--muted); font-size: 13px; margin-top: -6px; }
+.earlier-releases > summary { cursor: pointer; color: var(--accent); }
+.earlier-releases[open] > summary { margin-bottom: 10px; }
+.earlier-release + .earlier-release { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+.earlier-release h3 { font-size: 15px; margin-bottom: 6px; }
+.feedback-details { margin: 4px 0 0 26px; padding: 8px 12px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--bg); list-style: none; display: flex; flex-direction: column; gap: 3px; font-size: 13px; color: var(--text-2); overflow-wrap: anywhere; }
+.feedback-details .k { color: var(--muted); }
+.feedback-details.off { opacity: 0.5; text-decoration: line-through; }
+.chat-suggestions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: -4px; }
+.chat-suggestions .chip-btn { padding: 5px 10px; font-size: 13px; }
+.help-extras { display: flex; flex-wrap: wrap; gap: 8px; }
+@media (max-width: 700px) {
+  .modal-backdrop { padding: 16px; }
+  .modal { max-height: calc(100vh - 32px); }
+}

@@ -14,7 +14,7 @@ const storagePath = (clusterId: string, id: string, node: string, shared: boolea
   `/storage/${encodeURIComponent(clusterId)}/${encodeURIComponent(shared ? id : `${id}@${node}`)}`;
 
 export function CommandPalette({ onClose }: { onClose: () => void }) {
-  const { fleet, openPlan, clusterName, guests: shared, guestsError, me, openDrawer, chat, api } = useApp();
+  const { fleet, openPlan, clusterName, guests: shared, guestsError, me, openDrawer, chat, api, setDialog, feedback } = useApp();
   const { docs } = useDocsIndex(api);
   const [docBodies, setDocBodies] = useState<Record<string, string>>({});
   const nav = useNavigate();
@@ -66,11 +66,18 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
         },
       }];
     }
+    const show = (d: 'whats-new' | 'feedback') => () => { setDialog(d); onClose(); };
+    const extras: Item[] = [
+      { key: 'x:whats-new', label: "What's new", hint: 'Release notes', run: show('whats-new') },
+      ...(feedback?.enabled ? [{ key: 'x:feedback', label: 'Send feedback', hint: 'Opens an issue on GitHub', run: show('feedback') }] : []),
+    ];
     if (!q.trim()) {
-      return PAGES.filter((p) => visiblePage(p, me)).map((p) => ({ key: `p:${p.to}`, label: p.label, hint: 'Page', run: go(p.to) }));
+      return [...PAGES.filter((p) => visiblePage(p, me)).map((p) => ({ key: `p:${p.to}`, label: p.label, hint: 'Page', run: go(p.to) })), ...extras];
     }
-    const pageItems = rank(q, PAGES.filter((p) => visiblePage(p, me)), (p) => p.label, 3)
-      .map((p) => ({ key: `p:${p.to}`, label: p.label, hint: 'Page', run: go(p.to) }));
+    const pageItems = [
+      ...rank(q, PAGES.filter((p) => visiblePage(p, me)), (p) => p.label, 3).map((p) => ({ key: `p:${p.to}`, label: p.label, hint: 'Page', run: go(p.to) })),
+      ...rank(q, extras, (x) => x.label, 2),
+    ];
     const guestItems = rank(q, guests.filter((g) => !g.template), (g) => `${g.name} ${g.vmid}`, 6)
       .map((g) => ({
         key: `g:${g.clusterId}:${g.vmid}`,
@@ -102,7 +109,7 @@ export function CommandPalette({ onClose }: { onClose: () => void }) {
     const question = /\?\s*$|^(why|what|how|which|is|are|can|does|do|when|where|show|list|explain)\b/i.test(q.trim()) || q.trim().split(/\s+/).length > 3;
     const found = [...guestItems, ...nodeItems, ...storeItems, ...pageItems];
     return question ? [ask, ...docItems, ...found] : [...found, ...docItems, ask];
-  }, [parsed, q, guests, fleet, nav, onClose, openPlan, clusterName, me, openDrawer, chat, docs, docBodies]);
+  }, [parsed, q, guests, fleet, nav, onClose, openPlan, clusterName, me, openDrawer, chat, docs, docBodies, setDialog, feedback]);
 
   useEffect(() => { setSel(0); }, [q]);
 

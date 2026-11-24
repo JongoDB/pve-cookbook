@@ -9,7 +9,7 @@ order: 170
 Press ⌘K on a Mac or Ctrl K elsewhere, or select **Ask, search or run a command** in the top bar. Press Esc to close it.
 
 - Up and down arrow keys move through the results; Enter opens the selected one.
-- With nothing typed, the palette lists galley's pages.
+- With nothing typed, the palette lists galley's pages, then **What's new** and **Send feedback**.
 
 ## Search
 
@@ -19,7 +19,9 @@ Type part of a name or a VMID. The palette finds:
 - **nodes** by name;
 - **storage** by name;
 - **pages**, such as **Hardware** or **Audit log**;
-- **help pages** of this guide, shown as **Help: <title>**.
+- **help pages** of this guide, shown as **Help: <title>**;
+- **What's new**, which shows the release notes of this galley version (see [Getting started](getting-started.md#whats-new-after-an-update));
+- **Send feedback**, which opens the feedback dialog (see [Send feedback](feedback.md)). It is missing when a galley admin turned feedback off.
 
 Select a result to open it.
 
@@ -52,4 +54,5 @@ Anything that is not a command can go to the assistant: choose **Ask the assista
 - **Assistant**: Enter sends a message; Shift+Enter starts a new line.
 - **Tabs on a page** (such as a guest's **Summary**, **Hardware** and others): left and right arrow keys.
 - **Account menu** and other menus: Esc closes them.
+- **Dialogs** (What's new, Send feedback): Esc closes them; Tab stays inside the dialog until it is closed.
 - **Skip to content**: the first Tab on a page offers a link that skips the navigation.

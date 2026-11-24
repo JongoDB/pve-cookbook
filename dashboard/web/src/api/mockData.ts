@@ -70,11 +70,27 @@ export type ScriptStep =
   /** a galley.* action proposed with propose_action */
   | { kind: 'galley'; action: string; clusterId: string; params: Record<string, unknown> };
 
+/** The closing block every answer ends with (the UI turns it into buttons). */
+const suggest = (...items: string[]): ScriptStep => ({ kind: 'text', text: `\n\n<suggestions>\n${items.map((x) => `- ${x}`).join('\n')}\n</suggestions>` });
+
 export function assistantScript(message: string): { steps: ScriptStep[]; change?: 'gpu' } {
+  const r = scriptFor(message);
+  return { ...r, steps: [...r.steps, suggest(...SUGGESTIONS[r.topic])] };
+}
+
+const SUGGESTIONS: Record<string, string[]> = {
+  gpu: ['When can I restart llm-vllm?', 'Which other guests could use a GPU?', 'How do PCI mappings work?'],
+  share: ['Who can use pve-lab now?', 'How do I turn sharing off again?'],
+  failed: ['Show the task log for container 999', 'Which permissions am I missing?'],
+  howto: ['How do I take a snapshot?', 'Where do I see what a change ran?', 'What can the assistant do?'],
+  attention: ['Why is nas-backup unavailable?', 'Add grafana to a backup job', 'How do I give corosync its own link?'],
+};
+
+function scriptFor(message: string): { steps: ScriptStep[]; change?: 'gpu'; topic: keyof typeof SUGGESTIONS } {
   const m = message.toLowerCase();
   if (/gpu|a2|second card|passthrough/.test(m)) {
     return {
-      change: 'gpu',
+      change: 'gpu', topic: 'gpu',
       steps: [
         { kind: 'tool', name: 'pve_get', input: { cluster: 'pve-lab', path: '/nodes/pve1/qemu/300/config' } },
         { kind: 'tool', name: 'pve_get', input: { cluster: 'pve-lab', path: '/nodes/pve1/hardware/pci' } },
@@ -88,6 +104,7 @@ export function assistantScript(message: string): { steps: ScriptStep[]; change?
   }
   if (/\bshare\b|shared login|share the login/.test(m)) {
     return {
+      topic: 'share',
       steps: [
         { kind: 'tool', name: 'search_docs', input: { query: 'share a cluster login' } },
         { kind: 'tool', name: 'read_doc', input: { slug: 'clusters-and-access' } },
@@ -101,6 +118,7 @@ export function assistantScript(message: string): { steps: ScriptStep[]; change?
   }
   if (/fail|broken|error/.test(m)) {
     return {
+      topic: 'failed',
       steps: [
         { kind: 'tool', name: 'list_tasks', input: { cluster: 'pve-lab', limit: 50 } },
         { kind: 'tool', name: 'pve_get', input: { cluster: 'pve-lab', path: '/nodes/pve2/lxc/999/status/current' }, error: '403 Permission check failed (/vms/999, VM.Audit)' },
@@ -110,6 +128,7 @@ export function assistantScript(message: string): { steps: ScriptStep[]; change?
   }
   if (/how do|how to|how does|where|help|docs|guide/.test(m)) {
     return {
+      topic: 'howto',
       steps: [
         { kind: 'tool', name: 'search_docs', input: { query: message.replace(/[?.!]+$/, '').slice(0, 60) } },
         { kind: 'tool', name: 'read_doc', input: { slug: 'getting-started' } },
@@ -118,6 +137,7 @@ export function assistantScript(message: string): { steps: ScriptStep[]; change?
     };
   }
   return {
+    topic: 'attention',
     steps: [
       { kind: 'tool', name: 'get_findings', input: {} },
       { kind: 'tool', name: 'get_metrics', input: { cluster: 'pve-lab', kind: 'node', id: 'pve1', timeframe: 'hour' } },

@@ -9,8 +9,8 @@ export default defineConfig(({ mode }) => ({
   build: { outDir: 'dist', emptyOutDir: true, target: 'es2022', sourcemap: false },
   server: {
     port: 5173,
-    // mock mode bundles the user guide from ../docs/user (outside this package)
-    fs: { allow: ['.', '../docs/user'] },
+    // mock mode bundles the user guide (../docs/user) and the release notes (../docs/changelog.md)
+    fs: { allow: ['.', '../docs'] },
     proxy: mode === 'mock' ? undefined : {
       '/api': { target: 'https://127.0.0.1:8443', secure: false, changeOrigin: true },
     },

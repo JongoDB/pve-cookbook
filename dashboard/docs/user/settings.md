@@ -1,6 +1,6 @@
 ---
 title: Settings
-summary: What the Settings page holds, who can change it, and what data leaves galley when the assistant is on.
+summary: What the Settings page holds (the assistant and feedback), who can change it, and what data leaves galley when the assistant is on.
 order: 150
 route: /settings
 ---
@@ -26,6 +26,17 @@ The **Assistant** section connects galley's assistant to a model provider. The h
 Select **Save assistant settings** to save, or **Undo changes** to go back to the saved settings. Changes apply to new conversations.
 
 Step-by-step setup: [Assistant](assistant.md#set-up-the-assistant-galley-admins).
+
+## Feedback
+
+The **Feedback** section controls **Send feedback** (see [Send feedback](feedback.md)). The heading shows **On** with the repository, or **Off**.
+
+- **Let users send feedback**: when off, **Send feedback** is hidden everywhere in galley.
+- **GitHub repository**: where new issues are opened, as `owner/name`. The default is `JongoDB/pve-cookbook`, galley's own repository. Point it at your own repository, for example an internal fork, to collect feedback there.
+
+Select **Save feedback settings** to save, or **Undo changes** to go back to the saved settings. The change is recorded in the audit log (`settings.feedback`).
+
+galley holds no GitHub credential and sends nothing to GitHub itself: users submit each issue from their own GitHub account.
 
 ## What leaves galley
 

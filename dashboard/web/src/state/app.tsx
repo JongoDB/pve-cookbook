@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ApiError } from '../api/http';
-import type { Api, AuditEntry, Fleet, Guest, Me, Plan, PlanRequest, Task } from '../api/types';
+import type { Api, AuditEntry, FeedbackConfig, Fleet, Guest, Me, Plan, PlanRequest, Task } from '../api/types';
 import { EMPTY_PLAN, PlanStore, type PlanState } from '../lib/planStore';
 import { runFinished } from '../lib/plan';
 import { ChatSession } from '../lib/chat';
@@ -8,6 +8,8 @@ import { ChatSession } from '../lib/chat';
 export type { PlanState } from '../lib/planStore';
 
 export type DrawerTab = 'assistant' | 'changes' | 'activity';
+/** App-wide dialogs, opened from the user menu, Help and the command palette. */
+export type AppDialog = 'whats-new' | 'feedback' | null;
 export interface Crumb { label: string; to?: string }
 
 interface AppCtx {
@@ -45,6 +47,11 @@ interface AppCtx {
   clusterName: (id: string) => string;
   /** the assistant conversation (lives as long as the session) */
   chat: ChatSession;
+  dialog: AppDialog;
+  setDialog: (d: AppDialog) => void;
+  /** GET /api/feedback; null until loaded (or when it failed: Send feedback stays hidden) */
+  feedback: FeedbackConfig | null;
+  reloadFeedback: () => void;
 }
 
 const Ctx = createContext<AppCtx | null>(null);
@@ -82,6 +89,10 @@ export function AppProvider({ api, me, setMe, children }: { api: Api; me: Me; se
     return v === null ? true : v === '1';
   });
   const [crumbs, setCrumbs] = useState<Crumb[]>([]);
+  const [dialog, setDialog] = useState<AppDialog>(null);
+  const [feedback, setFeedback] = useState<FeedbackConfig | null>(null);
+  const reloadFeedback = useCallback(() => { api.feedback().then(setFeedback, () => setFeedback(null)); }, [api]);
+  useEffect(() => { reloadFeedback(); }, [reloadFeedback]);
   const [guests, setGuests] = useState<Guest[] | null>(null);
   const [guestsError, setGuestsError] = useState<string | null>(null);
   const lastReq = useRef<PlanRequest | null>(null);
@@ -174,8 +185,10 @@ export function AppProvider({ api, me, setMe, children }: { api: Api; me: Me; se
     api, me, setMe, refreshMe, fleet, tasks, live, lastAudit, runningChanges, planState, lastPlanRequest: lastReq.current,
     openPlan, showPlan, runPlan, clearPlan, changePending, paletteOpen, setPaletteOpen,
     drawerTab, drawerFolded, openDrawer, setDrawerFolded, crumbs, setCrumbs, guests, guestsError, refreshGuests, clusterName, chat,
+    dialog, setDialog, feedback, reloadFeedback,
   }), [api, me, setMe, refreshMe, fleet, tasks, live, lastAudit, runningChanges, planState, openPlan, showPlan, runPlan, clearPlan, changePending,
-    paletteOpen, drawerTab, drawerFolded, openDrawer, setDrawerFolded, crumbs, guests, guestsError, refreshGuests, clusterName, chat]);
+    paletteOpen, drawerTab, drawerFolded, openDrawer, setDrawerFolded, crumbs, guests, guestsError, refreshGuests, clusterName, chat,
+    dialog, feedback, reloadFeedback]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

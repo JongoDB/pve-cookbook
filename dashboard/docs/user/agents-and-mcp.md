@@ -22,7 +22,7 @@ Whatever the scope, an agent token can never:
 - log in, log out, or open consoles;
 - use the in-app assistant.
 
-Each agent can have at most 10 drafts waiting for you. Changes an agent applied show **via agent:<name>** in the [audit log](audit-log.md).
+Each agent can have at most 10 drafts waiting for you. Changes an agent applied show **via agent <name>** below the user in the [audit log](audit-log.md) and on [Activity](activity.md).
 
 Host commands drafted or applied by an agent follow the same rules as yours: they need host administrator rights on the cluster. See [Host commands](hosts.md).
 

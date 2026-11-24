@@ -15,7 +15,7 @@ The page lists the newest 100 entries, newest first:
 - **When** the entry was created.
 - **Change**: the title, and the action below it (for example `guest.migrate`, `api.call`, `host.exec`, `auth.login`).
 - **Cluster**.
-- **Ran as**: the PVE identity the change ran as. If it differs from your galley session's user, the session user is shown below it.
+- **Ran as**: the PVE identity the change ran as. If it differs from your galley session's user, the session user is shown below it. When an AI agent or script applied the change with one of your agent tokens, **via agent <name>** appears below it, with the token's name. See [Agents and MCP](agents-and-mcp.md).
 
 Select **Details** to see the commands, and each step's status, PVE task ID or error. Host commands also show their output, with **Copy output**. **Copy** copies the commands so you can repeat the change from a shell.
 
@@ -24,7 +24,7 @@ Select **Details** to see the commands, and each step's status, PVE task ID or e
 - Every change applied through galley, recorded as running before anything is sent, then updated as each step finishes.
 - Logins (`auth.login`), including failed attempts with the client's address.
 - Cluster administration: adding, changing and removing clusters (`cluster.add`, `cluster.update`, `cluster.delete`).
-- Changes to galley's settings, such as the assistant (`settings.assistant`).
+- Changes to galley's settings, such as the assistant (`settings.assistant`) and feedback (`settings.feedback`).
 - With personal API tokens, the revocation of old session tokens (`auth.token`).
 
 Reads (opening pages, the API explorer's **Read it now**, the assistant's lookups) are not recorded. Commands you type in a console or node shell are not recorded by galley either; PVE logs the console session.

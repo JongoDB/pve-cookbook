@@ -279,6 +279,8 @@ export interface AuditEntry {
   results: StepResult[];
   /** async runs: 'running' until every step has finished */
   status?: RunStatus;
+  /** set when an agent acted for the user: "agent:<name>" */
+  via?: string;
 }
 
 export interface GuestTarget { vmid: number; node: string; type: GuestType }
@@ -478,4 +480,16 @@ export interface Api {
   createAgentToken(req: CreateAgentTokenRequest): Promise<CreatedAgentToken>;
   deleteAgentToken(id: string): Promise<void>;
   doc(slug: string): Promise<Doc>;
+  /** GET /api/whats-new: release notes, newest first. */
+  whatsNew(): Promise<WhatsNew>;
+  /** GET /api/feedback: whether Send feedback is on, and the GitHub repository it files to. */
+  feedback(): Promise<FeedbackConfig>;
+  /** PUT /api/settings/feedback (galley admins). */
+  putFeedback(c: FeedbackConfig): Promise<FeedbackConfig>;
 }
+
+// ---- what's new and feedback ----
+
+export interface Release { version: string; date: string; markdown: string }
+export interface WhatsNew { version: string; releases: Release[] }
+export interface FeedbackConfig { enabled: boolean; repo: string }

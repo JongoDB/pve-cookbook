@@ -9,6 +9,7 @@ import { Badge, Empty, Meter, Status } from '../components/ui';
 import { storageUnavailable, staleReason, uniqueStorage } from './overview/Widgets';
 import { taskBadge } from './GuestDetail';
 import { HelpLink } from '../components/HelpLink';
+import { viaText } from '../lib/plan';
 
 function ClusterFilter({ value, onChange }: { value: string; onChange: (v: string) => void }) {
   const { me } = useApp();
@@ -101,7 +102,7 @@ export function Activity() {
         <section className="panel" aria-labelledby="rc-h">
           <div className="panel-head"><h2 id="rc-h">Changes running</h2></div>
           <ul className="rows" style={{ padding: '4px 16px' }}>
-            {runningChanges.map((a) => <li key={a.id}><Badge kind="info">Running</Badge><span className="grow">{a.title}<div className="meta">{clusterName(a.clusterId)}, {a.actorUser ?? a.user}, started {ago(a.at)}</div></span></li>)}
+            {runningChanges.map((a) => <li key={a.id}><Badge kind="info">Running</Badge><span className="grow">{a.title}<div className="meta">{clusterName(a.clusterId)}, {a.actorUser ?? a.user}{viaText(a.via) ? ` ${viaText(a.via)}` : ''}, started {ago(a.at)}</div></span></li>)}
           </ul>
         </section>
       )}

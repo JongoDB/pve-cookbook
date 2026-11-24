@@ -80,4 +80,5 @@ The parser (`docs/embed.go`, and `web/src/lib/docs.ts`) depends on this format.
 | settings.md | `/settings` | Galley-wide settings |
 | security.md | | What galley stores and who can do what |
 | keyboard-and-search.md | | Command palette and shortcuts |
+| feedback.md | | Send feedback as a GitHub issue |
 | troubleshooting.md | | Error messages and fixes |

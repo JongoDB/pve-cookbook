@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type { AuditEntry, ClusterSummary, Finding, Fleet, Guest, Storage, Timeframe } from '../../api/types';
+import { viaText } from '../../lib/plan';
 import { useApp } from '../../state/app';
 import { useAsync } from '../../lib/hooks';
 import { ago, bytes, pctLabel } from '../../lib/format';
@@ -225,7 +226,7 @@ export function ChangesWidget() {
       {data.map((a) => (
         <li key={a.id}>
           {auditBadge(a)}
-          <span className="grow">{a.title}<div className="meta">{clusterName(a.clusterId)}, {a.actorUser ?? a.user}, {ago(a.at)}</div></span>
+          <span className="grow">{a.title}<div className="meta">{clusterName(a.clusterId)}, {a.actorUser ?? a.user}{viaText(a.via) ? ` ${viaText(a.via)}` : ''}, {ago(a.at)}</div></span>
         </li>
       ))}
       <li><Link to="/audit">Open the audit log</Link></li>

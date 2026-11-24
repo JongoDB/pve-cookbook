@@ -47,6 +47,12 @@ export function mergeAudit(r: RunResult, a: AuditEntry, stepCount: number): RunR
 }
 
 /** Who drafted a change: "Assistant draft", "Agent: ci-runner", or null for the user's own. */
+/** "via agent <name>" for audit entries an agent created for the user (via "agent:<name>"). */
+export function viaText(via?: string): string {
+  if (!via?.startsWith('agent:')) return '';
+  return `via agent ${via.slice(6) || 'unnamed'}`;
+}
+
 export function sourceLabel(source?: string): string | null {
   if (!source) return null;
   if (source === 'assistant') return 'Assistant draft';

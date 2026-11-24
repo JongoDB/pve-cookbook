@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { docForPath, openableRoute, parseDocFile, searchDocs } from './docs';
+import { docForPath, openableRoute, parseChangelog, parseDocFile, searchDocs } from './docs';
 import type { DocSummary } from '../api/types';
 
 const d = (slug: string, route?: string, order = 0, title = slug, summary = ''): DocSummary => ({ slug, title, summary, order, ...(route ? { route } : {}) });
@@ -29,5 +29,15 @@ describe('guide helpers', () => {
     expect(hits.map((h) => h.doc.slug)).toEqual(['b']);
     expect(hits[0].snippet).toContain('snapshot of the guest');
     expect(searchDocs(docs, {}, '').length).toBe(2);
+  });
+});
+
+describe('parseChangelog', () => {
+  it('splits releases newest first, like docs/embed.go', () => {
+    const r = parseChangelog('<!-- notes -->\n\n## 0.2.0 — 2026-11-24\n\n- **New.** Thing\n\n## v0.1.0 - 2026-11-10\n- First\n');
+    expect(r).toEqual([
+      { version: '0.2.0', date: '2026-11-24', markdown: '- **New.** Thing' },
+      { version: '0.1.0', date: '2026-11-10', markdown: '- First' },
+    ]);
   });
 });

@@ -51,7 +51,7 @@ A galley session belongs to one PVE identity, such as `alice@pve`. When you log 
 - The breadcrumb trail shows where you are, for example **Guests / lab / web03**.
 - **Ask, search or run a command** opens the command palette. The shortcut is ⌘K on a Mac and Ctrl K elsewhere. See [Keyboard and search](keyboard-and-search.md).
 - The live indicator shows **Live** while updates stream in, **Polling every 5 s** when the live stream is down and galley falls back to polling, and **Connecting** in between.
-- Your user name opens the account menu. It shows whether you are a galley admin, galley's version, and **Log out**.
+- Your user name opens the account menu. It shows whether you are a galley admin and galley's version, and has **What's new**, **Send feedback** and **Log out**.
 
 ### Navigation
 
@@ -79,7 +79,7 @@ On a narrow screen the navigation is hidden behind the **Menu** button in the to
 The right side holds the drawer with three tabs:
 
 - **Assistant**: chat with galley's assistant. See [Assistant](assistant.md).
-- **Changes**: the change waiting for your review. A badge shows **1** when a change is waiting. See [How changes work](changes.md).
+- **Changes**: the change waiting for your review. A badge shows how many changes wait for you: the one open in the tab, and drafts by the assistant or agents. See [How changes work](changes.md).
 - **Activity**: PVE tasks and galley changes that are running, and recently finished tasks.
 
 The drawer starts folded to a narrow rail of icons. Select an icon to open that tab. **Fold the drawer** folds it again. Opening a change always unfolds the drawer to **Changes**, because you must see a change before it runs. On narrow screens, Escape folds the drawer. Left and right arrow keys move between tabs.
@@ -88,6 +88,16 @@ The drawer starts folded to a narrow rail of icons. Select an icon to open that 
 
 - **Your login to <cluster> lapsed while you were away.** Select **Log in to <cluster>** and enter your password, or **Later**. Everything else keeps working. See [Clusters and access](clusters-and-access.md#lapsed-logins).
 - **Your galley session ends at <time>** appears in the last 10 minutes before your session's maximum lifetime. Changes already running keep going. Log in again afterwards.
+
+## What's new after an update
+
+The first time you log in after galley is updated, a **What's new in galley <version>** dialog lists what changed, with links to the guide pages about it. **Earlier releases** shows the notes of older versions. Select **Got it**, press Esc or close the dialog; it does not appear again until the next update. galley remembers this per user, as a preference.
+
+To read the notes again, choose **What's new** in the account menu, at the top of **Help**, or in the command palette.
+
+## Send feedback
+
+To report a bug, suggest an idea or ask a question about galley, choose **Send feedback** in the account menu, at the top of **Help**, or in the command palette. galley opens a pre-filled issue on GitHub, which you review and submit from your own GitHub account. See [Send feedback](feedback.md).
 
 ## What to do next
 

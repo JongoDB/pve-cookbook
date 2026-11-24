@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { useApp, useCrumbs } from '../state/app';
 import { useAsync } from '../lib/hooks';
 import { clock } from '../lib/format';
-import { stepStatus } from '../lib/plan';
+import { stepStatus, viaText } from '../lib/plan';
 import { ApiErrorView } from '../components/ClusterLogin';
 import { CopyButton, Empty } from '../components/ui';
 import { auditBadge } from './overview/Widgets';
@@ -37,7 +37,7 @@ export function Audit() {
                     <td className="nowrap text-2">{clock(a.at)}</td>
                     <td className="strong">{a.title}<div className="ws mono" style={{ fontWeight: 400 }}>{a.action}</div></td>
                     <td className="text-2">{clusterName(a.clusterId)}</td>
-                    <td className="text-2">{a.actorUser ?? a.user}{a.actorUser && a.actorUser !== a.user ? <div className="ws">session {a.user}</div> : null}</td>
+                    <td className="text-2">{a.actorUser ?? a.user}{a.actorUser && a.actorUser !== a.user ? <div className="ws">session {a.user}</div> : null}{viaText(a.via) ? <div className="ws">{viaText(a.via)}</div> : null}</td>
                     <td className="right">
                       <button type="button" className="btn btn-sm" aria-expanded={isOpen} aria-controls={`audit-${a.id}`} onClick={() => setOpen(isOpen ? null : a.id)}>
                         {isOpen ? 'Hide details' : 'Details'}

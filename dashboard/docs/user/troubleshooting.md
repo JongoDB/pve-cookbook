@@ -87,6 +87,12 @@ See [Consoles](consoles.md).
 - **The assistant could not answer: …** The model provider returned an error, for example an invalid API key, an unknown model name, or an unreachable endpoint. A galley admin should check the provider settings.
 - A lookup line marked as failed means PVE or galley refused that read. The assistant usually explains which permission is missing.
 
+## Feedback problems
+
+- **Send feedback is missing.** A galley admin turned it off in **Settings**. See [Settings](settings.md#feedback).
+- **Continue on GitHub opened nothing.** Your browser may block new tabs from galley; allow pop-ups for galley's address and try again.
+- **GitHub shows an empty form or asks you to sign in.** Sign in to GitHub; it then shows the filled-in issue. See [Send feedback](feedback.md).
+
 ## Agent token problems
 
 - **403** with code `agent_scope`: the token's scope does not allow that call, or the call is galley administration, which agent tokens can never do.

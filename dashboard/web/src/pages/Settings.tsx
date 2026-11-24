@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { ApiError } from '../api/http';
-import type { AssistantConfig, AssistantProvider, AssistantSettingsUpdate, Effort } from '../api/types';
+import type { FeedbackConfig, AssistantConfig, AssistantProvider, AssistantSettingsUpdate, Effort } from '../api/types';
 import { errMsg, useApp, useCrumbs } from '../state/app';
 import { useAsync } from '../lib/hooks';
 import { ApiErrorView } from '../components/ClusterLogin';
@@ -40,6 +40,7 @@ export function Settings() {
         <div className="sub">Galley-wide settings. Every change here is recorded in the audit log.</div>
       </div>
       <AssistantSettingsForm />
+      <FeedbackSettingsForm />
     </div>
   );
 }
@@ -184,6 +185,66 @@ function AssistantSettingsForm() {
         <div className="row-actions">
           <button type="submit" className="btn btn-primary" disabled={busy}>{busy ? 'Saving' : 'Save assistant settings'}</button>
           <button type="button" className="btn" disabled={busy} onClick={() => { setCfg(orig); setKey(''); setClearKey(false); setErr(null); setOk(null); }}>Undo changes</button>
+        </div>
+      </div>
+    </form>
+  );
+}
+
+const REPO_RE = /^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}$/;
+
+function FeedbackSettingsForm() {
+  const { api, reloadFeedback } = useApp();
+  const [rev, setRev] = useState(0);
+  const saved = useAsync(() => api.feedback(), `feedback-settings|${rev}`);
+  const [cfg, setCfg] = useState<FeedbackConfig | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [ok, setOk] = useState<string | null>(null);
+
+  useEffect(() => { if (saved.data) setCfg(saved.data); }, [saved.data]);
+
+  if (saved.error) return <ApiErrorView error={saved.error} what="the feedback settings" onRetry={saved.reload} />;
+  if (!saved.data || !cfg) return <div className="panel"><div className="muted panel-body" role="status">Loading the feedback settings</div></div>;
+
+  const orig = saved.data;
+  const set = (p: Partial<FeedbackConfig>) => { setCfg((c) => ({ ...c!, ...p })); setOk(null); };
+  const save = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErr(null); setOk(null);
+    const repo = cfg.repo.trim().replace(/^https:\/\/github\.com\//, '').replace(/\/+$/, '');
+    if (!REPO_RE.test(repo)) { setErr('Enter the repository as owner/name, for example JongoDB/pve-cookbook.'); return; }
+    setBusy(true);
+    try {
+      await api.putFeedback({ enabled: cfg.enabled, repo });
+      setOk(cfg.enabled ? `Saved. Send feedback opens new issues on ${repo}.` : 'Saved. Send feedback is hidden.');
+      setRev((r) => r + 1);
+      reloadFeedback();
+    } catch (e2) {
+      setErr(`Could not save: ${errMsg(e2)}`);
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <form className="panel" onSubmit={save} aria-labelledby="fb-h">
+      <div className="panel-head"><h2 id="fb-h">Feedback</h2><span className="muted">{orig.enabled ? `On, ${orig.repo}` : 'Off'}</span></div>
+      <div className="panel-body form-stack settings-form">
+        <label className="check">
+          <input type="checkbox" checked={cfg.enabled} onChange={(e) => set({ enabled: e.target.checked })} />
+          Let users send feedback
+        </label>
+        <label className="field">
+          <span className="label">GitHub repository</span>
+          <input value={cfg.repo} onChange={(e) => set({ repo: e.target.value })} placeholder="owner/name" spellCheck={false} autoComplete="off" />
+          <span className="hint">
+            Send feedback opens a pre-filled new issue in this repository. Users review it and submit it from their own GitHub account; galley holds no GitHub credential and sends nothing itself.
+          </span>
+        </label>
+        {err && <div className="notice notice-error" role="alert"><div className="grow">{err}</div></div>}
+        {ok && <div className="notice notice-ok" role="status"><div className="grow">{ok}</div></div>}
+        <div className="row-actions">
+          <button type="submit" className="btn btn-primary" disabled={busy}>{busy ? 'Saving' : 'Save feedback settings'}</button>
+          <button type="button" className="btn" disabled={busy} onClick={() => { setCfg(orig); setErr(null); setOk(null); }}>Undo changes</button>
         </div>
       </div>
     </form>

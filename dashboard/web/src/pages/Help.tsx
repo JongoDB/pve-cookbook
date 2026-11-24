@@ -11,7 +11,7 @@ import { Empty } from '../components/ui';
 
 /** /help: every guide page, with a search over titles, summaries and page text. */
 export function HelpIndex() {
-  const { api } = useApp();
+  const { api, setDialog, feedback } = useApp();
   useCrumbs([{ label: 'Help' }]);
   const cache = docsCache(api);
   const index = useAsync(() => cache.loadIndex(), 'docs-index');
@@ -35,6 +35,10 @@ export function HelpIndex() {
       <div className="page-head">
         <h1>Help</h1>
         <div className="sub">How galley works, and how to do common tasks with it.</div>
+      </div>
+      <div className="help-extras">
+        <button type="button" className="btn btn-sm" onClick={() => setDialog('whats-new')}>What&apos;s new</button>
+        {feedback?.enabled && <button type="button" className="btn btn-sm" onClick={() => setDialog('feedback')}>Send feedback</button>}
       </div>
       <div className="filters">
         <label className="field grow"><span className="sr-only">Search help</span>

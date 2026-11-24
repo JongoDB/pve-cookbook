@@ -10,11 +10,10 @@ const REFRESH_MS = 30_000;
  * The user's pending changes (GET /api/plans): drafts by the assistant or agents, and changes
  * opened elsewhere. Refreshed when shown, on audit events, and every 30 s while visible.
  */
-export function PendingChanges({ compact = false }: { compact?: boolean }) {
-  const { api, lastAudit, planState, showPlan, clusterName } = useApp();
+export function usePendingPlans(): { plans: Plan[] | null; failed: boolean } {
+  const { api, lastAudit, planState } = useApp();
   const [plans, setPlans] = useState<Plan[] | null>(null);
   const [failed, setFailed] = useState(false);
-  const [open, setOpen] = useState(false);
   const current = planState.plan?.id;
 
   const load = useCallback(() => {
@@ -26,6 +25,25 @@ export function PendingChanges({ compact = false }: { compact?: boolean }) {
     const t = setInterval(() => { if (document.visibilityState !== 'hidden') load(); }, REFRESH_MS);
     return () => clearInterval(t);
   }, [load]);
+  return { plans, failed };
+}
+
+/** How many changes wait for the user: the pending list, plus the open change if it is not in it. */
+export function usePendingCount(): number {
+  const { planState, changePending } = useApp();
+  const { plans } = usePendingPlans();
+  const ids = new Set((plans ?? []).map((p) => p.id));
+  const open = planState.plan?.id;
+  if (open && !changePending) ids.delete(open);
+  if (open && changePending) ids.add(open);
+  return ids.size;
+}
+
+export function PendingChanges({ compact = false }: { compact?: boolean }) {
+  const { planState, showPlan, clusterName } = useApp();
+  const { plans, failed } = usePendingPlans();
+  const [open, setOpen] = useState(false);
+  const current = planState.plan?.id;
 
   const others = (plans ?? []).filter((p) => p.id !== current);
   if (compact && !others.length) return null;

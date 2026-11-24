@@ -24,7 +24,7 @@ To drop a change without running it, select **Discard**.
 
 ## One change at a time
 
-The Changes tab holds one change. If you start another change before you apply or discard the first, the new one replaces it. A waiting change shows a **1** badge on the **Changes** tab.
+The Changes tab holds one change. If you start another change before you apply or discard the first, the new one replaces it. The badge on the **Changes** tab counts the changes waiting for you: the one open in the tab, plus drafts by the assistant or agents that you have not applied or discarded yet.
 
 A change you have not applied expires after 10 minutes; **Apply change** is then unavailable. Start it again to get a fresh one. A change runs at most once.
 

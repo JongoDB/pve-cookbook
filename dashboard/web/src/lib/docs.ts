@@ -1,7 +1,7 @@
 // The user guide (Help): front matter parsing (for the mock), page-to-doc matching, search,
 // and a per-session cache so the index is fetched once.
 import { useEffect, useState } from 'react';
-import type { Api, Doc, DocSummary } from '../api/types';
+import type { Api, Doc, DocSummary, Release } from '../api/types';
 
 /** Split `---` front matter from a guide page, like docs/embed.go. */
 export function parseDocFile(slug: string, raw: string): Doc & { order: number } {
@@ -22,6 +22,19 @@ export function parseDocFile(slug: string, raw: string): Doc & { order: number }
     slug, title: meta.title || slug, summary: meta.summary ?? '', order: Number.parseInt(meta.order ?? '', 10) || 0,
     ...(meta.route ? { route: meta.route } : {}), markdown: s,
   };
+}
+
+const RELEASE_HEAD = /^## v?([0-9][0-9A-Za-z.+-]*)\s*(?:—|-|–)?\s*(\d{4}-\d{2}-\d{2})?\s*$/;
+
+/** Release notes from docs/changelog.md, newest first, like docs/embed.go (used by the mock). */
+export function parseChangelog(raw: string): Release[] {
+  const out: Release[] = [];
+  for (const line of raw.replace(/\r\n/g, '\n').split('\n')) {
+    const m = RELEASE_HEAD.exec(line);
+    if (m) { out.push({ version: m[1], date: m[2] ?? '', markdown: '' }); continue; }
+    if (out.length) out[out.length - 1].markdown += `${line}\n`;
+  }
+  return out.map((r) => ({ ...r, markdown: r.markdown.trim() }));
 }
 
 const segs = (p: string) => p.split('/').filter(Boolean);

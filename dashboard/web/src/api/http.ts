@@ -3,7 +3,7 @@ import type {
   AddClusterRequest, AgentToken, CreateAgentTokenRequest, CreatedAgentToken, Api, AssistantSettings, AssistantSettingsUpdate, AssistantStatus, AuditEntry, ChatEvent, ChatRequest,
   Cluster, ClusterLoginRequest, ConsoleRequest, ConsoleTicket, EventHandlers, Fleet, Guest, GuestFilter, HostScan, HostsInfo,
   Doc, DocSummary, LoginRequest, Me, MetricQuery, MetricSeries, Plan, PlanRequest, Probe, Realm, RunResult, SchemaPathEntry, SchemaPathInfo, Task,
-  UpdateClusterRequest,
+  UpdateClusterRequest, WhatsNew, FeedbackConfig,
 } from './types';
 import { readChatStream } from '../lib/sse';
 
@@ -179,6 +179,12 @@ export class HttpApi implements Api {
   deleteAgentToken(id: string) { return this.req<void>('DELETE', `/agent-tokens/${enc(id)}`); }
   docs() { return this.req<DocSummary[]>('GET', '/docs'); }
   doc(slug: string) { return this.req<Doc>('GET', `/docs/${enc(slug)}`); }
+  async whatsNew() {
+    const r = await this.req<WhatsNew>('GET', '/whats-new');
+    return { version: r?.version ?? '', releases: Array.isArray(r?.releases) ? r.releases : [] };
+  }
+  feedback() { return this.req<FeedbackConfig>('GET', '/feedback'); }
+  putFeedback(c: FeedbackConfig) { return this.req<FeedbackConfig>('PUT', '/settings/feedback', c); }
   openConsole(clusterId: string, r: ConsoleRequest) { return this.req<ConsoleTicket>('POST', `/clusters/${enc(clusterId)}/console`, r); }
 
   /**

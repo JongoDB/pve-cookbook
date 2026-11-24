@@ -5,7 +5,7 @@ import type {
   AddClusterRequest, AgentToken, CreateAgentTokenRequest, CreatedAgentToken, Api, AssistantConfig, CredentialMode, HostTransport, AssistantSettingsUpdate, AuditEntry, ChatEvent, ChatRequest, Cluster, ClusterLoginRequest,
   ClusterSummary, ConsoleRequest, Doc, DocSummary, EventHandlers, Finding, Fleet, Guest, GuestFilter, GuestTarget, HostPin, HostsInfo, LoginRequest, Me, MetricName,
   MetricQuery, MetricSeries, Plan, PlanRequest, Probe, Realm, RunResult, SchemaPathEntry, SchemaPathInfo, Step, Storage, Task, Timeframe,
-  UpdateClusterRequest,
+  UpdateClusterRequest, FeedbackConfig, WhatsNew,
 } from './types';
 import { ACTION_LABEL, confirmTextFor, guestSteps, type GuestAction, type GuestParams } from '../lib/actions';
 import { matchSchema, mockSchema } from './mockSchema';
@@ -13,9 +13,10 @@ import {
   MOCK_HOST_OUTPUT, assistantScript, hostFingerprint, mockAuthorizedKey, mockPci, mockVnets, seedMappings, type MockMapping,
 } from './mockData';
 import { pveshCli, shellQuote } from '../lib/schemaForm';
-import { parseDocFile } from '../lib/docs';
+import { parseChangelog, parseDocFile } from '../lib/docs';
 
 // The real user guide (dashboard/docs/user/*.md), bundled at build time like the Go binary embeds it.
+const CHANGELOG = Object.values(import.meta.glob('../../../docs/changelog.md', { query: '?raw', import: 'default', eager: true }) as Record<string, string>)[0] ?? '';
 const DOC_FILES = import.meta.glob('../../../docs/user/*.md', { query: '?raw', import: 'default', eager: true }) as Record<string, string>;
 const MOCK_DOCS = Object.entries(DOC_FILES)
   .map(([path, raw]) => ({ slug: path.replace(/^.*\//, '').replace(/\.md$/, ''), raw }))
@@ -281,6 +282,7 @@ export class MockApi implements Api {
     { id: '3f9a1c0b7d2e4a51', name: 'ci-runner', scope: 'draft', created: now() - 86400 * 6, lastSeen: now() - 3600 * 2, expires: now() + 86400 * 24 },
   ];
   private seededAgentDraft = false;
+  private feedbackCfg: FeedbackConfig = { enabled: true, repo: 'JongoDB/pve-cookbook' };
   private mappings: MockMapping[] = seedMappings();
   /** config edits applied by api.call changes; null = deleted key */
   private configEdits = new Map<string, Record<string, string | null>>();
@@ -315,6 +317,10 @@ export class MockApi implements Api {
       {
         id: 'seed-2', at: t0 - 2400, updated: t0 - 2390, user: 'root@pam', actorUser: 'root@pam', clusterId: 'pve-lab', action: 'guest.snapshot',
         title: 'Snapshot 300', cli: ['qm snapshot 300 driver-570'], ok: true, status: 'ok', results: [{ step: 0, ok: true, status: 'ok', exitstatus: 'OK', upid: 'UPID:pve1:0001:qmsnapshot:300:root@pam:' }],
+      },
+      {
+        id: 'seed-3', at: t0 - 5400, updated: t0 - 5390, user: 'root@pam', actorUser: 'root@pam', via: 'agent:ci-runner', clusterId: 'pve-lab', action: 'guest.start',
+        title: 'Start 121', cli: ['qm start 121'], ok: true, status: 'ok', results: [{ step: 0, ok: true, status: 'ok', exitstatus: 'OK' }],
       },
       {
         id: 'seed-1', at: t0 - 9000, updated: t0 - 8990, user: 'root@pam', actorUser: 'root@pam', clusterId: 'pve-lab', action: 'guest.migrate',
@@ -1205,11 +1211,14 @@ export class MockApi implements Api {
           this.planMap.set(plan.id, plan);
           onEvent({ type: 'change', plan });
         } else {
-          // stream in small word chunks, like a model would
-          const parts = step.text.match(/\S+\s*|\s+/g) ?? [];
+          // stream in small word chunks, like a model would; the suggestions block in 4-character
+          // pieces, so its tag arrives split ("<sugg", "estions>") as it can from a real model
+          const parts = step.text.includes('<suggestions') ? step.text.match(/[\s\S]{1,4}/g) ?? [] : step.text.match(/\S+\s*|\s+/g) ?? [];
+          // "slowly" in the question slows the suggestions block down (to watch it stream)
+          const ms = step.text.includes('<suggestions') && /slowly/i.test(r.message) ? 700 : 28;
           for (let i = 0; i < parts.length; i += 3) {
             onEvent({ type: 'text', delta: parts.slice(i, i + 3).join('') });
-            await pause(28);
+            await pause(ms);
           }
           conv.bytes += step.text.length;
         }
@@ -1296,6 +1305,26 @@ export class MockApi implements Api {
     const d = MOCK_DOCS.find((x) => x.slug === slug);
     if (!d) throw new ApiError(404, 'not_found', 'no such help page');
     return { ...d };
+  }
+
+  // ---------- what's new and feedback ----------
+  async whatsNew(): Promise<WhatsNew> {
+    await wait(60); this.requireAuth();
+    const releases = parseChangelog(CHANGELOG);
+    return { version: releases[0]?.version ?? '', releases };
+  }
+
+  async feedback(): Promise<FeedbackConfig> {
+    await wait(40); this.requireAuth();
+    return { ...this.feedbackCfg };
+  }
+
+  async putFeedback(c: FeedbackConfig): Promise<FeedbackConfig> {
+    await wait(150); this.requireAuth();
+    if (!this.session!.galleyAdmin) throw new ApiError(403, 'forbidden', 'feedback settings require a galley admin');
+    if (!/^[A-Za-z0-9-]{1,39}\/[A-Za-z0-9._-]{1,100}$/.test(c.repo ?? '')) throw new ApiError(400, 'bad_request', 'repo must be owner/name on GitHub');
+    this.feedbackCfg = { enabled: !!c.enabled, repo: c.repo };
+    return { ...this.feedbackCfg };
   }
 
   // ---------- consoles ----------

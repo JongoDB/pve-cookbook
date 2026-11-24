@@ -241,3 +241,20 @@ describe('MockApi: host transports and credential modes', () => {
     expect((await api.agentTokens()).map((x) => x.name)).not.toContain('ci');
   });
 });
+
+describe('mock what\'s new, feedback and suggestions', () => {
+  it('serves the changelog, feedback settings, and answers ending in a suggestions block', async () => {
+    const api = new MockApi({ stepDelayMs: 0 });
+    await api.login({ clusterId: 'pve-lab', username: 'root', realm: 'pam', password: 'x' });
+    const wn = await api.whatsNew();
+    expect(wn.releases[0].version).toBe(wn.version);
+    expect(wn.releases.length).toBeGreaterThan(1);
+    expect(await api.feedback()).toEqual({ enabled: true, repo: 'JongoDB/pve-cookbook' });
+    await expect(api.putFeedback({ enabled: true, repo: 'not a repo' })).rejects.toMatchObject({ status: 400 });
+    expect(await api.putFeedback({ enabled: false, repo: 'me/fork' })).toEqual({ enabled: false, repo: 'me/fork' });
+    expect((await api.audit()).some((a) => a.via === 'agent:ci-runner')).toBe(true);
+    let text = '';
+    await api.chat({ message: 'How do changes work?' }, (e) => { if (e.type === 'text') text += e.delta; });
+    expect(text).toMatch(/<suggestions>\n(- .+\n)+<\/suggestions>$/);
+  }, 20000);
+});
