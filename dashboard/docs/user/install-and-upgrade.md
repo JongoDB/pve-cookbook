@@ -111,7 +111,7 @@ The override survives upgrades, because `--upgrade` replaces only the binary.
 - `--session-max DURATION`: end a session this long after login, however active. Default `12h`. Idle must not exceed max, and max must not exceed `168h`.
 - `--poll DURATION`: how often galley reads each cluster. Default `5s`.
 - `--insecure-http`: serve plain HTTP. For development only.
-- `--demo`: register an in-process fake cluster to try galley without PVE. Log in as `root`, password `secret`, realm `pam`. Data is temporary.
+- `--demo`: register an in-process fake cluster to try galley without PVE. Log in as `root`, password `secret`, realm `pam`. Data is temporary. Consoles connect to a stand-in (a blank VM display, a node shell and container login prompts), and changes apply to the fake cluster.
 - `--version`: print the version and exit.
 
 ## Set up single sign-on
