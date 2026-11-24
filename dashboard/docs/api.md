@@ -179,6 +179,46 @@ cluster's PVE version; cached 6 h).
 - `GET /api/clusters/{id}/schema` → `[{"path":"/nodes/{node}/qemu/{vmid}/config","text","methods":{"GET":"…","PUT":"…"}}]`
 - `GET /api/clusters/{id}/schema?path=/nodes/pve1/qemu/120/config` → `{"path","text","info":{method: {description, permissions, parameters, returns}},"vars":{"node":"pve1","vmid":"120"}}`
 
+## Consoles
+
+`POST /api/clusters/{id}/console {"type":"qemu"|"lxc"|"node","node","vmid"?}` asks PVE, as the
+user (`VM.Console` / `Sys.Console` apply), for a console ticket →
+`{"token","protocol":"vnc"|"term","password","user","port"}`. Then open the websocket
+`GET /api/console/{token}` (same origin, one use, valid 1 minute); galley proxies it to PVE's
+`vncwebsocket` over the pinned TLS connection. `vnc`: noVNC with `password`. `term`: send
+`<user>:<password>\n` first, then PVE termproxy frames (`0:<len>:<data>`, resize `1:<cols>:<rows>:`).
+
+## Host commands (outside the PVE API)
+
+For what the API cannot do (NIC flow control, kernel parameters, disks, packages). Needs
+administrator rights on `/` of that cluster (`Sys.Modify`, `Sys.Console`, `Permissions.Modify`).
+
+- `GET /api/clusters/{id}/hosts` → nodes with their pinned SSH endpoint, galley's public key
+  (`restrict ssh-ed25519 …`) and the line that installs it cluster-wide
+  (`/etc/pve/priv/authorized_keys`).
+- `POST /api/clusters/{id}/hosts/{node}/scan` → `{"addr","fingerprint"}` read from the node's SSH
+  server — compare with `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on the node.
+- `PUT /api/clusters/{id}/hosts/{node} {"addr","fingerprint"}` pins it; `DELETE` unpins.
+- Change action `host.exec {"node","command","reason"?}` — always needs typed confirmation
+  `run on <node>`; output (≤ 256 KiB) and exit status are recorded in the audit log. Connections
+  to a host whose key differs from the pin are refused.
+
+## Assistant
+
+- `GET /api/assistant` → `{"enabled","provider","model","dataNotice"}`
+- `GET/PUT /api/settings/assistant` (galley admins) → `{"config":{"enabled","provider":"anthropic"|"openai","baseUrl"?,"model","effort"?,"fallback","maxTokens"?},"hasApiKey"}`.
+  The API key is write-only (`"apiKey"` to set, `"clearApiKey":true` to remove); stored encrypted.
+- `POST /api/assistant/chat {"conversationId"?, "message"}` → `text/event-stream` with
+  `text {"delta"}`, `tool {"id","name","status":"running"|"ok"|"error","input"?,"error"?}`,
+  `change {Plan}` (a drafted change — show it in Changes), `done {"conversationId"}`,
+  `error {"message"}`.
+
+The assistant's tools run with the user's PVE permissions (`list_resources`, `get_findings`,
+`list_tasks`, `pve_get`, `get_metrics`, `api_schema`) and can only **draft** changes
+(`propose_change`, `propose_host_command` for administrators). Nothing is applied until the user
+applies it. Default model: `claude-opus-5-5` with Anthropic's server-side refusal fallback;
+OpenAI-compatible endpoints (OpenAI, xAI, OpenRouter, vLLM, Ollama) are supported via `baseUrl`.
+
 ## Plans (every mutation goes through a plan)
 
 `POST /api/plans` `{"action","clusterId","params":{}}` → `Plan`
@@ -196,6 +236,7 @@ MVP actions (`params`):
 | `guest.snapshot` | `{"targets":[…],"name":"pre-upgrade","description"?}` | no |
 | `guest.destroy` | `{"targets":[{"vmid","node","type"}]}` | **yes** — `confirmText` = `destroy <vmid>[,<vmid>…]` |
 | `backup.protect` | `{"vmids":[131],"job":"nightly-all"}` | no |
+| `host.exec` | `{"node","command","reason"?}` | **always** — `run on <node>` (administrators only) |
 | `api.call` | `{"title"?,"summary"?,"calls":[{"method":"POST\|PUT\|DELETE","path":"/nodes/pve1/qemu/300/config","body":{"hostpci1":"mapping=gpu-a2-1,pcie=1"}}]}` (1–20 calls) | DELETEs and destructive paths (`status/stop`, `rollback`, disk wipes…) — `confirmText` = `delete qemu/300`, `confirm …` or `apply N changes` |
 
 `api.call` is the generic create/update/delete: each call is validated against the cluster's

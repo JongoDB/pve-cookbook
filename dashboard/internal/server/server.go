@@ -82,6 +82,7 @@ type Server struct {
 	sseCount   map[string]int
 	lastTouch  map[string]time.Time
 	oidc       map[string]oidcPending
+	consoles   map[string]consoleTicket
 	limiter    *limiter
 	auditSubs  map[chan store.AuditEntry]*session
 
@@ -95,7 +96,7 @@ func New(st *store.Store, f *fleet.Poller, static fs.FS, log *slog.Logger, opt O
 	s := &Server{store: st, fleet: f, plans: plan.NewManager(f), static: static, log: log, opt: opt,
 		base: ctx, cancel: cancel,
 		clients: map[string]*pve.Client{}, views: map[string]*userView{}, renewing: map[string]*sync.Mutex{},
-		sseCount: map[string]int{}, lastTouch: map[string]time.Time{}, oidc: map[string]oidcPending{},
+		sseCount: map[string]int{}, lastTouch: map[string]time.Time{}, oidc: map[string]oidcPending{}, consoles: map[string]consoleTicket{},
 		limiter: newLimiter(), auditSubs: map[chan store.AuditEntry]*session{}, newClient: pve.New}
 	if n, err := st.InterruptRunning(); err != nil {
 		log.Error("could not mark interrupted changes", "err", err)
@@ -189,6 +190,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/metrics", s.authed(s.metricsBatch))
 	mux.HandleFunc("GET /api/clusters/{id}/pve/{path...}", s.authed(s.pveGet))
 	mux.HandleFunc("GET /api/clusters/{id}/schema", s.authed(s.schemaInfo))
+	mux.HandleFunc("POST /api/clusters/{id}/console", s.authed(s.openConsole))
+	mux.HandleFunc("GET /api/console/{token}", s.authed(s.consoleSocket))
 	mux.HandleFunc("GET /api/clusters/{id}/hosts", s.authed(s.listHosts))
 	mux.HandleFunc("POST /api/clusters/{id}/hosts/{node}/scan", s.authed(s.scanHost))
 	mux.HandleFunc("PUT /api/clusters/{id}/hosts/{node}", s.authed(s.pinHost))
@@ -351,6 +354,11 @@ func (s *Server) plansGC() {
 	for k, p := range s.oidc {
 		if now.After(p.exp) {
 			delete(s.oidc, k)
+		}
+	}
+	for k, c := range s.consoles {
+		if now.After(c.exp) {
+			delete(s.consoles, k)
 		}
 	}
 	for k, t := range s.lastTouch {

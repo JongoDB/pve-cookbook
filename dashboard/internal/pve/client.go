@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptrace"
+	"net/http/httputil"
 	"net/url"
 	"strings"
 	"sync"
@@ -521,4 +522,31 @@ func (c *Client) GetStatic(ctx context.Context, path string, max int64) ([]byte,
 		return b, err
 	}
 	return nil, lastErr
+}
+
+// WebsocketProxy returns a handler that forwards a browser websocket (console)
+// to path on the cluster's active endpoint, authenticated with the user's
+// ticket, over the same pinned TLS. Byte streams are passed through unchanged.
+func (c *Client) WebsocketProxy(path string, q url.Values, ticket string) http.Handler {
+	c.mu.Lock()
+	ep := c.endpoints[*c.active]
+	c.mu.Unlock()
+	target := "https://" + HostPort(ep.Host) + "/api2/json" + path
+	return &httputil.ReverseProxy{
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			u, _ := url.Parse(target)
+			u.RawQuery = q.Encode()
+			pr.Out.URL = u
+			pr.Out.Host = u.Host
+			pr.Out.Header.Del("Cookie")
+			pr.Out.Header.Del("Origin")
+			pr.Out.Header.Del("X-Galley-CSRF")
+			pr.Out.AddCookie(&http.Cookie{Name: "PVEAuthCookie", Value: ticket}) // same encoding as API calls
+		},
+		Transport:     c.http.Transport,
+		FlushInterval: -1,
+		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+			http.Error(w, "console connection failed: "+err.Error(), http.StatusBadGateway)
+		},
+	}
 }

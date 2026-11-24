@@ -3,7 +3,9 @@
 package fakepve
 
 import (
+	"crypto/sha1"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -270,6 +272,18 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(500)
 		_, _ = w.Write([]byte(`{"data":null,"message":"injected failure"}`))
+		return
+	}
+	if strings.HasSuffix(p, "/vncwebsocket") && r.Method == http.MethodGet {
+		f.consoleEcho(w, r)
+		return
+	}
+	if r.Method == http.MethodPost && (strings.HasSuffix(p, "/vncproxy") || strings.HasSuffix(p, "/termproxy")) && user != f.TokenID {
+		if _, restricted := f.Restricted[user]; restricted {
+			write(w, 403, nil)
+			return
+		}
+		write(w, 200, map[string]any{"port": 5900, "ticket": "PVEVNC:fake:" + user, "user": user})
 		return
 	}
 	if r.Method != http.MethodGet {
@@ -545,4 +559,35 @@ func fakeRRD(path, timeframe string) []map[string]any {
 		out = append(out, m)
 	}
 	return out
+}
+
+// consoleEcho accepts a websocket upgrade (handshake only) and echoes raw bytes.
+func (f *Server) consoleEcho(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("vncticket") == "" || !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+		write(w, 400, nil)
+		return
+	}
+	hj, ok := w.(http.Hijacker)
+	if !ok {
+		write(w, 500, nil)
+		return
+	}
+	h := sha1.Sum([]byte(r.Header.Get("Sec-WebSocket-Key") + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
+	conn, rw, err := hj.Hijack()
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	fmt.Fprintf(rw, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n", base64.StdEncoding.EncodeToString(h[:]))
+	_ = rw.Flush()
+	buf := make([]byte, 4096)
+	for {
+		n, err := rw.Read(buf)
+		if n > 0 {
+			_, _ = conn.Write(buf[:n])
+		}
+		if err != nil {
+			return
+		}
+	}
 }
