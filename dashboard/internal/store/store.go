@@ -184,6 +184,8 @@ var migrations = []string{
 	// 3: correct statuses of pre-v2 audit rows; sessions remember their home cluster
 	`UPDATE audit SET status = CASE WHEN ok THEN 'ok' ELSE 'error' END WHERE updated = 0;
 	 ALTER TABLE sessions ADD COLUMN home TEXT NOT NULL DEFAULT '';`,
+	// 4: instance settings (assistant provider, host access key); values sealed
+	`CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated INTEGER NOT NULL);`,
 }
 
 func (s *Store) migrate() error {
@@ -646,4 +648,27 @@ func (s *Store) InterruptRunning() (int64, error) {
 		n++
 	}
 	return n, nil
+}
+
+// GetSetting returns a decrypted setting.
+func (s *Store) GetSetting(key string) (string, error) {
+	var v string
+	err := s.db.QueryRow(`SELECT value FROM settings WHERE key=?`, key).Scan(&v)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", err
+	}
+	return s.unseal(v)
+}
+
+// PutSetting stores a setting encrypted at rest.
+func (s *Store) PutSetting(key, value string) error {
+	sealed, err := s.seal(value)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`INSERT INTO settings(key,value,updated) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated=excluded.updated`, key, sealed, time.Now().Unix())
+	return err
 }

@@ -154,6 +154,33 @@ type auditEntry struct {
 	Results   []plan.Result
 }
 
+// runPlanID runs an existing plan and waits for it to finish.
+func (c *client) runPlanID(id string) auditEntry {
+	c.h.t.Helper()
+	var run struct{ AuditID int64 }
+	if code := c.do("POST", "/api/plans/"+id+"/run", map[string]any{}, &run); code != 202 {
+		c.h.t.Fatalf("run: %d", code)
+	}
+	return c.waitAudit(run.AuditID)
+}
+
+func (c *client) waitAudit(id int64) auditEntry {
+	c.h.t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		var es []auditEntry
+		c.do("GET", "/api/audit?limit=50", nil, &es)
+		for _, e := range es {
+			if e.ID == id && e.Status != "running" {
+				return e
+			}
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+	c.h.t.Fatal("change did not finish")
+	return auditEntry{}
+}
+
 // runAndWait builds and runs a plan and waits for its audit entry to finish.
 func (c *client) runAndWait(action string, params any, confirm string) auditEntry {
 	c.h.t.Helper()
