@@ -6,9 +6,13 @@ import { AppProvider } from './state/app';
 import { Layout } from './components/Layout';
 import { ErrorBox } from './components/ui';
 import { Login, Setup } from './pages/Auth';
-import { Fleet } from './pages/Fleet';
+import { Overview } from './pages/Overview';
 import { Guests } from './pages/Guests';
-import { Operations } from './pages/Operations';
+import { GuestDetail } from './pages/GuestDetail';
+import { NodeDetail } from './pages/NodeDetail';
+import { StorageDetail } from './pages/StorageDetail';
+import { Activity, Nodes, StorageList } from './pages/Lists';
+import { Protection } from './pages/Protection';
 import { Audit } from './pages/Audit';
 import { Clusters } from './pages/Clusters';
 import { SESSION_ENDED } from './lib/auth';
@@ -35,8 +39,8 @@ export function App({ api }: { api: Api }) {
 
   useEffect(() => { void start(); }, [start]);
 
-  // Any 401 outside login (HttpApi reports them centrally) ends the session: back to login.
-  // Only acts while logged in, so the boot-time /api/me probe stays quiet.
+  // Any 401 "unauthenticated" outside login (HttpApi reports them centrally) ends the session:
+  // back to login. Only acts while logged in, so the boot-time /api/me probe stays quiet.
   useEffect(() => {
     api.onUnauthorized(() => setBoot((b) => (b.phase === 'ready' ? { phase: 'login', notice: SESSION_ENDED } : b)));
     return () => api.onUnauthorized(null);
@@ -46,11 +50,11 @@ export function App({ api }: { api: Api }) {
 
   switch (boot.phase) {
     case 'loading':
-      return <div className="boot muted">Connecting to galley…</div>;
+      return <div className="boot" role="status">Connecting to galley</div>;
     case 'error':
       return (
         <div className="boot">
-          <ErrorBox message={`Cannot reach the galley API: ${boot.message}`} />
+          <ErrorBox message={`galley's API did not answer: ${boot.message}. Check that the galley service is running, then retry.`} />
           <button type="button" className="btn" onClick={() => void start()}>Retry</button>
         </div>
       );
@@ -64,9 +68,16 @@ export function App({ api }: { api: Api }) {
           <AppProvider api={api} me={boot.me} setMe={setMe}>
             <Layout>
               <Routes>
-                <Route path="/" element={<Fleet />} />
+                <Route path="/" element={<Overview />} />
                 <Route path="/guests" element={<Guests />} />
-                <Route path="/operations" element={<Operations />} />
+                <Route path="/guests/:cluster/:vmid" element={<GuestDetail />} />
+                <Route path="/nodes" element={<Nodes />} />
+                <Route path="/nodes/:cluster/:node" element={<NodeDetail />} />
+                <Route path="/storage" element={<StorageList />} />
+                <Route path="/storage/:cluster/:storage" element={<StorageDetail />} />
+                <Route path="/protection" element={<Protection />} />
+                <Route path="/activity" element={<Activity />} />
+                <Route path="/operations" element={<Navigate to="/activity" replace />} />
                 <Route path="/audit" element={<Audit />} />
                 <Route path="/clusters" element={<Clusters />} />
                 <Route path="*" element={<Navigate to="/" replace />} />

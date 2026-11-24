@@ -1,7 +1,8 @@
 import type {
   SetupInfo,
   AddClusterRequest, Api, AuditEntry, Cluster, ClusterLoginRequest, EventHandlers, Fleet, Guest,
-  GuestFilter, LoginRequest, Me, Plan, PlanRequest, Probe, RunResult, Task,
+  GuestFilter, LoginRequest, Me, MetricQuery, MetricSeries, Plan, PlanRequest, Probe, Realm, RunResult, Task,
+  UpdateClusterRequest,
 } from './types';
 
 export class ApiError extends Error {
@@ -74,8 +75,12 @@ export class HttpApi implements Api {
 
   private keepCsrf(me: Me): Me { this.csrf = me.csrf; return me; }
 
-  health() { return this.req<{ ok: boolean; version: string }>('GET', '/health'); }
+  health() { return this.req<{ ok: boolean; version?: string; status?: string }>('GET', '/health'); }
   setup() { return this.req<SetupInfo>('GET', '/setup'); }
+  async realms(clusterId: string) {
+    const r = await this.req<Realm[] | null>('GET', `/realms${qs({ cluster: clusterId })}`, undefined, { noUnauthorized: true });
+    return Array.isArray(r) ? r : [];
+  }
   probe(endpoints: string[], setupToken?: string) {
     return this.req<{ endpoints: Probe[] }>('POST', '/clusters/probe', { endpoints }, { headers: setupHeader(setupToken) });
   }
@@ -83,25 +88,47 @@ export class HttpApi implements Api {
     return this.req<Cluster>('POST', '/clusters', r, { headers: setupHeader(setupToken) });
   }
   clusters() { return this.req<Cluster[]>('GET', '/clusters'); }
+  updateCluster(id: string, r: UpdateClusterRequest) { return this.req<Cluster>('PUT', `/clusters/${encodeURIComponent(id)}`, r); }
   removeCluster(id: string) { return this.req<void>('DELETE', `/clusters/${encodeURIComponent(id)}`); }
   async login(r: LoginRequest) { return this.keepCsrf(await this.req<Me>('POST', '/login', r, { noUnauthorized: true })); }
+  openidLogin(clusterId: string, realm: string) {
+    return this.req<{ authUrl: string }>('POST', '/login/openid', { clusterId, realm }, { noUnauthorized: true });
+  }
   async clusterLogin(id: string, r: ClusterLoginRequest) {
     // A 401 here means wrong credentials for that cluster, not that the galley session ended.
     return this.keepCsrf(await this.req<Me>('POST', `/clusters/${encodeURIComponent(id)}/login`, r, { noUnauthorized: true }));
   }
   async logout() { await this.req<void>('POST', '/logout'); this.csrf = ''; }
   async me() { return this.keepCsrf(await this.req<Me>('GET', '/me')); }
+  getPref<T>(key: string) { return this.req<T>('GET', `/prefs/${encodeURIComponent(key)}`); }
+  async putPref<T>(key: string, value: T) { await this.req<void>('PUT', `/prefs/${encodeURIComponent(key)}`, value); }
   fleet() { return this.req<Fleet>('GET', '/fleet'); }
   guests(f: GuestFilter = {}) { return this.req<Guest[]>('GET', `/guests${qs({ ...f })}`); }
   tasks(f: { cluster?: string; limit?: number } = {}) { return this.req<Task[]>('GET', `/tasks${qs({ ...f })}`); }
   targets(clusterId: string, node: string) {
     return this.req<string[]>('GET', `/nodes/${encodeURIComponent(clusterId)}/${encodeURIComponent(node)}/targets`);
   }
+  async metrics(q: MetricQuery) {
+    // A failed query answers 400 with the MetricSeries body (error set): return it as data.
+    try {
+      return await this.req<MetricSeries>('GET', `/metrics${qs({ cluster: q.cluster, kind: q.kind, id: q.id, timeframe: q.timeframe, cf: q.cf })}`);
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 400) return { query: q, t: [], series: {}, error: e.message };
+      throw e;
+    }
+  }
+  metricsBatch(queries: MetricQuery[]) { return this.req<MetricSeries[]>('POST', '/metrics', { queries }); }
+  async pve<T>(clusterId: string, path: string, query: Record<string, string | number | undefined> = {}) {
+    const p = path.replace(/^\/+/, '').split('/').map(encodeURIComponent).join('/');
+    const r = await this.req<{ data: T }>('GET', `/clusters/${encodeURIComponent(clusterId)}/pve/${p}${qs(query)}`);
+    return r.data;
+  }
   createPlan(r: PlanRequest) { return this.req<Plan>('POST', '/plans', r); }
   async runPlan(id: string, confirm?: string): Promise<RunResult> {
     const r = await this.req<Partial<RunResult> & { auditId: string }>('POST', `/plans/${encodeURIComponent(id)}/run`, confirm ? { confirm } : {});
     return { ...r, results: Array.isArray(r.results) ? r.results : [] };
   }
+  discardPlan(id: string) { return this.req<void>('DELETE', `/plans/${encodeURIComponent(id)}`); }
   audit(limit = 100) { return this.req<AuditEntry[]>('GET', `/audit${qs({ limit })}`); }
 
   /**

@@ -23,7 +23,7 @@ describe('MockApi (demo backend honours the api.md contract)', () => {
     const run = await api.runPlan(plan.id);
     expect(run.status).toBe('running'); // async 202 shape
     const final = await api.whenSettled(run.auditId);
-    expect(final.status).toBe('done');
+    expect(final.status).toBe('ok');
     expect(final.results.every((r) => r.ok && r.status === 'ok')).toBe(true);
     expect((await api.fleet()).findings.some((x) => x.id === fix.id)).toBe(false);
     expect((await api.audit())[0].cli).toEqual(plan.steps.map((s) => s.cli));
@@ -53,7 +53,7 @@ describe('MockApi (demo backend honours the api.md contract)', () => {
     stop();
     const mine = frames.filter((f) => f.id === run.auditId);
     expect(mine[0].results[0].status).toBe('running');
-    expect(mine.at(-1)!.status).toBe('done');
+    expect(mine.at(-1)!.status).toBe('ok');
     expect(mine.at(-1)!.results.map((r) => r.status)).toEqual(['ok', 'ok']);
   });
 
@@ -69,8 +69,29 @@ describe('MockApi (demo backend honours the api.md contract)', () => {
     const api = new MockApi({ stepDelayMs: 0 });
     await api.login({ clusterId: 'pve-lab', username: 'root', realm: 'pam', password: 'x' });
     await expect(api.createPlan({ action: 'guest.start', clusterId: 'edge-01', params: { targets: [{ vmid: 200, node: 'edge1', type: 'lxc' }] } }))
-      .rejects.toMatchObject({ code: 'cluster_not_authed' });
-    await api.clusterLogin('edge-01', { username: 'root', realm: 'pam', password: 'x' });
+      .rejects.toMatchObject({ code: 'cluster_login_required' });
+    await api.clusterLogin('edge-01', { password: 'x' });
     expect((await api.createPlan({ action: 'guest.reboot', clusterId: 'edge-01', params: { targets: [{ vmid: 200, node: 'edge1', type: 'lxc' }] } })).steps[0].cli).toBe('pct reboot 200');
+  });
+
+  it('serves metrics with gaps as null, prefs with 404 until saved, realms and pass-through reads', async () => {
+    const api = new MockApi({ stepDelayMs: 0 });
+    await api.login({ clusterId: 'pve-lab', username: 'root', realm: 'pam', password: 'x' });
+    const m = await api.metrics({ cluster: 'pve-lab', kind: 'node', id: 'pve3', timeframe: 'day' });
+    expect(m.t).toHaveLength(70);
+    expect(m.series.cpu!.some((v) => v === null)).toBe(true);
+    const [a, b] = await api.metricsBatch([
+      { cluster: 'pve-lab', kind: 'cluster', id: '', timeframe: 'hour' },
+      { cluster: 'pve-lab', kind: 'guest', id: '424242', timeframe: 'hour' },
+    ]);
+    expect(a.series.netIn).toHaveLength(70);
+    expect(b.error).toBe('no such guest');
+    await expect(api.getPref('dashboard')).rejects.toMatchObject({ status: 404 });
+    await api.putPref('dashboard', { version: 1 });
+    expect(await api.getPref('dashboard')).toEqual({ version: 1 });
+    expect((await api.realms('pve-lab')).some((r) => r.type === 'openid')).toBe(true);
+    const cfg = await api.pve<Record<string, string>>('pve-lab', 'nodes/pve1/qemu/300/config');
+    expect(cfg.hostpci0).toBe('mapping=gpu-a2-0,pcie=1');
+    await expect(api.pve('edge-01', 'nodes/edge1/status')).rejects.toMatchObject({ status: 409, code: 'cluster_login_required' });
   });
 });

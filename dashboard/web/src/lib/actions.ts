@@ -54,14 +54,14 @@ export function guestStep(action: GuestAction, t: GuestTarget, p: GuestParams = 
       if (t.type === 'qemu') {
         const online = running ?? p.online !== false;
         return {
-          description: `Migrate VM ${t.vmid} ${t.node} → ${target}${online ? ' (live)' : ''}`,
+          description: `Migrate VM ${t.vmid} from ${t.node} to ${target}${online ? ' (live)' : ''}`,
           method: 'POST', path: `${base(t)}/migrate`, body: { target, online: online ? 1 : 0 },
           cli: `qm migrate ${t.vmid} ${target}${online ? ' --online' : ''}`,
         };
       }
       const restart = running ?? true;
       return {
-        description: `Migrate CT ${t.vmid} ${t.node} → ${target}${restart ? ' (restart)' : ''}`,
+        description: `Migrate CT ${t.vmid} from ${t.node} to ${target}${restart ? ' (restart)' : ''}`,
         method: 'POST', path: `${base(t)}/migrate`, body: { target, ...(restart ? { restart: 1 } : {}) },
         cli: `pct migrate ${t.vmid} ${target}${restart ? ' --restart' : ''}`,
       };
