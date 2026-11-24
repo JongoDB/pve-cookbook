@@ -34,6 +34,71 @@ type Param struct {
 	Items       *Param            `json:"items,omitempty"`
 	Properties  map[string]*Param `json:"properties,omitempty"`
 	VerboseDesc string            `json:"verbose_description,omitempty"`
+
+	// Composite schemas (PVE 9: HA rules, SDN fabrics). allOf parts are merged
+	// into Properties at parse time; a oneOf picks a variant by the value of
+	// TypeProperty (e.g. "type": "node-affinity"). Properties then holds the
+	// union of all variants (optional), and Variants each variant's own rules.
+	AllOf              []*Param          `json:"allOf,omitempty"`
+	OneOf              []*Param          `json:"oneOf,omitempty"`
+	TypeProperty       string            `json:"type-property,omitempty"`
+	TypePropertySchema *Param            `json:"type-property-schema,omitempty"`
+	InstanceType       string            `json:"instance-type,omitempty"`
+	Variants           map[string]*Param `json:"variants,omitempty"`
+	VariantKey         string            `json:"variantKey,omitempty"`
+}
+
+// flatten merges allOf parts and oneOf variants into p.Properties (see Param).
+func (p *Param) flatten() {
+	if p == nil {
+		return
+	}
+	merge := func(k string, v *Param) {
+		if p.Properties == nil {
+			p.Properties = map[string]*Param{}
+		}
+		if _, ok := p.Properties[k]; !ok {
+			p.Properties[k] = v
+		}
+	}
+	for _, part := range p.AllOf {
+		part.flatten()
+		for k, v := range part.Properties {
+			merge(k, v)
+		}
+		if part.VariantKey != "" {
+			p.VariantKey, p.Variants = part.VariantKey, part.Variants
+		}
+	}
+	p.AllOf = nil
+	if len(p.OneOf) > 0 && p.TypeProperty != "" {
+		p.VariantKey, p.Variants = p.TypeProperty, map[string]*Param{}
+		types := []string{}
+		for _, v := range p.OneOf {
+			v.flatten()
+			if v.InstanceType == "" {
+				continue
+			}
+			types = append(types, v.InstanceType)
+			p.Variants[v.InstanceType] = v
+			for k, prop := range v.Properties {
+				cp := *prop
+				cp.Optional = 1 // required only in its own variant
+				merge(k, &cp)
+			}
+		}
+		tp := p.TypePropertySchema
+		if tp == nil {
+			tp = &Param{Type: "string"}
+		}
+		cp := *tp
+		cp.Optional = 0
+		if len(cp.Enum) == 0 {
+			cp.Enum = types
+		}
+		merge(p.TypeProperty, &cp)
+	}
+	p.OneOf, p.TypePropertySchema = nil, nil
 }
 
 // Method is one HTTP method on a path.
@@ -131,6 +196,11 @@ func Parse(b []byte) (*Schema, error) {
 	s := &Schema{Roots: roots}
 	var walk func(n *Node)
 	walk = func(n *Node) {
+		for _, m := range n.Info {
+			if m != nil {
+				m.Parameters.flatten()
+			}
+		}
 		s.index = append(s.index, &indexed{node: n, segs: strings.Split(strings.Trim(n.Path, "/"), "/")})
 		for _, c := range n.Children {
 			walk(c)
@@ -244,6 +314,21 @@ func (s *Schema) Validate(method, path string, body map[string]string) (*Method,
 		props = m.Parameters.Properties
 	}
 	var problems []string
+	// A oneOf schema: the chosen variant decides which parameters exist and
+	// which are required.
+	if pm := m.Parameters; pm != nil && pm.VariantKey != "" {
+		if v := pm.Variants[body[pm.VariantKey]]; v != nil {
+			narrowed := map[string]*Param{}
+			for k, p := range props {
+				if vp, inVariant := v.Properties[k]; inVariant {
+					narrowed[k] = vp
+				} else if !variantOnly(pm, k) {
+					narrowed[k] = p // common to all variants (path vars, allOf parts)
+				}
+			}
+			props = narrowed
+		}
+	}
 	for k, v := range vars {
 		if p := props[k]; p != nil {
 			if msg := checkValue(p, v); msg != "" {
@@ -396,4 +481,17 @@ func Quote(v string) string {
 		return v
 	}
 	return "'" + strings.ReplaceAll(v, "'", `'\''`) + "'"
+}
+
+// variantOnly reports whether k is defined only by oneOf variants.
+func variantOnly(pm *Param, k string) bool {
+	if k == pm.VariantKey {
+		return false
+	}
+	for _, v := range pm.Variants {
+		if _, ok := v.Properties[k]; ok {
+			return true
+		}
+	}
+	return false
 }

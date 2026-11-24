@@ -94,3 +94,31 @@ func TestParseToleratesPVEQuirks(t *testing.T) {
 		t.Fatal("minimum given as a string was not enforced")
 	}
 }
+
+// PVE 9 describes HA rules with allOf + oneOf keyed on "type"; the chosen
+// variant decides which parameters exist and which are required.
+func TestCompositeSchema(t *testing.T) {
+	doc := `const apiSchema = [{"path":"/cluster","text":"cluster","leaf":0,"children":[{"path":"/cluster/ha/rules","text":"rules","leaf":1,
+	  "info":{"POST":{"method":"POST","parameters":{"allOf":[
+	    {"additionalProperties":0,"properties":{"rule":{"type":"string","optional":0}}},
+	    {"type-property":"type","type-property-schema":{"type":"string","enum":["node-affinity","resource-affinity"]},"oneOf":[
+	      {"instance-type":"node-affinity","properties":{"resources":{"type":"string"},"nodes":{"type":"string"},"strict":{"type":"boolean","optional":1}}},
+	      {"instance-type":"resource-affinity","properties":{"resources":{"type":"string"},"affinity":{"type":"string","enum":["positive","negative"]}}}]}]}}}}]}];`
+	s, err := schema.Parse([]byte(doc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok := map[string]string{"rule": "gpu", "type": "node-affinity", "resources": "vm:1", "nodes": "pve1", "strict": "1"}
+	if _, err := s.Validate("POST", "/cluster/ha/rules", ok); err != nil {
+		t.Fatalf("valid rule rejected: %v", err)
+	}
+	for _, bad := range []map[string]string{
+		{"rule": "gpu", "type": "node-affinity", "resources": "vm:1"},                                              // nodes required
+		{"rule": "gpu", "type": "resource-affinity", "resources": "vm:1", "affinity": "negative", "nodes": "pve1"}, // nodes not in this variant
+		{"rule": "gpu", "resources": "vm:1", "nodes": "pve1"},                                                      // type required
+	} {
+		if _, err := s.Validate("POST", "/cluster/ha/rules", bad); err == nil {
+			t.Errorf("accepted %v", bad)
+		}
+	}
+}
