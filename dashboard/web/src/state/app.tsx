@@ -131,8 +131,17 @@ export function AppProvider({ api, me, setMe, children }: { api: Api; me: Me; se
       .then((g) => { if (n === seq.current) { setGuests(g); setGuestsError(null); } })
       .catch((e) => { if (n === seq.current) setGuestsError(errMsg(e)); });
   }, [api]);
-  useEffect(() => { fetchGuests(true); }, [fetchGuests, lastAudit?.id, lastAudit?.status]);
-  useEffect(() => { fetchGuests(false); }, [fetchGuests, fleet?.updatedAt]);
+  // A finished change is announced before galley re-polls the cluster, so
+  // the first refetch can still see the old state: force one more refetch on
+  // the next cluster update after a change (e.g. a destroyed guest vanishes
+  // at once instead of after the refresh throttle).
+  const afterChange = useRef(false);
+  useEffect(() => { afterChange.current = true; fetchGuests(true); }, [fetchGuests, lastAudit?.id, lastAudit?.status]);
+  useEffect(() => {
+    const force = afterChange.current;
+    afterChange.current = false;
+    fetchGuests(force);
+  }, [fetchGuests, fleet?.updatedAt]);
   useEffect(() => {
     const onVis = () => { if (!hidden()) fetchGuests(false); };
     document.addEventListener('visibilitychange', onVis);

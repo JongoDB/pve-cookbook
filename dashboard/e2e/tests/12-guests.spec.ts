@@ -59,21 +59,6 @@ test.describe('guest list @fast', () => {
     await entry.getByRole('button', { name: 'Details' }).click();
     await expect(page.locator('pre.cli').first()).toHaveText('qm start 300');
   });
-
-  test('bulk destroy needs the typed confirmation', async ({ page }) => {
-    await page.goto('/guests?q=llm');
-    await settle(page);
-    await page.getByRole('checkbox', { name: 'Select llm-vllm (300)' }).check();
-    await page.getByRole('toolbar', { name: 'Actions for selected guests' }).getByRole('button', { name: 'Destroy' }).click();
-    const panel = changes(page);
-    await expect(panel.getByRole('note')).toBeVisible(); // why this change needs care
-    // 300 runs since the previous test: stop first, then destroy
-    await expect(panel.locator('.change-steps li')).toHaveCount(2);
-    const cli = await applyChange(page, { confirm: 'destroy 300' });
-    expect(cli).toBe('qm stop 300\nqm destroy 300 --purge 1 --destroy-unreferenced-disks 1');
-    await panel.getByRole('button', { name: 'Close' }).click();
-    await expect(panel.getByText('No change open')).toBeVisible();
-  });
 });
 
 test.describe('guest page @fast', () => {

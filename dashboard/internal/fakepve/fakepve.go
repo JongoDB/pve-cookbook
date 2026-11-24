@@ -164,6 +164,17 @@ func (f *Server) guestLocked(vmid string) map[string]any {
 	return nil
 }
 
+// removeGuestLocked deletes a guest, as a finished destroy task does.
+func (f *Server) removeGuestLocked(vmid string) {
+	out := f.Guests[:0]
+	for _, g := range f.Guests {
+		if fmt.Sprint(g["vmid"]) != vmid {
+			out = append(out, g)
+		}
+	}
+	f.Guests = out
+}
+
 // Endpoint returns this server as a pinned galley endpoint.
 func (f *Server) Endpoint() pve.Endpoint {
 	return pve.Endpoint{Host: strings.TrimPrefix(f.URL, "https://"), Fingerprint: pve.Fingerprint(f.Certificate())}
@@ -411,6 +422,10 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(500)
 				_, _ = w.Write([]byte(`{"data":null,"message":"VM ` + parts[3] + ` is running - destroy failed"}`))
 				return
+			}
+			if g != nil && len(parts) == 4 && r.Method == http.MethodDelete {
+				vmid := parts[3]
+				effect = func() { f.removeGuestLocked(vmid) } // runs under f.mu (settle)
 			}
 			if g != nil && len(parts) == 6 && parts[4] == "status" {
 				st := map[string]string{"start": "running", "stop": "stopped", "shutdown": "stopped"}[parts[5]]

@@ -1,6 +1,7 @@
 import type { Page, WebSocket } from '@playwright/test';
 import { test, expect, settle } from '../lib/fixtures';
 import { CLUSTER } from '../lib/env';
+import { Session } from '../lib/api';
 
 // Consoles: galley asks PVE for a ticket, then proxies the websocket. The
 // fake cluster answers with a node shell (termproxy), a container login and
@@ -55,6 +56,16 @@ test.describe('consoles @fast', () => {
   });
 
   test('a stopped guest has no console link', async ({ page }) => {
+    // 300 is the demo's stopped VM, but earlier specs start it: stop it through galley first
+    const s = await Session.login('root');
+    try {
+      const g = await s.get<{ status: string }[]>(`/api/guests?cluster=${CLUSTER}&q=llm-vllm`);
+      if (g[0]?.status === 'running') {
+        const p = await (await s.send('POST', '/api/plans', { action: 'guest.stop', clusterId: CLUSTER, params: { targets: [{ vmid: 300 }] } })).json() as { id: string };
+        await s.send('POST', `/api/plans/${p.id}/run`, { confirm: '' });
+        await expect.poll(async () => (await s.get<{ status: string }[]>(`/api/guests?cluster=${CLUSTER}&q=llm-vllm`))[0]?.status, { timeout: 10000 }).toBe('stopped');
+      }
+    } finally { await s.dispose(); }
     await page.goto(`/guests/${CLUSTER}/300`);
     await settle(page);
     const link = page.getByRole('link', { name: 'Console' });
