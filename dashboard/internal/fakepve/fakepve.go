@@ -34,7 +34,9 @@ type UserToken struct {
 	Privsep                   bool
 }
 
-type termTicket struct{ user, node string }
+// termTicket is a termproxy ticket: a node shell, or a container's console
+// when guest (the container's hostname) is set.
+type termTicket struct{ user, node, guest string }
 
 // Server is a fake cluster API endpoint.
 type Server struct {
@@ -328,7 +330,7 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if strings.HasSuffix(p, "/vncwebsocket") && r.Method == http.MethodGet {
-		if seg := strings.Split(strings.Trim(p, "/"), "/"); len(seg) == 3 && strings.HasPrefix(r.URL.Query().Get("vncticket"), "PVETERM:") {
+		if seg := strings.Split(strings.Trim(p, "/"), "/"); (len(seg) == 3 || len(seg) == 5) && strings.HasPrefix(r.URL.Query().Get("vncticket"), "PVETERM:") {
 			f.termSocket(w, r, seg[1], user)
 			return
 		}
@@ -352,6 +354,22 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 			f.termTickets[t] = termTicket{user: user, node: seg[1]}
 			f.mu.Unlock()
 			write(w, 200, map[string]any{"port": 5900 + f.tokenSeq, "ticket": t, "user": user, "upid": "UPID:" + seg[1] + ":termproxy"})
+			return
+		}
+		if len(seg) == 5 && seg[2] == "lxc" && seg[4] == "termproxy" { // container console
+			f.mu.Lock()
+			g := f.guestLocked(seg[3])
+			if g == nil || g["node"] != seg[1] {
+				f.mu.Unlock()
+				write(w, 500, nil)
+				return
+			}
+			f.tokenSeq++
+			t := fmt.Sprintf("PVETERM:%d:%s", f.tokenSeq, user)
+			f.termTickets[t] = termTicket{user: user, node: seg[1], guest: fmt.Sprint(g["name"])}
+			port := 5900 + f.tokenSeq
+			f.mu.Unlock()
+			write(w, 200, map[string]any{"port": port, "ticket": t, "user": user, "upid": "UPID:" + seg[1] + ":vncproxy"})
 			return
 		}
 		write(w, 200, map[string]any{"port": 5900, "ticket": "PVEVNC:fake:" + user, "user": user})
@@ -704,9 +722,16 @@ func fakeRRD(path, timeframe string) []map[string]any {
 }
 
 // consoleEcho accepts a websocket upgrade (handshake only) and echoes raw bytes.
+// A client that asks for the "binary" websocket subprotocol (noVNC in a
+// browser, like with real PVE) gets a framed websocket and a minimal VNC
+// server instead (see vncServer).
 func (f *Server) consoleEcho(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("vncticket") == "" || !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
 		write(w, 400, nil)
+		return
+	}
+	if strings.Contains(r.Header.Get("Sec-WebSocket-Protocol"), "binary") {
+		f.vncServer(w, r)
 		return
 	}
 	hj, ok := w.(http.Hijacker)

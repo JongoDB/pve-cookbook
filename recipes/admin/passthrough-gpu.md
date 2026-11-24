@@ -1,7 +1,7 @@
 ---
 id: admin/passthrough-gpu
 title: Host resource passthrough & virtualization for GPU/LLM servers
-tested: partial — steps 1–4 (IOMMU, vfio-pci by address, PCI mapping, q35/OVMF VM with mapping) on PVE 9.2.32, kernel 7.0.14, 2026-11-24
+tested: "PVE 9.2 · kernel 7.0 · 2026-11 (steps 1–4 verified: vfio-pci by address, mapping, q35/OVMF VM boots with the GPU; LXC sharing and HA rule untested)"
 risk: high
 runs_on: node
 ---
