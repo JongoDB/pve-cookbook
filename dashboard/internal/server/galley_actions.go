@@ -151,7 +151,11 @@ func (s *Server) buildGalleyPlan(ctx context.Context, ss *session, req plan.Requ
 		Summary: "Changes galley's own configuration; nothing on the cluster changes.",
 		Steps:   []plan.Step{{Description: desc, Method: plan.MethodGalley, Path: req.Action, Body: body, CLI: desc}}}
 	if ga.destructive {
-		p.ConfirmText = "remove " + req.ClusterID
+		name := req.ClusterID
+		if c, err := s.store.Cluster(req.ClusterID); err == nil {
+			name = c.Name
+		}
+		p.ConfirmText = "remove " + name // same phrase as the Clusters page
 	}
 	if err := s.plans.Register(ss.user, p); err != nil {
 		return nil, err

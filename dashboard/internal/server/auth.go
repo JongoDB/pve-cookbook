@@ -557,11 +557,11 @@ func (s *Server) meView(ctx context.Context, ss *session) map[string]any {
 	for _, c := range cs {
 		// loginExpired: this session had a login here that lapsed (e.g. its
 		// ticket expired while the session was idle): ask for the password again.
-		e := map[string]any{"id": c.ID, "name": c.Name, "authed": have[c.ID], "admin": false,
+		e := map[string]any{"id": c.ID, "name": c.Name, "authed": have[c.ID], "admin": false, "hostAdmin": false,
 			"loginExpired": stored[c.ID] && !have[c.ID], "credentialMode": defaultMode(c.CredentialMode)}
 		if have[c.ID] {
 			if v := s.view(ctx, ss, c.ID); v != nil {
-				e["admin"] = v.sysModify
+				e["admin"], e["hostAdmin"] = v.sysModify, hostAdmin(v)
 			} else if _, err := s.cred(ss, c.ID); err != nil {
 				// PVE refused the login just now (expired, or revoked in PVE)
 				e["authed"], e["loginExpired"] = false, true

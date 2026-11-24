@@ -17,10 +17,22 @@
 #   --ssh-key FILE      authorize this public key for root in the container
 #   --upgrade           replace the binary in the existing galley CT --id (on this
 #                       node) and restart the service; creates nothing
+#   --args "FLAGS"      extra galley flags, written to /etc/default/galley inside the
+#                       CT (works with --upgrade too), e.g.
+#                       --args "--public-url https://galley.example --admin pve-lab:root@pam"
 set -Eeuo pipefail
 
+# write_args ID: store extra galley flags in /etc/default/galley inside the CT
+write_args() {
+  local f
+  f=$(mktemp)
+  printf 'GALLEY_ARGS=%s\n' "$ARGS" >"$f"
+  pct push "$1" "$f" /etc/default/galley --perms 0644
+  rm -f "$f"
+}
+
 REPO="JongoDB/pve-cookbook"
-ID="" STORAGE="" BRIDGE="vmbr0" IP="dhcp" GW="" DNS="" HOST="galley" BIN="" VER="latest" TOKEN=0 KEY="" UPGRADE=0
+ID="" STORAGE="" BRIDGE="vmbr0" IP="dhcp" GW="" DNS="" HOST="galley" BIN="" VER="latest" TOKEN=0 KEY="" UPGRADE=0 ARGS="" ARGS_SET=0
 die() { echo "error: $*" >&2; exit 1; }
 need() { [[ $# -ge 2 && -n "$2" ]] || die "$1 needs a value"; }
 while (($#)); do case "$1" in
@@ -30,6 +42,7 @@ while (($#)); do case "$1" in
   --hostname) need "$@"; HOST="$2"; shift 2 ;; --binary) need "$@"; BIN="$2"; shift 2 ;;
   --version) need "$@"; VER="$2"; shift 2 ;; --ssh-key) need "$@"; KEY="$2"; shift 2 ;;
   --create-token) TOKEN=1; shift ;; --upgrade) UPGRADE=1; shift ;;
+  --args) [[ $# -ge 2 ]] || die "--args needs a value"; ARGS="$2"; ARGS_SET=1; shift 2 ;;
   -h|--help) sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
   *) die "unknown option $1" ;; esac; done
 
@@ -77,10 +90,16 @@ if ((UPGRADE)); then
   OLD="$(pct exec "$ID" -- /usr/local/bin/galley --version 2>&1 || echo unknown)"
   echo ">> pushing new binary to CT $ID"
   pct push "$ID" "$BIN" /usr/local/bin/galley.new --perms 0755
+  if ((ARGS_SET)); then write_args "$ID"; fi
   pct exec "$ID" -- bash -se <<'IN'
 set -e
 /usr/local/bin/galley.new --version >/dev/null || { rm -f /usr/local/bin/galley.new; echo "new binary does not run" >&2; exit 1; }
 mv -f /usr/local/bin/galley.new /usr/local/bin/galley
+# units from older installers lack the flags file: add it
+if ! grep -q '^EnvironmentFile=-/etc/default/galley' /etc/systemd/system/galley.service; then
+  sed -i 's#^ExecStart=/usr/local/bin/galley --listen :8443 --data /var/lib/galley$#EnvironmentFile=-/etc/default/galley\nExecStart=/usr/local/bin/galley --listen :8443 --data /var/lib/galley $GALLEY_ARGS#' /etc/systemd/system/galley.service
+  systemctl daemon-reload
+fi
 systemctl restart galley
 IN
   NEW="$(pct exec "$ID" -- /usr/local/bin/galley --version 2>&1 || echo unknown)"
@@ -142,7 +161,8 @@ After=network-online.target
 Wants=network-online.target
 [Service]
 User=galley
-ExecStart=/usr/local/bin/galley --listen :8443 --data /var/lib/galley
+EnvironmentFile=-/etc/default/galley
+ExecStart=/usr/local/bin/galley --listen :8443 --data /var/lib/galley $GALLEY_ARGS
 Restart=on-failure
 NoNewPrivileges=yes
 ProtectSystem=strict
@@ -156,6 +176,10 @@ U
 systemctl daemon-reload
 systemctl enable -q --now galley
 IN
+if ((ARGS_SET)); then
+  write_args "$ID"
+  pct exec "$ID" -- systemctl restart galley
+fi
 
 for _ in $(seq 20); do pct exec "$ID" -- test -f /var/lib/galley/tls.crt && break; sleep 1; done
 SETUP=""

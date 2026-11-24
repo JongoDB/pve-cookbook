@@ -2,7 +2,7 @@
 
 > Status: **MVP** — fleet overview, guest inventory with bulk actions, ⌘K command palette,
 > plan pane with CLI equivalents, operations/task log, audit log, multi-cluster
-> registration with TLS pinning. Sections marked `v1` in the UI are next.
+> registration with TLS pinning, a built-in assistant, an MCP server for AI agents, and an in-app user guide (Help).
 
 galley is a single, self-hosted web app (one Go binary in a small LXC) for running one or
 many Proxmox VE clusters. It does **not** replace the PVE GUI or
@@ -20,7 +20,7 @@ detection, and safe bulk operations. Deep, rarely used settings link out to the 
    `pvesh`/`qm`/`pct` command, require typed confirmation when destructive, and are written
    to a copyable audit log. The admin always learns the CLI and can reproduce the action.
 4. **API-first.** The UI uses the same documented REST API ([docs/api.md](docs/api.md)) that
-   scripts use. An MCP server for AI agents is planned.
+   scripts use. AI agents can drive galley directly over MCP (`/mcp`, or `galley mcp` over stdio) with scoped agent tokens — see [docs/user/agents-and-mcp.md](docs/user/agents-and-mcp.md).
 5. **Light.** No embedded time-series database. Live state comes from the PVE API (polled about every 5 s
    per cluster, pushed to browsers via SSE). Long-term metrics are handled by the monitoring
    recipes.
@@ -71,7 +71,9 @@ browser ──HTTPS/SSE──► galley (Go, SQLite) ──HTTPS :8006──► 
 - Credentials: a read-only `PVEAuditor` service token per cluster for the shared cache, and each user's own PVE login (a ticket, or optionally a short-lived personal API token) for everything shown to and done by that user. Stored logins are encrypted with a key that only exists in the user's browser cookie and in memory while they are active, so a stolen database or backup reveals nothing usable; idle logins lapse. Host commands run through PVE's own node terminal as the user by default — galley holds no root credential. See [docs/security.md](docs/security.md).
 - SQLite (versioned migrations): cluster registry, pinned fingerprints, sessions, audit log, per-user preferences. Back up `/var/lib/galley` as a whole: `secret.key` decrypts the stored secrets.
 
-## v1 features
+## Features and roadmap
+
+The user guide ([docs/user](docs/user), also the **Help** page in galley) describes what ships today; this list includes planned items.
 
 ### Fleet and health
 
@@ -89,8 +91,8 @@ browser ──HTTPS/SSE──► galley (Go, SQLite) ──HTTPS :8006──► 
   - full PCIe passthrough to VMs via cluster-wide **resource mappings** (`hostpci0: mapping=…`), with checks for q35/OVMF and ballooning
   - **shared GPU for LXCs** (`devN: /dev/dri/renderD*`, NVIDIA device nodes) so several inference containers can share one card
   - vGPU / SR-IOV / mediated devices where the hardware and licence allow it (shown as capabilities, never assumed)
-  - placement that respects reality: a guest using a mapped device can only run on nodes that have it, and galley creates the matching HA node-affinity rule instead of silently allowing a migration that would fail
-  - **"LLM server" preset:** pick a GPU, model size and engine (Ollama / vLLM / llama.cpp). galley shows VRAM fit, then builds the VM (passthrough) or LXC (shared GPU) and installs the engine
+  - placement that respects reality: a guest using a mapped device can only run on nodes that have it, (planned: galley creating the matching HA node-affinity rule; today the user guide lists the rule to add)
+  - **"LLM server" preset:** pick a GPU, model size and engine (Ollama / vLLM / llama.cpp). galley sets up the VM (passthrough) or LXC (shared GPU) hardware for it (planned: VRAM fit and installing the engine)
 
 ### Identity and access
 

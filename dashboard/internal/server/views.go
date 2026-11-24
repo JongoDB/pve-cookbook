@@ -498,8 +498,8 @@ func (s *Server) listClusters(w http.ResponseWriter, r *http.Request, ss *sessio
 // certificate renewal) or toggles login sharing. Requires Sys.Modify on / there.
 func (s *Server) updateCluster(w http.ResponseWriter, r *http.Request, ss *session) {
 	id := r.PathValue("id")
-	if !s.clusterAdmin(r.Context(), ss, id) {
-		apiError(w, 403, "forbidden", "requires Sys.Modify on / in this cluster")
+	if !s.clusterAdmin(r.Context(), ss, id) && !s.galleyAdmin(r.Context(), ss) {
+		apiError(w, 403, "forbidden", "requires Sys.Modify on / in this cluster, or a galley admin")
 		return
 	}
 	c, err := s.store.Cluster(id)
