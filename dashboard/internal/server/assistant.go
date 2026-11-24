@@ -378,11 +378,10 @@ func (s *Server) runTool(ctx context.Context, ss *session, call assistant.ToolCa
 			return fail(errors.New("the user is not logged in to this cluster"))
 		}
 		params, _ := json.Marshal(map[string]any{"title": in.Title, "summary": in.Summary, "calls": in.Calls})
-		p, err := s.plans.Build(ctx, ss.user, plan.Request{Action: "api.call", ClusterID: in.Cluster, Params: params}, func(id int) bool { return v.guests[id] }, cl)
+		p, err := s.plans.Build(draftCtx(ctx, ss), planOwner(ss), plan.Request{Action: "api.call", ClusterID: in.Cluster, Params: params}, func(id int) bool { return v.guests[id] }, cl)
 		if err != nil {
 			return fail(err)
 		}
-		s.markDraft(ss, p)
 		onChange(p)
 		return out(map[string]any{"status": "drafted, waiting for the user to review and apply it in the Changes tab", "changeId": p.ID, "destructive": p.Destructive, "confirmText": p.ConfirmText, "commands": p.CLI()})
 	case "propose_host_command":
@@ -395,11 +394,10 @@ func (s *Server) runTool(ctx context.Context, ss *session, call assistant.ToolCa
 			return fail(errors.New("the user is not an administrator on this cluster, so host commands are unavailable; give the command for them to pass to an administrator"))
 		}
 		params, _ := json.Marshal(map[string]string{"node": in.Node, "command": in.Command, "reason": in.Reason})
-		p, err := s.plans.Build(ctx, ss.user, plan.Request{Action: "host.exec", ClusterID: in.Cluster, Params: params}, nil, nil)
+		p, err := s.plans.Build(draftCtx(ctx, ss), planOwner(ss), plan.Request{Action: "host.exec", ClusterID: in.Cluster, Params: params}, nil, nil)
 		if err != nil {
 			return fail(err)
 		}
-		s.markDraft(ss, p)
 		onChange(p)
 		return out(map[string]any{"status": "drafted, waiting for the user to review and apply it", "changeId": p.ID, "confirmText": p.ConfirmText})
 	}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"time"
@@ -19,14 +20,42 @@ import (
 // maxRun bounds a whole change; each PVE task is also bounded by plan.TaskTimeout.
 const maxRun = 4 * time.Hour
 
+// maxAgentPending caps one agent's waiting drafts, so an agent cannot fill
+// its user's queue.
+const maxAgentPending = 10
+
 func (s *Server) createPlan(w http.ResponseWriter, r *http.Request, ss *session) {
 	var req plan.Request
 	if err := readJSON(r, &req); err != nil {
 		apiError(w, 400, "bad_request", err.Error())
 		return
 	}
+	ctx := r.Context()
+	if ss.agent {
+		// galley administration is never available to agent tokens, not even
+		// wrapped in a change; and every agent change is a labelled draft.
+		if strings.HasPrefix(req.Action, "galley.") {
+			apiError(w, 403, "agent_scope", "agent tokens cannot change galley's own configuration")
+			return
+		}
+		n := 0
+		for _, q := range s.plans.List(planOwner(ss)) {
+			if q.Source == "agent:"+ss.agentName {
+				n++
+			}
+		}
+		if n >= maxAgentPending {
+			apiError(w, 429, "too_many_plans", "this agent already has "+strconv.Itoa(n)+" changes waiting for review")
+			return
+		}
+		ctx = draftCtx(ctx, ss)
+	}
 	if strings.HasPrefix(req.Action, "galley.") {
-		p, err := s.buildGalleyPlan(r.Context(), ss, req)
+		p, err := s.buildGalleyPlan(ctx, ss, req)
+		if errors.Is(err, plan.ErrTooMany) {
+			apiError(w, 429, "too_many_plans", err.Error())
+			return
+		}
 		if err != nil {
 			apiError(w, 400, "bad_plan", err.Error())
 			return
@@ -34,8 +63,8 @@ func (s *Server) createPlan(w http.ResponseWriter, r *http.Request, ss *session)
 		writeJSON(w, 201, p)
 		return
 	}
-	v := s.view(r.Context(), ss, req.ClusterID)
-	cl, _, cerr := s.userClient(r.Context(), ss, req.ClusterID)
+	v := s.view(ctx, ss, req.ClusterID)
+	cl, _, cerr := s.userClient(ctx, ss, req.ClusterID)
 	if v == nil || cerr != nil {
 		apiError(w, 409, "cluster_login_required", "log in to this cluster first")
 		return
@@ -44,7 +73,7 @@ func (s *Server) createPlan(w http.ResponseWriter, r *http.Request, ss *session)
 		apiError(w, 403, "forbidden", hostAdminMsg)
 		return
 	}
-	p, err := s.plans.Build(r.Context(), ss.user, req, func(id int) bool { return v.guests[id] }, cl)
+	p, err := s.plans.Build(ctx, planOwner(ss), req, func(id int) bool { return v.guests[id] }, cl)
 	switch {
 	case errors.Is(err, plan.ErrTooMany):
 		apiError(w, 429, "too_many_plans", err.Error())
@@ -57,7 +86,7 @@ func (s *Server) createPlan(w http.ResponseWriter, r *http.Request, ss *session)
 }
 
 func (s *Server) discardPlan(w http.ResponseWriter, r *http.Request, ss *session) {
-	s.plans.Discard(r.PathValue("id"), ss.user)
+	s.plans.Discard(r.PathValue("id"), planOwner(ss))
 	w.WriteHeader(204)
 }
 
@@ -73,7 +102,7 @@ func (s *Server) runPlan(w http.ResponseWriter, r *http.Request, ss *session) {
 		return
 	}
 	id := r.PathValue("id")
-	p, err := s.plans.Peek(id, ss.user)
+	p, err := s.plans.Peek(id, planOwner(ss))
 	if err != nil {
 		apiError(w, 404, "plan_not_found", err.Error())
 		return
@@ -91,7 +120,15 @@ func (s *Server) runPlan(w http.ResponseWriter, r *http.Request, ss *session) {
 			return
 		}
 	}
-	p, err = s.plans.Take(id, ss.user, req.Confirm)
+	if ss.agent {
+		for _, st := range p.Steps {
+			if st.Method == plan.MethodGalley {
+				apiError(w, 403, "agent_scope", "agent tokens cannot change galley's own configuration")
+				return
+			}
+		}
+	}
+	p, err = s.plans.Take(id, planOwner(ss), req.Confirm)
 	switch {
 	case errors.Is(err, plan.ErrNotFound):
 		apiError(w, 404, "plan_not_found", err.Error())
@@ -103,7 +140,11 @@ func (s *Server) runPlan(w http.ResponseWriter, r *http.Request, ss *session) {
 		apiError(w, 409, "plan_unavailable", err.Error())
 		return
 	}
-	entry, err := s.store.AddAudit(store.AuditEntry{User: ss.user, ActorUser: cr.PVEUser, ClusterID: p.ClusterID, Action: p.Action,
+	via := ""
+	if ss.agent {
+		via = "agent:" + ss.agentName
+	}
+	entry, err := s.store.AddAudit(store.AuditEntry{User: ss.user, ActorUser: cr.PVEUser, Via: via, ClusterID: p.ClusterID, Action: p.Action,
 		Title: p.Title, CLI: p.CLI(), Status: "running", Results: json.RawMessage("[]")})
 	if err != nil {
 		// Never change a cluster without an audit record.

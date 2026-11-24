@@ -177,7 +177,10 @@ func (s *Server) deleteAgentToken(w http.ResponseWriter, r *http.Request, ss *se
 				cancel()
 			}
 			if err != nil && m.TokenID != "" {
-				_ = s.store.AddTokenRevocation(store.TokenRevocation{ClusterID: m.ClusterID, PVEUser: m.PVEUser, TokenID: m.TokenID, Reason: "agent token revoked", Created: time.Now().Unix()})
+				// revocations are pruned SessionMax+1h after Created; date this one
+				// so it is kept until the (up to 90-day) PVE token has expired.
+				_ = s.store.AddTokenRevocation(store.TokenRevocation{ClusterID: m.ClusterID, PVEUser: m.PVEUser, TokenID: m.TokenID, Reason: "agent token revoked",
+					Created: s.revocationDate(m.Expires)})
 			}
 		}
 		s.securityEvent(ss.user, ss.home, "agent.revoke", "Revoked agent token "+a.Name, true, nil)

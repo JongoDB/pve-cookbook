@@ -167,6 +167,7 @@ func TestMigrationDropsOldSessionsAndKeepsSSHClusters(t *testing.T) {
 	}
 	// rewind to schema 4 with an old-style session and an SSH key for cluster "a"
 	for _, q := range []string{
+		`ALTER TABLE audit DROP COLUMN via`,
 		`ALTER TABLE sessions DROP COLUMN kind`,
 		`ALTER TABLE sessions DROP COLUMN name`,
 		`ALTER TABLE sessions DROP COLUMN scope`,

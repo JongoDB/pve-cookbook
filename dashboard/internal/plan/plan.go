@@ -77,8 +77,25 @@ const MethodGalley = "GALLEY"
 // GalleyRunner applies a galley-level step with the requesting user's rights.
 type GalleyRunner func(ctx context.Context, action string, body map[string]string) (string, error)
 
+type draftKey struct{}
+
+type draftLabel struct{ source, label string }
+
+// WithDraft marks plans built with ctx as drafted by an AI (source, label):
+// they are labelled and require typed confirmation from the moment they exist.
+func WithDraft(ctx context.Context, source, label string) context.Context {
+	return context.WithValue(ctx, draftKey{}, draftLabel{source, label})
+}
+
+func applyDraft(ctx context.Context, p *Plan) {
+	if d, ok := ctx.Value(draftKey{}).(draftLabel); ok {
+		MarkDraft(p, d.source, d.label)
+	}
+}
+
 // Register stores a plan built outside Build (galley-level actions) for user.
-func (m *Manager) Register(user string, p *Plan) error {
+func (m *Manager) Register(ctx context.Context, user string, p *Plan) error {
+	applyDraft(ctx, p)
 	p.ID, p.owner = newID(), user
 	p.CreatedAt = time.Now().Unix()
 	p.ExpiresAt = p.CreatedAt + int64(TTL.Seconds())
@@ -409,6 +426,7 @@ func (m *Manager) Build(ctx context.Context, user string, req Request, vis Visib
 	default:
 		return nil, fmt.Errorf("%w: unknown action %q", ErrBadRequest, req.Action)
 	}
+	applyDraft(ctx, p)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.gc()

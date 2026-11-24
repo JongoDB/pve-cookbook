@@ -159,6 +159,27 @@ We considered and rejected keeping SSH but encrypting the key under an active ho
 that design the key still exists, it is still root for anyone who gets it, and it decrypts whenever
 any admin is active. The node terminal removes the key altogether.
 
+### Agent tokens (MCP and API access without the browser)
+
+An agent token (`glly_…`) is an agent session: the secret that decrypts its stored credentials
+travels only in the token, exactly like a browser cookie's. At creation galley mints one PVE API
+token per cluster the user is logged in to (privilege-separation off: the user's own rights),
+expiring with the agent token (1–90 days, independent of browser sessions and logout). Revoking
+deletes those PVE tokens; if a cluster is unreachable the revocation is kept until the PVE token
+would have expired and retried at the user's next login.
+
+- Scopes: `read` (GET, metrics, user guide), `draft` (also drafts changes, at most 10 waiting per
+  agent), `apply` (also applies changes, still passing the typed confirmation).
+- Agent tokens never reach galley administration: clusters, settings, agent tokens, logins,
+  consoles, the in-app assistant — directly or as a `galley.*` change (refused when drafted and
+  when applied).
+- Every change an agent drafts — over MCP or REST — is labelled "Agent draft (<name>)" and needs
+  typed confirmation; the audit log records `via: agent:<name>` for changes an agent applied.
+- Bearer tokens are not sent by browsers on their own, so agent requests skip the CSRF check;
+  a token presented as a cookie, or a cookie presented as a token, is rejected.
+- Risk: a leaked `apply` token can do whatever its user can do in PVE until it expires or is
+  revoked. Prefer `draft`, short lifetimes, and a dedicated PVE user with narrow ACLs for agents.
+
 ### Unchanged controls
 
 - Every read shown to a user is filtered by that user's PVE permissions.

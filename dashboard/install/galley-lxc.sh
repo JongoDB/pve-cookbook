@@ -100,6 +100,8 @@ if ! grep -q '^EnvironmentFile=-/etc/default/galley' /etc/systemd/system/galley.
   sed -i 's#^ExecStart=/usr/local/bin/galley --listen :8443 --data /var/lib/galley$#EnvironmentFile=-/etc/default/galley\nExecStart=/usr/local/bin/galley --listen :8443 --data /var/lib/galley $GALLEY_ARGS#' /etc/systemd/system/galley.service
   systemctl daemon-reload
 fi
+grep -q '^EnvironmentFile=-/etc/default/galley' /etc/systemd/system/galley.service \
+  || echo "warning: galley.service was edited by hand; add EnvironmentFile=-/etc/default/galley and \$GALLEY_ARGS to ExecStart for --args to apply" >&2
 systemctl restart galley
 IN
   NEW="$(pct exec "$ID" -- /usr/local/bin/galley --version 2>&1 || echo unknown)"

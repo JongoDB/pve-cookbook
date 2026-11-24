@@ -177,3 +177,58 @@ func TestGalleyActionsGoThroughChanges(t *testing.T) {
 		t.Fatal("non-admin applied a galley setting")
 	}
 }
+
+// Review H1/M1/M2/M4: agents never reach galley administration through a
+// change, REST drafts are labelled, the audit names the agent, bad ids fail.
+func TestAgentBoundaries(t *testing.T) {
+	h := newHarness(t)
+	h.setup()
+	root := h.login("root@pam", "secret")
+	ap := agentToken(t, root, "apply")
+	if text, isErr := ap.tool("propose_action", map[string]any{"cluster": "pve-lab", "action": "galley.cluster.update", "params": map[string]any{"name": "agent-was-here"}}); !isErr {
+		t.Fatalf("agent drafted a galley setting: %s", text)
+	}
+	// a human-drafted galley change cannot be applied by an agent either
+	var p struct{ ID, ConfirmText string }
+	root.do("POST", "/api/plans", map[string]any{"action": "galley.cluster.update", "clusterId": "pve-lab", "params": map[string]any{"name": "x"}}, &p)
+	if text, isErr := ap.tool("apply_change", map[string]any{"changeId": p.ID}); !isErr {
+		t.Fatalf("agent applied a galley setting: %s", text)
+	}
+	if _, isErr := ap.tool("apply_change", map[string]any{"changeId": "a b"}); !isErr {
+		t.Fatal("malformed id accepted")
+	}
+	// REST draft by an agent is labelled and needs typed confirmation
+	req, _ := http.NewRequest("POST", h.ts.URL+"/api/plans", strings.NewReader(`{"action":"guest.start","clusterId":"pve-lab","params":{"targets":[{"vmid":300}]}}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+ap.token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var d struct{ ID, Source, ConfirmText string }
+	_ = json.NewDecoder(resp.Body).Decode(&d)
+	resp.Body.Close()
+	if d.Source != "agent:ci-apply" || d.ConfirmText == "" {
+		t.Fatalf("REST agent draft not labelled: %+v", d)
+	}
+	text, isErr := ap.tool("apply_change", map[string]any{"changeId": d.ID, "confirm": d.ConfirmText})
+	if isErr {
+		t.Fatal(text)
+	}
+	var res struct{ AuditID int64 }
+	_ = json.Unmarshal([]byte(text), &res)
+	var entries []struct {
+		ID  int64
+		Via string
+	}
+	root.do("GET", "/api/audit", nil, &entries)
+	found := false
+	for _, e := range entries {
+		if e.ID == res.AuditID && e.Via == "agent:ci-apply" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("audit does not name the agent: %+v", entries)
+	}
+}

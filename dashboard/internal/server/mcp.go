@@ -21,6 +21,8 @@ import (
 // Tools are the same registry the in-app assistant uses, filtered by the
 // token's scope; the user guide is exposed as resources (galley://docs/<slug>).
 
+const maxBatch = 20
+
 var mcpVersions = []string{"2025-06-18", "2025-03-26", "2024-11-05"}
 
 type rpcReq struct {
@@ -68,6 +70,10 @@ func (s *Server) mcp(w http.ResponseWriter, r *http.Request, ss *session) {
 	}
 	if err != nil {
 		writeJSON(w, 200, rpcResp{JSONRPC: "2.0", ID: json.RawMessage("null"), Error: &rpcErr{-32700, "parse error"}})
+		return
+	}
+	if batch && (len(reqs) == 0 || len(reqs) > maxBatch) {
+		writeJSON(w, 200, rpcResp{JSONRPC: "2.0", ID: json.RawMessage("null"), Error: &rpcErr{-32600, "a batch needs 1 to 20 requests"}})
 		return
 	}
 	var out []rpcResp

@@ -17,10 +17,12 @@ When you create a token you choose its scope:
 
 Whatever the scope, an agent token can never:
 
-- add, change or remove clusters, or change galley's settings;
+- add, change or remove clusters, or change galley's settings — not even by drafting or applying a galley setting change;
 - create or revoke agent tokens;
 - log in, log out, or open consoles;
 - use the in-app assistant.
+
+Each agent can have at most 10 drafts waiting for you. Changes an agent applied show **via agent:<name>** in the [audit log](audit-log.md).
 
 Host commands drafted or applied by an agent follow the same rules as yours: they need host administrator rights on the cluster. See [Host commands](hosts.md).
 

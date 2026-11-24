@@ -6,11 +6,13 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -32,9 +34,18 @@ func runMCPBridge(args []string) int {
 		fmt.Fprintln(os.Stderr, "galley mcp: set --url (or GALLEY_URL) and GALLEY_TOKEN=glly_… (create an agent token in galley under Agents)")
 		return 2
 	}
+	u, err := url.Parse(*base)
+	if err != nil || u.Host == "" {
+		fmt.Fprintln(os.Stderr, "galley mcp: invalid --url")
+		return 2
+	}
+	if u.Scheme != "https" && !(u.Scheme == "http" && (u.Hostname() == "localhost" || u.Hostname() == "127.0.0.1" || u.Hostname() == "::1")) {
+		fmt.Fprintln(os.Stderr, "galley mcp: --url must be https:// (the token would travel in clear text)")
+		return 2
+	}
 	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
 	if *fp != "" {
-		want := strings.ToUpper(strings.ReplaceAll(*fp, ":", ""))
+		want := strings.ToUpper(strings.NewReplacer(":", "", " ", "").Replace(strings.TrimPrefix(strings.TrimSpace(*fp), "sha256/")))
 		tlsCfg.InsecureSkipVerify = true // replaced by the pin check below
 		tlsCfg.VerifyConnection = func(cs tls.ConnectionState) error {
 			if len(cs.PeerCertificates) == 0 {
@@ -64,21 +75,45 @@ func runMCPBridge(args []string) int {
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Accept", "application/json, text/event-stream")
 		req.Header.Set("Authorization", "Bearer "+token)
+		var probe struct {
+			ID json.RawMessage `json:"id"`
+		}
+		_ = json.Unmarshal(line, &probe)
+		fail := func(msg string) { // answer requests (not notifications) so clients never hang
+			fmt.Fprintln(os.Stderr, "galley mcp:", msg)
+			if len(probe.ID) == 0 || line[0] == '[' {
+				return
+			}
+			b, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": probe.ID, "error": map[string]any{"code": -32000, "message": msg}})
+			out.Write(b)
+			out.WriteByte('\n')
+			out.Flush()
+		}
 		resp, err := hc.Do(req)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "galley mcp:", err)
+			fail(err.Error())
 			continue
 		}
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
 		resp.Body.Close()
-		if resp.StatusCode == http.StatusUnauthorized {
-			fmt.Fprintln(os.Stderr, "galley mcp: the agent token was rejected (expired or revoked)")
-		}
 		body = bytes.TrimSpace(body)
-		if len(body) == 0 || resp.StatusCode == http.StatusAccepted {
+		if resp.StatusCode == http.StatusAccepted {
 			continue
 		}
-		if body[0] != '{' && body[0] != '[' {
+		if resp.StatusCode != http.StatusOK {
+			var e struct{ Error string }
+			_ = json.Unmarshal(body, &e)
+			if resp.StatusCode == http.StatusUnauthorized {
+				e.Error = "the agent token was rejected (expired or revoked)"
+			}
+			if e.Error == "" {
+				e.Error = resp.Status
+			}
+			fail(e.Error)
+			continue
+		}
+		if len(body) == 0 || (body[0] != '{' && body[0] != '[') {
+			fail("unexpected response from galley")
 			continue
 		}
 		out.Write(body)

@@ -206,7 +206,7 @@ func (s *Server) revokeToken(ctx context.Context, cr store.Cred, reason string) 
 		return
 	}
 	s.log.Info("galley token revocation deferred to the user's next login", "cluster", cr.ClusterID, "token", cr.TokenID, "reason", reason, "err", err)
-	if aerr := s.store.AddTokenRevocation(store.TokenRevocation{ClusterID: cr.ClusterID, PVEUser: cr.PVEUser, TokenID: cr.TokenID, Reason: reason}); aerr != nil {
+	if aerr := s.store.AddTokenRevocation(store.TokenRevocation{ClusterID: cr.ClusterID, PVEUser: cr.PVEUser, TokenID: cr.TokenID, Reason: reason, Created: s.revocationDate(cr.Expires)}); aerr != nil {
 		s.log.Error("record token revocation", "err", aerr)
 	}
 	s.securityEvent(cr.PVEUser, cr.ClusterID, "auth.token", "galley could not revoke API token "+cr.TokenID+" yet", false,
@@ -245,7 +245,7 @@ func (s *Server) purgeExpired() {
 	}
 	for _, m := range metas {
 		if m.Kind == "token" && m.Expires > time.Now().Unix() {
-			_ = s.store.AddTokenRevocation(store.TokenRevocation{ClusterID: m.ClusterID, PVEUser: m.PVEUser, TokenID: m.TokenID, Reason: "session expired"})
+			_ = s.store.AddTokenRevocation(store.TokenRevocation{ClusterID: m.ClusterID, PVEUser: m.PVEUser, TokenID: m.TokenID, Reason: "session expired", Created: s.revocationDate(m.Expires)})
 		}
 		s.forgetKey(m.SessionHash)
 	}
@@ -254,4 +254,11 @@ func (s *Server) purgeExpired() {
 	}
 	// Tokens are created to expire with their session: older entries are moot.
 	_ = s.store.PruneTokenRevocations(time.Now().Add(-s.opt.SessionMax - time.Hour).Unix())
+}
+
+// revocationDate dates a pending revocation so pruning (SessionMax+1h after
+// the date) keeps it until the PVE token itself has expired — agent tokens
+// live far longer than sessions.
+func (s *Server) revocationDate(tokenExpires int64) int64 {
+	return max(time.Now().Unix(), tokenExpires-int64(s.opt.SessionMax.Seconds()))
 }

@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/JongoDB/pve-cookbook/dashboard/docs"
@@ -58,14 +58,20 @@ func toolAllowed(ss *session, name string) bool {
 	return scopeAtLeast(ss, tier)
 }
 
-// markDraft labels AI-drafted changes by their source.
-func (s *Server) markDraft(ss *session, p *plan.Plan) {
+// draftCtx makes every change built with the returned context an AI draft
+// (labelled, typed confirmation) before it becomes visible.
+func draftCtx(ctx context.Context, ss *session) context.Context {
 	if ss.agent {
-		plan.MarkDraft(p, "agent:"+ss.agentName, "Agent draft ("+ss.agentName+")")
-		return
+		return plan.WithDraft(ctx, "agent:"+ss.agentName, "Agent draft ("+ss.agentName+")")
 	}
-	plan.MarkAssistantDraft(p)
+	return plan.WithDraft(ctx, "assistant", "Assistant draft")
 }
+
+// planOwner scopes pending changes to one identity: the same user name on
+// clusters with different realms of trust is a different person.
+func planOwner(ss *session) string { return ss.home + "|" + ss.user }
+
+var changeIDRe = regexp.MustCompile(`^[0-9a-f]{8,64}$`)
 
 func (s *Server) extraToolSpecs() []assistant.ToolSpec {
 	str := func(d string) map[string]any { return map[string]any{"type": "string", "description": d} }
@@ -154,7 +160,7 @@ func (s *Server) runExtraTool(ctx context.Context, ss *session, call assistant.T
 		}
 		return out(p)
 	case "list_changes":
-		return out(s.plans.List(ss.user))
+		return out(s.plans.List(planOwner(ss)))
 	case "get_change":
 		var in struct{ AuditID int64 }
 		if err := decodeStrict(call.Input, &in); err != nil {
@@ -177,18 +183,17 @@ func (s *Server) runExtraTool(ctx context.Context, ss *session, call assistant.T
 		if len(in.Params) == 0 {
 			in.Params = json.RawMessage("{}")
 		}
-		code, b := s.internal(ctx, ss, s.createPlan, http.MethodPost, "/api/plans",
+		code, b := s.internal(draftCtx(ctx, ss), ss, s.createPlan, http.MethodPost, "/api/plans",
 			map[string]any{"action": in.Action, "clusterId": in.Cluster, "params": in.Params}, nil)
 		if code != http.StatusCreated {
 			return fail(errFromBody(code, b))
 		}
 		var created struct{ ID string }
 		_ = json.Unmarshal(b, &created)
-		p, err := s.plans.Peek(created.ID, ss.user)
+		p, err := s.plans.Peek(created.ID, planOwner(ss))
 		if err != nil {
 			return fail(err)
 		}
-		s.markDraft(ss, p)
 		onChange(p)
 		return out(map[string]any{"status": "drafted; the user reviews and applies it in the Changes tab", "changeId": p.ID,
 			"title": p.Title, "destructive": p.Destructive, "confirmText": p.ConfirmText, "commands": p.CLI()})
@@ -199,6 +204,9 @@ func (s *Server) runExtraTool(ctx context.Context, ss *session, call assistant.T
 		var in struct{ ChangeID, Confirm string }
 		if err := decodeStrict(call.Input, &in); err != nil {
 			return fail(err)
+		}
+		if !changeIDRe.MatchString(in.ChangeID) {
+			return fail(errors.New("unknown change id; use list_changes"))
 		}
 		code, b := s.internal(ctx, ss, s.runPlan, http.MethodPost, "/api/plans/"+in.ChangeID+"/run",
 			map[string]string{"confirm": in.Confirm}, map[string]string{"id": in.ChangeID})
@@ -230,7 +238,7 @@ func (s *Server) docsPage(w http.ResponseWriter, r *http.Request, _ *session) {
 // GET /api/plans → the user's pending changes (including drafts by the
 // assistant or agents), newest first.
 func (s *Server) listPlans(w http.ResponseWriter, _ *http.Request, ss *session) {
-	ps := s.plans.List(ss.user)
+	ps := s.plans.List(planOwner(ss))
 	if ps == nil {
 		ps = []*plan.Plan{}
 	}
@@ -255,5 +263,3 @@ func docsIndexPrompt() string {
 	}
 	return b.String()
 }
-
-var _ = strconv.Itoa

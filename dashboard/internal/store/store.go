@@ -54,8 +54,9 @@ type AuditEntry struct {
 	ID        int64           `json:"id"`
 	At        int64           `json:"at"`
 	Updated   int64           `json:"updated"`
-	User      string          `json:"user"`      // galley session user
-	ActorUser string          `json:"actorUser"` // PVE identity the change ran as
+	User      string          `json:"user"`          // galley session user
+	ActorUser string          `json:"actorUser"`     // PVE identity the change ran as
+	Via       string          `json:"via,omitempty"` // "agent:<name>" when an agent token applied it
 	ClusterID string          `json:"clusterId"`
 	Action    string          `json:"action"`
 	Title     string          `json:"title"`
@@ -222,6 +223,8 @@ var migrations = []string{
 	`ALTER TABLE sessions ADD COLUMN kind TEXT NOT NULL DEFAULT 'browser';
 	 ALTER TABLE sessions ADD COLUMN name TEXT NOT NULL DEFAULT '';
 	 ALTER TABLE sessions ADD COLUMN scope TEXT NOT NULL DEFAULT '';`,
+	// 7: audit records when an agent token applied a change
+	`ALTER TABLE audit ADD COLUMN via TEXT NOT NULL DEFAULT '';`,
 }
 
 func (s *Store) migrate() error {
@@ -748,8 +751,8 @@ func (s *Store) AddAudit(e AuditEntry) (AuditEntry, error) {
 	if e.Results == nil {
 		e.Results = json.RawMessage("[]")
 	}
-	res, err := s.db.Exec(`INSERT INTO audit(at,updated,user,actor_user,cluster_id,action,title,cli,status,ok,results) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
-		e.At, e.Updated, e.User, e.ActorUser, e.ClusterID, e.Action, e.Title, string(cli), e.Status, e.OK, string(e.Results))
+	res, err := s.db.Exec(`INSERT INTO audit(at,updated,user,actor_user,via,cluster_id,action,title,cli,status,ok,results) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+		e.At, e.Updated, e.User, e.ActorUser, e.Via, e.ClusterID, e.Action, e.Title, string(cli), e.Status, e.OK, string(e.Results))
 	if err != nil {
 		return e, err
 	}
@@ -786,7 +789,7 @@ func (s *Store) Audit(limit int) ([]AuditEntry, error) {
 }
 
 func (s *Store) queryAudit(where string, args ...any) ([]AuditEntry, error) {
-	rows, err := s.db.Query(`SELECT id,at,updated,user,actor_user,cluster_id,action,title,cli,status,ok,results FROM audit `+where, args...)
+	rows, err := s.db.Query(`SELECT id,at,updated,user,actor_user,via,cluster_id,action,title,cli,status,ok,results FROM audit `+where, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -795,7 +798,7 @@ func (s *Store) queryAudit(where string, args ...any) ([]AuditEntry, error) {
 	for rows.Next() {
 		var e AuditEntry
 		var cli, res string
-		if err := rows.Scan(&e.ID, &e.At, &e.Updated, &e.User, &e.ActorUser, &e.ClusterID, &e.Action, &e.Title, &cli, &e.Status, &e.OK, &res); err != nil {
+		if err := rows.Scan(&e.ID, &e.At, &e.Updated, &e.User, &e.ActorUser, &e.Via, &e.ClusterID, &e.Action, &e.Title, &cli, &e.Status, &e.OK, &res); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(cli), &e.CLI)

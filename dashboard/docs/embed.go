@@ -76,7 +76,11 @@ func parse(s string) Page {
 					p.Route = v
 				}
 			}
-			s = strings.TrimLeft(s[4+end+4:], "\n")
+			rest := 4 + end + 4
+			if rest > len(s) {
+				rest = len(s)
+			}
+			s = strings.TrimLeft(s[rest:], "\n")
 		}
 	}
 	p.Markdown = s
@@ -134,8 +138,8 @@ func Search(q string, limit int) []Hit {
 			}
 			if score > 0 {
 				ex := strings.TrimSpace(sec.body)
-				if len(ex) > 700 {
-					ex = ex[:700] + "…"
+				if r := []rune(ex); len(r) > 700 {
+					ex = string(r[:700]) + "…"
 				}
 				hits = append(hits, Hit{Slug: p.Slug, Title: p.Title, Section: sec.heading, Excerpt: ex, Score: score})
 			}
