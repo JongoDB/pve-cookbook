@@ -6,6 +6,7 @@ import { useAsync } from '../lib/hooks';
 import { ApiErrorView } from '../components/ClusterLogin';
 import { Empty } from '../components/ui';
 import { HelpLink } from '../components/HelpLink';
+import { ASSISTANT_SETTINGS_EVENT } from '../components/Assistant';
 
 const BASE_URL_EXAMPLES: { url: string; what: string }[] = [
   { url: 'https://api.openai.com/v1', what: 'OpenAI' },
@@ -95,6 +96,7 @@ function AssistantSettingsForm() {
       await api.putAssistantSettings(body);
       setOk(cfg.enabled ? 'Saved. The assistant uses these settings for new conversations.' : 'Saved. The assistant is off.');
       setRev((r) => r + 1);
+      window.dispatchEvent(new Event(ASSISTANT_SETTINGS_EVENT));
     } catch (e2) {
       setErr(`Could not save: ${errMsg(e2)}`);
     } finally { setBusy(false); }
@@ -108,6 +110,9 @@ function AssistantSettingsForm() {
           <input type="checkbox" checked={cfg.enabled} onChange={(e) => set({ enabled: e.target.checked })} />
           Turn on the assistant for every galley user
         </label>
+        {!cfg.enabled && (saved.data.hasApiKey || key) && (
+          <p className="notice notice-warn" role="note">A key is {key ? 'entered' : 'saved'}, but the assistant is off. Tick the box above to turn it on.</p>
+        )}
 
         <fieldset className="field fieldset">
           <legend className="label">Provider</legend>

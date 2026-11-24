@@ -323,7 +323,7 @@ export interface EventHandlers {
 
 // ---- assistant ----
 
-export interface AssistantStatus { enabled: boolean; provider: string; model: string; dataNotice: string }
+export interface AssistantStatus { enabled: boolean; state?: "ready" | "off" | "not_configured"; provider: string; model: string; dataNotice: string }
 
 export type AssistantProvider = 'anthropic' | 'openai';
 export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';

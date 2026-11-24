@@ -1147,7 +1147,9 @@ export class MockApi implements Api {
     await wait(40); this.requireAuth();
     const dest = this.assistantCfg.provider === 'openai' ? (() => { try { return new URL(this.assistantCfg.baseUrl ?? '').host; } catch { return 'the configured endpoint'; } })() : 'Anthropic';
     return {
-      enabled: this.assistantReady(), provider: this.assistantCfg.provider, model: this.assistantCfg.model,
+      enabled: this.assistantReady(),
+      state: (this.assistantReady() ? 'ready' : this.assistantCfg.provider === 'anthropic' && !this.assistantKey ? 'not_configured' : 'off') as 'ready' | 'off' | 'not_configured',
+      provider: this.assistantCfg.provider, model: this.assistantCfg.model,
       dataNotice: `Questions and the cluster data the assistant reads to answer them (names, configuration, health, metrics) are sent to ${dest}.`,
     };
   }

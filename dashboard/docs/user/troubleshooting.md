@@ -77,6 +77,7 @@ See [Consoles](consoles.md).
 ## Assistant errors
 
 - **The assistant is not set up yet.** A galley admin must connect a model provider in **Settings**. See [Assistant](assistant.md#set-up-the-assistant-galley-admins).
+- **The assistant is set up but turned off.** The API key is saved but **Turn on the assistant for every galley user** is unticked. A galley admin ticks it in **Settings** and saves.
 - **The assistant was turned off.** A galley admin turned it off.
 - **The assistant is not configured correctly: …** The settings are incomplete, for example a missing API key. A galley admin can fix them in **Settings**.
 - **This conversation is full.** Select **New conversation**.

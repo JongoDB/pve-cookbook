@@ -35,13 +35,22 @@ func (s *Server) assistantConfig() assistant.Config {
 func (s *Server) assistantStatus(w http.ResponseWriter, r *http.Request, ss *session) {
 	cfg := s.assistantConfig()
 	ready := cfg.Enabled && (cfg.Provider != "anthropic" || cfg.APIKey != "")
+	// state tells the UI why the assistant is unavailable: never configured,
+	// configured but switched off, or ready.
+	state := "ready"
+	switch {
+	case cfg.Provider == "anthropic" && cfg.APIKey == "":
+		state = "not_configured"
+	case !cfg.Enabled:
+		state = "off"
+	}
 	dest := "Anthropic"
 	if cfg.Provider == "openai" {
 		if u, err := url.Parse(cfg.BaseURL); err == nil {
 			dest = u.Host
 		}
 	}
-	writeJSON(w, 200, map[string]any{"enabled": ready, "provider": cfg.Provider, "model": cfg.Model,
+	writeJSON(w, 200, map[string]any{"enabled": ready, "state": state, "provider": cfg.Provider, "model": cfg.Model,
 		"dataNotice": "Questions and the cluster data the assistant reads to answer them (names, configuration, health, metrics) are sent to " + dest + "."})
 }
 

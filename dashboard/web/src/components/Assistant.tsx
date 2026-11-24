@@ -24,22 +24,34 @@ function useStarters(): string[] {
   return startersFor(pathname, name);
 }
 
+/** Fired after the assistant settings are saved, so open panels refresh. */
+export const ASSISTANT_SETTINGS_EVENT = 'galley:assistant-settings';
+
 export function AssistantPanel() {
   const { api, me, chat } = useApp();
   const status = useAsync(() => api.assistantStatus(), 'assistant-status');
   const state = useSyncExternalStore(chat.subscribe, chat.get);
   const disabledByServer = state.turns.some((t) => t.error?.code === 'assistant_disabled');
   useEffect(() => { if (disabledByServer) status.reload(); }, [disabledByServer, status]);
+  // Settings saved elsewhere (the Settings page) while the drawer stays open.
+  useEffect(() => {
+    const reload = () => status.reload();
+    window.addEventListener(ASSISTANT_SETTINGS_EVENT, reload);
+    return () => window.removeEventListener(ASSISTANT_SETTINGS_EVENT, reload);
+  }, [status]);
 
   if (status.error) return <ApiErrorView error={status.error} what="the assistant status" onRetry={status.reload} />;
   if (!status.data) return <div className="muted" role="status">Loading the assistant</div>;
   if (!status.data.enabled) {
+    const off = status.data.state === 'off';
     return (
       <div className="assistant-empty">
         <h2>Assistant</h2>
-        <p className="text-2">The assistant is not set up yet. A galley admin can connect a model provider in Settings.</p>
-        <p className="explain">When it is connected, it reads with your permissions and anything it proposes waits for you in Changes.</p>
-        {me.galleyAdmin && <p><Link className="btn btn-sm" to="/settings">Set up the assistant</Link></p>}
+        <p className="text-2">{off
+          ? 'The assistant is set up but turned off. A galley admin can turn it on in Settings.'
+          : 'The assistant is not set up yet. A galley admin can connect a model provider in Settings.'}</p>
+        <p className="explain">When it is on, it reads with your permissions and anything it proposes waits for you in Changes.</p>
+        {me.galleyAdmin && <p><Link className="btn btn-sm" to="/settings">{off ? 'Turn on the assistant' : 'Set up the assistant'}</Link></p>}
         <p><HelpLink slug="assistant" label="How the assistant works" /></p>
       </div>
     );

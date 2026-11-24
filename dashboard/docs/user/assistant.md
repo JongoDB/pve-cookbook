@@ -84,6 +84,8 @@ For error messages, see [Troubleshooting](troubleshooting.md#assistant-errors).
 
 The assistant is off until a galley admin connects a provider on the **Settings** page. Until then the Assistant tab says **The assistant is not set up yet.** Galley admins see a **Set up the assistant** link there.
 
+Saving an API key does not turn the assistant on by itself: tick **Turn on the assistant for every galley user** too. While a key is saved but the box is unticked, Settings shows a reminder and the Assistant tab says **The assistant is set up but turned off**, with a **Turn on the assistant** link for galley admins.
+
 1. Open **Settings**.
 2. Tick **Turn on the assistant for every galley user**.
 3. Choose the **Provider**:
