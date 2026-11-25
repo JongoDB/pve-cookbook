@@ -361,12 +361,12 @@ func TestSlowCallIsIndependent(t *testing.T) {
 }
 
 func TestStaleAfterThreeIntervals(t *testing.T) {
-	h := newHarness(t, 20*time.Millisecond)
+	h := newHarness(t, time.Second) // wide enough that a loaded CI runner cannot age a fresh poll
 	h.p.PollAll(h.ctx)
 	if h.p.Fleet().Clusters[0].Stale {
 		t.Fatal("fresh poll reported stale")
 	}
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(3200 * time.Millisecond)
 	if !h.p.Fleet().Clusters[0].Stale {
 		t.Fatal("no success within 3 intervals must be stale")
 	}
