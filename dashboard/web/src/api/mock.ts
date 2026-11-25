@@ -5,7 +5,7 @@ import type {
   AddClusterRequest, Api, AuditEntry, Cluster, ClusterLoginRequest, EventHandlers, Finding, Fleet,
   Guest, GuestFilter, GuestTarget, LoginRequest, Me, Plan, PlanRequest, Probe, RunResult, Task,
 } from './types';
-import { ACTION_LABEL, confirmTextFor, guestStep, type GuestAction, type GuestParams } from '../lib/actions';
+import { ACTION_LABEL, confirmTextFor, guestSteps, type GuestAction, type GuestParams } from '../lib/actions';
 
 const GiB = 1024 ** 3;
 const TiB = 1024 ** 4;
@@ -76,10 +76,6 @@ function seedGuests(): Guest[] {
   ];
 }
 
-const cmd: Record<string, string> = {
-  'guest.start': 'qmstart', 'guest.shutdown': 'qmshutdown', 'guest.stop': 'qmstop', 'guest.reboot': 'qmreboot',
-  'guest.migrate': 'qmigrate', 'guest.snapshot': 'qmsnapshot', 'guest.destroy': 'qmdestroy', 'backup.protect': 'vzdump',
-};
 
 export class MockApi implements Api {
   private needsSetup = import.meta.env.VITE_MOCK_SETUP === '1';
@@ -91,8 +87,15 @@ export class MockApi implements Api {
   private taskLog: Task[] = [];
   private backupJob = new Set<number>();
   private listeners = new Set<EventHandlers>();
+  private unauthorized: (() => void) | null = null;
+  private settled = new Map<string, Promise<AuditEntry>>();
+  /** The one-time setup code (mock: any non-empty code except "wrong" is accepted). */
+  readonly setupToken = 'demo-setup-code';
+  private stepDelayMs: number;
 
-  constructor() {
+  /** stepDelayMs: how long each async run step takes (tests pass 0). */
+  constructor(opts: { stepDelayMs?: number } = {}) {
+    this.stepDelayMs = opts.stepDelayMs ?? 900;
     for (const x of this.guestsState) if (x.vmid !== 131) this.backupJob.add(x.vmid);
     const t0 = now();
     const seedTasks: [string, string, string, string, number, string][] = [
@@ -114,7 +117,22 @@ export class MockApi implements Api {
   }
 
   // ---------- helpers ----------
-  private requireAuth() { if (!this.session) throw new ApiError(401, 'unauthenticated', 'log in first'); }
+  private requireAuth() {
+    if (!this.session) { this.unauthorized?.(); throw new ApiError(401, 'unauthenticated', 'log in first'); }
+  }
+
+  private requireSetupToken(t?: string) {
+    if (!this.needsSetup) return;
+    if (!t) throw new ApiError(403, 'setup_token_required', 'setup code required');
+    if (t === 'wrong') throw new ApiError(403, 'setup_token_invalid', 'setup code invalid');
+  }
+
+  onUnauthorized(fn: (() => void) | null) { this.unauthorized = fn; }
+
+  /** Resolves with the final audit entry of an async run (tests). */
+  whenSettled(auditId: string): Promise<AuditEntry> {
+    return this.settled.get(auditId) ?? Promise.reject(new Error(`unknown run ${auditId}`));
+  }
 
   private clusterView(c: MockCluster): Cluster {
     return {
@@ -212,8 +230,9 @@ export class MockApi implements Api {
   async health() { await wait(20); return { ok: true, version: '0.1.0-mock' }; }
   async setup() { await wait(20); return { needsSetup: this.needsSetup, clusters: this.clustersState.map((c) => ({ id: c.id, name: c.name })) }; }
 
-  async probe(endpoints: string[]): Promise<{ endpoints: Probe[] }> {
+  async probe(endpoints: string[], setupToken?: string): Promise<{ endpoints: Probe[] }> {
     await wait(400);
+    this.requireSetupToken(setupToken);
     return {
       endpoints: endpoints.map((h, i) => (h.includes('bad')
         ? { host: h, reachable: false, fingerprint: '', trustedBySystem: false, error: 'connection refused' }
@@ -221,9 +240,10 @@ export class MockApi implements Api {
     };
   }
 
-  async addCluster(r: AddClusterRequest): Promise<Cluster> {
+  async addCluster(r: AddClusterRequest, setupToken?: string): Promise<Cluster> {
     await wait();
     if (!this.needsSetup) this.requireAuth();
+    this.requireSetupToken(setupToken);
     if (!r.name || !r.endpoints.length) throw new ApiError(400, 'invalid', 'name and at least one endpoint required');
     if (!/^[^@!]+@[^!]+![\w-]+$/.test(r.tokenId)) throw new ApiError(400, 'invalid_token', 'token id must look like user@realm!name');
     const id = r.name.toLowerCase().replace(/[^a-z0-9-]/g, '-');
@@ -253,6 +273,9 @@ export class MockApi implements Api {
 
   async login(r: LoginRequest): Promise<Me> {
     await wait(300);
+    if (r.password === 'flood') {
+      throw new ApiError(429, 'rate_limited', 'too many attempts', 12);
+    }
     if (!r.username || !r.password) throw new ApiError(401, 'auth_failed', 'authentication failure');
     if (r.password === 'wrong') throw new ApiError(401, 'auth_failed', 'authentication failure');
     this.session = {
@@ -327,7 +350,7 @@ export class MockApi implements Api {
             : `${ids.length} API call${ids.length > 1 ? 's' : ''}, run in order as ${this.session!.user}.`,
         destructive: action === 'guest.destroy' || action === 'guest.stop',
         ...(action === 'guest.destroy' ? { confirmText: confirmTextFor(ids) } : {}),
-        steps: targets.map((t) => guestStep(action, t, p)),
+        steps: targets.flatMap((t) => guestSteps(action, t, p, this.guestsState.find((x) => x.clusterId === r.clusterId && x.vmid === t.vmid)?.status === 'running')),
       };
     } else {
       throw new ApiError(400, 'unknown_action', `unknown action ${r.action}`);
@@ -336,8 +359,12 @@ export class MockApi implements Api {
     return plan;
   }
 
+  /**
+   * Mirrors the async backend: validates, answers like a 202 `{auditId, status:"running"}`,
+   * then executes the steps one by one, pushing `event: audit` frames with per-step status.
+   */
   async runPlan(id: string, confirm?: string): Promise<RunResult> {
-    await wait(500); this.requireAuth();
+    await wait(300); this.requireAuth();
     const plan = this.plans.get(id);
     if (!plan) throw new ApiError(404, 'not_found', 'plan not found');
     if (plan.ran) throw new ApiError(409, 'already_ran', 'plan already ran');
@@ -345,39 +372,57 @@ export class MockApi implements Api {
     if (plan.confirmText && confirm !== plan.confirmText) throw new ApiError(400, 'confirm_mismatch', `type "${plan.confirmText}" to confirm`);
     plan.ran = true;
 
-    const results = plan.steps.map((s, i) => {
-      const m = s.path.match(/^\/nodes\/([^/]+)\/(qemu|lxc)\/(\d+)/);
-      const node = m?.[1] ?? 'pve1';
-      const vmid = m ? Number(m[3]) : 0;
-      const upid = `UPID:${node}:${rid()}:${cmd[plan.action] ?? 'task'}:${vmid || ''}:${this.session!.user}:`;
-      try {
-        if (plan.action === 'backup.protect') {
-          for (const v of (s.body.vmid as string).split(',')) this.backupJob.add(Number(v));
-        } else if (m) {
-          const gx = this.findGuest(plan.clusterId, vmid);
-          if (plan.action === 'guest.start') { if (gx.status === 'running') throw new Error('already running'); gx.status = 'running'; gx.uptime = 1; }
-          if (plan.action === 'guest.shutdown' || plan.action === 'guest.stop') { gx.status = 'stopped'; gx.cpu = 0; gx.uptime = 0; gx.mem = 0; }
-          if (plan.action === 'guest.reboot') gx.uptime = 1;
-          if (plan.action === 'guest.migrate') gx.node = s.body.target as string;
-          if (plan.action === 'guest.destroy') this.guestsState = this.guestsState.filter((y) => y !== gx);
-        }
-        this.taskLog.unshift({
-          clusterId: plan.clusterId, upid, node, type: cmd[plan.action] ?? 'task', id: vmid ? String(vmid) : '',
-          user: this.session!.user, starttime: now(), endtime: now() + 1, status: 'OK',
-        });
-        return { step: i, ok: true, upid };
-      } catch (e) {
-        return { step: i, ok: false, error: (e as Error).message };
-      }
-    });
+    const user = this.session!.user;
     const entry: AuditEntry = {
-      id: rid(), at: now(), user: this.session!.user, clusterId: plan.clusterId, action: plan.action, title: plan.title,
-      cli: plan.steps.map((s) => s.cli), ok: results.every((r) => r.ok), results,
+      id: rid(), at: now(), user, clusterId: plan.clusterId, action: plan.action, title: plan.title,
+      cli: plan.steps.map((s) => s.cli), ok: false, results: [], status: 'running',
     };
     this.auditLog.unshift(entry);
-    for (const l of this.listeners) l.audit?.(entry);
-    this.emit();
-    return { auditId: entry.id, results };
+    const publish = () => {
+      const snap: AuditEntry = { ...entry, results: entry.results.map((r) => ({ ...r })) };
+      for (const l of this.listeners) l.audit?.(snap);
+    };
+    const sleep = () => new Promise((r) => setTimeout(r, this.stepDelayMs));
+
+    const done = (async () => {
+      for (let i = 0; i < plan.steps.length; i++) {
+        const s = plan.steps[i];
+        const m = s.path.match(/^\/nodes\/([^/]+)\/(qemu|lxc)\/(\d+)/);
+        const node = m?.[1] ?? 'pve1';
+        const vmid = m ? Number(m[3]) : 0;
+        const op = s.method === 'DELETE' ? 'destroy' : s.path.match(/\/status\/(\w+)$/)?.[1] ?? (s.path.endsWith('/migrate') ? 'migrate' : s.path.endsWith('/snapshot') ? 'snapshot' : '');
+        const type = plan.action === 'backup.protect' ? 'vzdump' : op === 'migrate' ? (m?.[2] === 'lxc' ? 'vzmigrate' : 'qmigrate') : `${m?.[2] === 'lxc' ? 'vz' : 'qm'}${op}`;
+        const upid = `UPID:${node}:${rid()}:${type}:${vmid || ''}:${user}:`;
+        entry.results.push({ step: i, ok: false, status: 'running', upid });
+        publish();
+        await sleep();
+        const res = entry.results[i];
+        try {
+          if (plan.action === 'backup.protect') {
+            for (const v of (s.body.vmid as string).split(',')) this.backupJob.add(Number(v));
+          } else if (m) {
+            const gx = this.findGuest(plan.clusterId, vmid);
+            if (op === 'start') { if (gx.status === 'running') throw new Error('already running'); gx.status = 'running'; gx.uptime = 1; }
+            if (op === 'shutdown' || op === 'stop') { gx.status = 'stopped'; gx.cpu = 0; gx.uptime = 0; gx.mem = 0; }
+            if (op === 'reboot') gx.uptime = 1;
+            if (op === 'migrate') gx.node = s.body.target as string;
+            if (op === 'destroy') this.guestsState = this.guestsState.filter((y) => y !== gx);
+          }
+          this.taskLog.unshift({ clusterId: plan.clusterId, upid, node, type, id: vmid ? String(vmid) : '', user, starttime: now(), endtime: now() + 1, status: 'OK' });
+          Object.assign(res, { ok: true, status: 'ok', exitstatus: 'OK' });
+        } catch (e) {
+          const msg = (e as Error).message;
+          Object.assign(res, { ok: false, status: 'error', error: msg, exitstatus: msg });
+        }
+        this.emit();
+      }
+      entry.ok = entry.results.every((r) => r.ok);
+      entry.status = 'done';
+      publish();
+      return { ...entry, results: entry.results.map((r) => ({ ...r })) };
+    })();
+    this.settled.set(entry.id, done);
+    return { auditId: entry.id, status: 'running', results: [] };
   }
 
   async audit(limit = 100) { await wait(40); this.requireAuth(); return this.auditLog.slice(0, limit); }

@@ -55,7 +55,10 @@ describe('parseCommand', () => {
     expect(parseCommand('migrate web01 pve1', guests, nodes).kind).toBe('error');
     expect(parseCommand('migrate web01', guests, nodes).kind).toBe('error');
     const ct = parseCommand('migrate grafana pve1', guests, nodes);
-    expect(ct.kind === 'command' && ct.preview).toBe('pct migrate 131 pve1 --restart');
+    // stopped CT: offline migration; a running CT would need --restart
+    expect(ct.kind === 'command' && ct.preview).toBe('pct migrate 131 pve1');
+    const live = parseCommand('migrate web02 pve3', guests, nodes);
+    expect(live.kind === 'command' && live.preview).toBe('qm migrate 121 pve3 --online');
   });
 
   it('plans snapshots with a valid name', () => {
@@ -66,9 +69,11 @@ describe('parseCommand', () => {
     expect(d.kind === 'command' && d.params.name).toMatch(/^galley-\d{8}$/);
   });
 
-  it('plans destroy with purge', () => {
+  it('previews destroy like the backend: running guests are stopped first, disks purged', () => {
     const r = parseCommand('destroy edge-proxy', guests, nodes);
-    expect(r.kind === 'command' && r.preview).toBe('pct destroy 200 --purge');
+    expect(r.kind === 'command' && r.preview).toBe('pct stop 200 && pct destroy 200 --purge 1 --destroy-unreferenced-disks 1');
+    const s = parseCommand('destroy grafana', guests, nodes);
+    expect(s.kind === 'command' && s.preview).toBe('pct destroy 131 --purge 1 --destroy-unreferenced-disks 1');
   });
 
   it('rejects trailing junk for single-argument verbs', () => {

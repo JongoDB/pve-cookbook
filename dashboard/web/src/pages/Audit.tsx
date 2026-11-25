@@ -3,6 +3,7 @@ import type { AuditEntry } from '../api/types';
 import { errMsg, useApp } from '../state/app';
 import { CopyButton, Empty, ErrorBox } from '../components/ui';
 import { clock } from '../lib/format';
+import { stepStatus } from '../lib/plan';
 
 export function Audit() {
   const { api, lastAudit, clusterName } = useApp();
@@ -14,7 +15,7 @@ export function Audit() {
     let alive = true;
     api.audit(100).then((a) => alive && setEntries(a)).catch((e) => alive && setErr(errMsg(e)));
     return () => { alive = false; };
-  }, [api, lastAudit?.id]);
+  }, [api, lastAudit?.id, lastAudit?.status, lastAudit?.results.length]);
 
   return (
     <div className="page">
@@ -35,7 +36,9 @@ export function Audit() {
               return (
                 <li key={a.id}>
                   <button type="button" className="audit-row" aria-expanded={isOpen} onClick={() => setOpen(isOpen ? null : a.id)}>
-                    <span className={`level ${a.ok ? 'level-ok' : 'level-crit'}`}>{a.ok ? 'OK' : 'FAIL'}</span>
+                    {a.status === 'running'
+                      ? <span className="level level-warn">RUN</span>
+                      : <span className={`level ${a.ok ? 'level-ok' : 'level-crit'}`}>{a.ok ? 'OK' : 'FAIL'}</span>}
                     <span className="mono small muted">{clock(a.at)}</span>
                     <span className="strong audit-title">{a.title}</span>
                     <span className="muted">{clusterName(a.clusterId)}</span>
@@ -47,8 +50,8 @@ export function Audit() {
                       <pre className="cli">{a.cli.join('\n')}</pre>
                       <ul className="results">
                         {a.results.map((r) => (
-                          <li key={r.step} className={r.ok ? 'step-ok' : 'step-fail'}>
-                            step {r.step + 1}: {r.ok ? `✓ ${r.upid ?? 'done'}` : `✗ ${r.error}`}
+                          <li key={r.step} className={stepStatus(r) === 'ok' ? 'step-ok' : stepStatus(r) === 'running' ? 'muted' : 'step-fail'}>
+                            step {r.step + 1}: {stepStatus(r) === 'ok' ? `✓ ${r.upid ?? 'done'}` : stepStatus(r) === 'running' ? `… running${r.upid ? ` ${r.upid}` : ''}` : `✗ ${r.error ?? r.exitstatus ?? 'failed'}`}
                           </li>
                         ))}
                       </ul>

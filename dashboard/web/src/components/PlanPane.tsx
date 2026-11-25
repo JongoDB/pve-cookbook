@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useApp } from '../state/app';
-import { canRun, planCli } from '../lib/plan';
+import { canRun, planCli, runFinished, stepStatus } from '../lib/plan';
 import { CopyButton, ErrorBox } from './ui';
 
 const KEY = 'galley.planPane.collapsed';
@@ -24,13 +24,15 @@ export function PlanPane() {
     return (
       <aside className="plan plan-collapsed" aria-label="Plan">
         <button type="button" className="icon-btn" aria-label="Expand plan pane" onClick={() => setCollapsed(false)}>⇤</button>
-        <span className="plan-rail-label">Plan{plan && !result ? ' ●' : ''}</span>
+        <span className="plan-rail-label">Plan{plan && !runFinished(result) ? ' ●' : ''}</span>
       </aside>
     );
   }
 
-  const done = !!result;
-  const runnable = canRun(plan, typed) && !running && !done;
+  const done = runFinished(result);
+  // A plan runs at most once: once there is any result (even a still-running async one) Run stays off.
+  const runnable = canRun(plan, typed) && !running && !result;
+  const allOk = !!result && result.results.length > 0 && result.results.every((r) => stepStatus(r) === 'ok');
 
   return (
     <aside className="plan" aria-label="Plan">
@@ -65,21 +67,21 @@ export function PlanPane() {
           <ol className="plan-steps">
             {plan.steps.map((s, i) => {
               const r = result?.results.find((x) => x.step === i);
+              const st = r ? stepStatus(r) : null;
               return (
                 <li key={i}>
                   <span>{s.description}</span>
-                  {r && (
-                    <div className={r.ok ? 'step-ok' : 'step-fail'}>
-                      {r.ok ? '✓ ' : '✗ '}{r.ok ? (r.upid ?? 'done') : r.error}
-                    </div>
-                  )}
+                  {r && st === 'running' && <div className="muted" role="status">… running{r.upid ? ` ${r.upid}` : ''}</div>}
+                  {r && st === 'ok' && <div className="step-ok">✓ {r.upid ?? 'done'}</div>}
+                  {r && st === 'error' && <div className="step-fail">✗ {r.error ?? r.exitstatus ?? 'failed'}</div>}
+                  {!r && result && !done && <div className="muted">waiting</div>}
                 </li>
               );
             })}
           </ol>
           <pre className="cli" aria-label="Equivalent CLI">{planCli(plan)}</pre>
 
-          {plan.confirmText && !done && (
+          {plan.confirmText && !result && (
             <label className="field">
               <span>Type <code>{plan.confirmText}</code> to confirm</span>
               <input value={typed} onChange={(e) => setTyped(e.target.value)} autoComplete="off" spellCheck={false} />
@@ -87,8 +89,8 @@ export function PlanPane() {
           )}
 
           {done && (
-            <div className={result.results.every((r) => r.ok) ? 'ok-box' : 'error-box'} role="status">
-              {result.results.every((r) => r.ok) ? 'Plan ran. Recorded in the audit log.' : 'Plan ran with errors. See steps above and the audit log.'}
+            <div className={allOk ? 'ok-box' : 'error-box'} role="status">
+              {allOk ? 'Plan ran. Recorded in the audit log.' : 'Plan ran with errors. See steps above and the audit log.'}
             </div>
           )}
 
@@ -102,7 +104,12 @@ export function PlanPane() {
                 </button>
               )}
           </div>
-          {!done && <button type="button" className="link-btn" onClick={clearPlan}>Discard plan</button>}
+          {!done && (
+            <button type="button" className="link-btn" onClick={clearPlan} disabled={running}
+              title={running ? 'The plan is running; wait for it to finish' : undefined}>
+              Discard plan
+            </button>
+          )}
         </>
       )}
     </aside>

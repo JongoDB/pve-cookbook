@@ -1,5 +1,5 @@
 import type { Guest, GuestTarget } from '../api/types';
-import { guestStep, type GuestAction, type GuestParams } from './actions';
+import { previewCli, type GuestAction, type GuestParams } from './actions';
 
 /**
  * Command-palette grammar (case-insensitive):
@@ -17,7 +17,7 @@ export type ParseResult =
       action: GuestAction;
       guest: Guest;
       params: GuestParams;
-      /** CLI preview shown in the palette before a server plan exists */
+      /** CLI preview shown in the palette before a server plan exists (the server plan is authoritative) */
       preview: string;
     };
 
@@ -82,5 +82,5 @@ export function parseCommand(input: string, guests: Guest[], nodesByCluster: Rec
     return { kind: 'error', message: `unexpected "${words.slice(2).join(' ')}"` };
   }
 
-  return { kind: 'command', action, guest: g, params, preview: guestStep(action, t, params).cli };
+  return { kind: 'command', action, guest: g, params, preview: previewCli(action, t, params, g.status === 'running') };
 }

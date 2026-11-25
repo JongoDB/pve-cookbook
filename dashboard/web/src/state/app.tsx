@@ -1,16 +1,9 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ApiError } from '../api/http';
-import type { Api, AuditEntry, Fleet, Me, Plan, PlanRequest, RunResult, Task } from '../api/types';
+import type { Api, AuditEntry, Fleet, Me, PlanRequest, Task } from '../api/types';
+import { EMPTY_PLAN, PlanStore, type PlanState } from '../lib/planStore';
 
-export interface PlanState {
-  plan: Plan | null;
-  loading: boolean;
-  running: boolean;
-  error: string | null;
-  result: RunResult | null;
-}
-
-const EMPTY_PLAN: PlanState = { plan: null, loading: false, running: false, error: null, result: null };
+export type { PlanState } from '../lib/planStore';
 
 interface AppCtx {
   api: Api;
@@ -40,40 +33,27 @@ export function AppProvider({ api, me, setMe, children }: { api: Api; me: Me; se
   const [lastAudit, setLastAudit] = useState<AuditEntry | null>(null);
   const [planState, setPlanState] = useState<PlanState>(EMPTY_PLAN);
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const planReq = useRef(0);
+  const store = useRef<PlanStore | null>(null);
+  if (!store.current || store.current.api !== api) store.current = new PlanStore(api, setPlanState);
 
   useEffect(() => {
+    const plans = store.current;
     let alive = true;
     api.fleet().then((f) => alive && setFleet(f)).catch(() => undefined);
     api.tasks({ limit: 50 }).then((t) => alive && setTasks(t)).catch(() => undefined);
-    const stop = api.subscribe({ fleet: setFleet, tasks: setTasks, audit: setLastAudit, mode: setLive });
-    return () => { alive = false; stop(); };
+    const stop = api.subscribe({
+      fleet: setFleet,
+      tasks: setTasks,
+      audit: (a) => { setLastAudit(a); plans?.onAudit(a); },
+      mode: setLive,
+    });
+    return () => { alive = false; stop(); plans?.dispose(); };
   }, [api]);
 
-  const openPlan = useCallback(async (req: PlanRequest) => {
-    const n = ++planReq.current;
-    setPlanState({ ...EMPTY_PLAN, loading: true });
-    try {
-      const plan = await api.createPlan(req);
-      if (n === planReq.current) setPlanState({ ...EMPTY_PLAN, plan });
-    } catch (e) {
-      if (n === planReq.current) setPlanState({ ...EMPTY_PLAN, error: errMsg(e) });
-    }
-  }, [api]);
-
-  const runPlan = useCallback(async (confirm?: string) => {
-    const plan = planState.plan;
-    if (!plan) return;
-    setPlanState((s) => ({ ...s, running: true, error: null }));
-    try {
-      const result = await api.runPlan(plan.id, confirm);
-      setPlanState((s) => ({ ...s, running: false, result }));
-    } catch (e) {
-      setPlanState((s) => ({ ...s, running: false, error: errMsg(e) }));
-    }
-  }, [api, planState.plan]);
-
-  const clearPlan = useCallback(() => { planReq.current++; setPlanState(EMPTY_PLAN); }, []);
+  // Request-counter guarded (see PlanStore): stale createPlan/runPlan responses are dropped.
+  const openPlan = useCallback((req: PlanRequest) => store.current!.open(req), []);
+  const runPlan = useCallback((confirm?: string) => store.current!.run(confirm), []);
+  const clearPlan = useCallback(() => store.current!.clear(), []);
 
   const clusterName = useCallback(
     (id: string) => me.clusters.find((c) => c.id === id)?.name ?? fleet?.clusters.find((c) => c.id === id)?.name ?? id,
