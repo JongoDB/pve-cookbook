@@ -4,6 +4,7 @@ inventory.yaml
 !examples/**/inventory.yaml
 .DS_Store
 node_modules/
-dist/
+**/dist/*
+!dashboard/web/dist/.gitkeep
 /dashboard/galley
 *.log

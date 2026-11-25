@@ -17,7 +17,7 @@ recipes/        step-by-step runbooks (Preconditions → Steps → Verify → Ro
   troubleshooting/ field-tested fixes for failures that are hard to diagnose
 scripts/        pvecb (idempotent build runner), pve-health.sh, pve-app.sh
 examples/       a worked 3-node hyperconverged build, incidents included
-dashboard/      galley: a web cockpit for one or many clusters (in development)
+dashboard/      galley: a web cockpit for one or many clusters (Go + React, single binary)
 ```
 
 ## Quick start
@@ -82,7 +82,7 @@ interrupted join, and a stray initramfs udevd breaking Ceph RBD containers.
 | Cluster recipes and `pvecb` | validated on PVE 9.2 / Ceph 19.2, 3-node HCI |
 | Full-mesh topology | written, **untested** |
 | Admin recipes | see `tested:` in each file |
-| galley dashboard | in design ([`dashboard/README.md`](dashboard/README.md)) |
+| galley dashboard | MVP ([`dashboard/README.md`](dashboard/README.md)): fleet, guests, plans, audit; `--demo` mode |
 
 ## Credits
 

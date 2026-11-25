@@ -1,0 +1,44 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  galley:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: dashboard/go.mod
+          cache-dependency-path: dashboard/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: dashboard/web/package-lock.json
+      - name: build UI
+        working-directory: dashboard/web
+        run: npm ci && npm test && npm run build
+      - name: test
+        run: go test -race -count=1 ./cmd/... ./internal/...
+      - name: build binaries
+        run: |
+          mkdir -p ../out
+          for a in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH=$a go build -trimpath \
+              -ldflags "-s -w -X github.com/JongoDB/pve-cookbook/dashboard/internal/server.Version=${GITHUB_REF_NAME}" \
+              -o ../out/galley-linux-$a ./cmd/galley
+          done
+          cp install/galley-lxc.sh ../out/
+          cd ../out && sha256sum galley-linux-amd64 galley-linux-arm64 galley-lxc.sh > SHA256SUMS && cat SHA256SUMS
+      - name: publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pre=""; [[ "$GITHUB_REF_NAME" == *-* ]] && pre="--prerelease"
+          gh release create "$GITHUB_REF_NAME" ../out/* $pre --title "galley $GITHUB_REF_NAME" --generate-notes --verify-tag

@@ -1,7 +1,8 @@
 # galley — a cockpit for Proxmox VE admins
 
-> Status: **in design**. This document is the agreed specification. UI mockups will be
-> published for selection before any interface is built.
+> Status: **MVP** — fleet overview, guest inventory with bulk actions, ⌘K command palette,
+> plan pane with CLI equivalents, operations/task log, audit log, multi-cluster
+> registration with TLS pinning, a built-in assistant, an MCP server for AI agents, and an in-app user guide (Help).
 
 galley is a single, self-hosted web app (one Go binary in a small LXC) for running one or
 many Proxmox VE clusters. It does **not** replace the PVE GUI or
@@ -13,29 +14,90 @@ detection, and safe bulk operations. Deep, rarely used settings link out to the 
 
 1. **Admin-first.** Dense, keyboard-driven (⌘K command palette), PVE terminology everywhere.
 2. **No parallel permission system.** You log in with PVE credentials (any realm: PAM, PVE,
-   OIDC). galley calls the API as you, so PVE ACLs and PVE's task log stay authoritative.
+   OpenID Connect via a PVE `openid` realm). galley reads and writes as you, so you only see
+   what your PVE permissions allow, and PVE's task log shows the real user.
 3. **Every write is a plan first.** Mutations show the exact API calls and the equivalent
    `pvesh`/`qm`/`pct` command, require typed confirmation when destructive, and are written
    to a copyable audit log. The admin always learns the CLI and can reproduce the action.
-4. **API-first.** The UI uses the same documented REST API (OpenAPI) that scripts use, and an
-   **MCP server** exposes the same guarded actions to AI agents.
+4. **API-first.** The UI uses the same documented REST API ([docs/api.md](docs/api.md)) that
+   scripts use. AI agents can drive galley directly over MCP (`/mcp`, or `galley mcp` over stdio) with scoped agent tokens — see [docs/user/agents-and-mcp.md](docs/user/agents-and-mcp.md).
 5. **Light.** No embedded time-series database. Live state comes from the PVE API (polled about every 5 s
    per cluster, pushed to browsers via SSE). Long-term metrics are handled by the monitoring
    recipes.
+
+## Run it
+
+```bash
+# Try it without Proxmox: an in-process fake cluster (log in as root / secret)
+cd dashboard && make web build && ./galley --demo --insecure-http --listen 127.0.0.1:8080
+
+# On a real cluster: run on any PVE node; creates an unprivileged Debian LXC and
+# downloads the release binary (sha256-verified against the release's SHA256SUMS)
+bash <(curl -fsSL https://github.com/JongoDB/pve-cookbook/releases/latest/download/galley-lxc.sh) \
+  --id 150 --storage vm-pool --bridge vmbr0 --ip dhcp --create-token
+# a specific (or pre-release) version:  … galley-lxc.sh --version v0.1.0-rc.1 …
+# upgrade an existing galley CT in place (sha256-verified download, or --binary PATH):
+#   … galley-lxc.sh --upgrade --id 150 [--version vX.Y.Z]
+
+# Or just the binary, anywhere with network access to the cluster (Linux amd64/arm64).
+# Minimal images (e.g. the Debian 13 LXC template) need: apt-get install -y curl ca-certificates
+curl -fsSLO https://github.com/JongoDB/pve-cookbook/releases/latest/download/galley-linux-amd64
+curl -fsSLO https://github.com/JongoDB/pve-cookbook/releases/latest/download/SHA256SUMS
+sha256sum --ignore-missing -c SHA256SUMS && install -m 0755 galley-linux-amd64 /usr/local/bin/galley
+galley --listen :8443 --data /var/lib/galley
+```
+
+`--create-token` creates `galley@pve` with `PVEAuditor` on `/` and the token `galley@pve!poller`
+(the read-only poller credential) and prints the secret once. The installer also prints a
+one-time **setup code** (galley writes it to `/var/lib/galley/setup-token` on first start, and
+logs it to `journalctl -u galley`); registering the first cluster requires it. Open the printed
+URL, enter the setup code, add the cluster's node addresses, confirm their certificate
+fingerprints, paste the token, then log in with your normal PVE account. Every change you make
+in galley runs as **you**.
+
+Development: `cd dashboard/web && npm run dev:mock` (UI only, mock API) or `npm run dev`
+(proxies `/api` to a local `galley --insecure-http --listen 127.0.0.1:8443`). Tests:
+`make test`. API contract: [`docs/api.md`](docs/api.md).
+
+### Contributing: end-to-end tests
+
+`dashboard/e2e/` drives the real binary in demo mode (`galley --demo`, the in-process fake
+cluster from `internal/fakepve`) with Playwright and Chromium:
+
+```bash
+cd dashboard && make e2e          # builds web + binary, installs Chromium, runs the suite (~2 min)
+cd dashboard/e2e && npx playwright test --grep @fast      # only the quick specs
+npx playwright test tests/12-guests.spec.ts --headed      # one file, watch it
+npx playwright show-report                                # last run, with traces of failures
+```
+
+The config starts `../galley` (or `$GALLEY_BIN`) on a free port with a fresh temporary data
+directory; global setup logs in once as `root@pam` (admin) and `dev@pve` (restricted). Every
+test fails on an uncaught exception, a console error, a failed request or a galley API answer of
+400 or more that the test did not declare with `guard.allow()` (with a reason); the few answers
+that are always expected are listed in `e2e/lib/fixtures.ts`. The suite covers a route sweep
+(both users), a link crawl, a button sweep and the real flows (changes applied against the fake
+cluster, consoles over websockets, MCP with an agent token). The assistant runs against a
+scripted OpenAI-compatible model (`e2e/lib/fakeLlm.ts`) that the test registers as the provider
+in Settings, so no special server flag is involved. Tests share one galley and run in file order:
+leave state as you found it, or put the test in its own file after the ones it would disturb.
+Update or add specs with every UI change.
 
 ## Architecture
 
 ```text
 browser ──HTTPS/SSE──► galley (Go, SQLite) ──HTTPS :8006──► cluster A (endpoints pve1,pve2,pve3; TLS pinned)
    ▲                      │  │                        └──► cluster B …
-   └── React/TS SPA ◄─────┘  └── MCP server (stdio / streamable HTTP) ◄── AI agents
+   └── React/TS SPA ◄─────┘
 ```
 
 - Per cluster: several API endpoints with automatic failover, and TLS fingerprints pinned on first use and confirmed by the admin.
-- Credentials: the user's PVE ticket for the session; optional per-user API tokens for extra clusters, stored encrypted at rest.
-- SQLite: cluster registry, pinned fingerprints, audit log, cached inventory, saved create profiles.
+- Credentials: a read-only `PVEAuditor` service token per cluster for the shared cache, and each user's own PVE login (a ticket, or optionally a short-lived personal API token) for everything shown to and done by that user. Stored logins are encrypted with a key that only exists in the user's browser cookie and in memory while they are active, so a stolen database or backup reveals nothing usable; idle logins lapse. Host commands run through PVE's own node terminal as the user by default — galley holds no root credential. See [docs/security.md](docs/security.md).
+- SQLite (versioned migrations): cluster registry, pinned fingerprints, sessions, audit log, per-user preferences. Back up `/var/lib/galley` as a whole: `secret.key` decrypts the stored secrets.
 
-## v1 features
+## Features and roadmap
+
+The user guide ([docs/user](docs/user), also the **Help** page in galley) describes what ships today; this list includes planned items.
 
 ### Fleet and health
 
@@ -53,8 +115,8 @@ browser ──HTTPS/SSE──► galley (Go, SQLite) ──HTTPS :8006──► 
   - full PCIe passthrough to VMs via cluster-wide **resource mappings** (`hostpci0: mapping=…`), with checks for q35/OVMF and ballooning
   - **shared GPU for LXCs** (`devN: /dev/dri/renderD*`, NVIDIA device nodes) so several inference containers can share one card
   - vGPU / SR-IOV / mediated devices where the hardware and licence allow it (shown as capabilities, never assumed)
-  - placement that respects reality: a guest using a mapped device can only run on nodes that have it, and galley creates the matching HA node-affinity rule instead of silently allowing a migration that would fail
-  - **"LLM server" preset:** pick a GPU, model size and engine (Ollama / vLLM / llama.cpp). galley shows VRAM fit, then builds the VM (passthrough) or LXC (shared GPU) and installs the engine
+  - placement that respects reality: a guest using a mapped device can only run on nodes that have it, (planned: galley creating the matching HA node-affinity rule; today the user guide lists the rule to add)
+  - **"LLM server" preset:** pick a GPU, model size and engine (Ollama / vLLM / llama.cpp). galley sets up the VM (passthrough) or LXC (shared GPU) hardware for it (planned: VRAM fit and installing the engine)
 
 ### Identity and access
 

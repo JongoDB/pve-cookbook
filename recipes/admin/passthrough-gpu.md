@@ -1,7 +1,7 @@
 ---
 id: admin/passthrough-gpu
 title: Host resource passthrough & virtualization for GPU/LLM servers
-tested: untested
+tested: "PVE 9.2 · kernel 7.0 · 2026-11 (steps 1–6 verified on 2× A2: vfio-pci by address, mapping, q35/OVMF VM boots with the GPU, strict HA node-affinity rule, second GPU shared with an unprivileged LXC on NVIDIA 620.70.10 open modules)"
 risk: high
 runs_on: node
 ---
@@ -89,7 +89,7 @@ softdep nouveau pre: vfio-pci
 EOF
 ```
 
-After reboot:
+After reboot (verified on PVE 9.2 / kernel 7.0: the second A2 stays on the host driver):
 
 ```bash
 lspci -nnk -s 16:00.0 | grep 'Kernel driver in use: vfio-pci'
@@ -143,20 +143,33 @@ migration of passthrough VMs is not possible; HA relocation is stop → start.
 Install the NVIDIA driver on the **host** (GPU 1 left bound to `nvidia`), then the **same driver
 version without the kernel module** in each container:
 
-```bash
-# host (pve1)
-apt-get install -y pve-headers-$(uname -r) build-essential
-sh NVIDIA-Linux-x86_64-<ver>.run --dkms --silent
-nvidia-smi                                   # lists the A2 at 91:00.0
-ls -l /dev/nvidia* /dev/dri/                  # note device nodes and the render group gid
+Use NVIDIA's Debian apt repository (driver updates come through apt, and DKMS rebuilds the module
+for every new PVE kernel). Open kernel modules support Turing and newer, including the A2:
 
-# container config (PVE 8.2+ device passthrough syntax; repeat devN for each node)
-pct set 310 --dev0 /dev/nvidia0 --dev1 /dev/nvidiactl --dev2 /dev/nvidia-uvm \
-            --dev3 /dev/nvidia-uvm-tools --dev4 /dev/dri/renderD128,gid=104
-# inside the container
-sh NVIDIA-Linux-x86_64-<ver>.run --no-kernel-module --silent
+```bash
+# host (pve1): headers for the running kernel, and for future kernels
+apt-get install -y proxmox-headers-$(uname -r) proxmox-default-headers dkms
+cd /tmp && curl -fsSLO https://developer.download.nvidia.com/compute/cuda/repos/debian13/x86_64/cuda-keyring_1.1-1_all.deb
+dpkg -i cuda-keyring_1.1-1_all.deb && apt-get update
+apt-cache policy nvidia-driver-cuda          # pick a version; pin the same one in containers
+apt-get install -y --no-install-recommends nvidia-kernel-open-dkms=<ver> nvidia-driver-cuda=<ver>
+update-initramfs -u -k all                   # nouveau is blacklisted by the package
+reboot                                       # set `ceph osd set noout` first on a Ceph node
+dkms status                                  # nvidia/<ver>, <kernel>: installed
+nvidia-smi                                   # lists only the host-driver A2 (91:00.0)
+ls -l /dev/nvidia*                           # nvidia0, nvidiactl, nvidia-uvm, nvidia-uvm-tools
+
+# container: unprivileged works; PVE 9 device syntax (galley's container wizard writes the same)
+pct set 310 --dev0 /dev/nvidia0 --dev1 /dev/nvidiactl --dev2 /dev/nvidia-uvm --dev3 /dev/nvidia-uvm-tools
+# inside the container: the same driver version's userland, no kernel module
+cd /tmp && curl -fsSLO https://developer.download.nvidia.com/compute/cuda/repos/debian13/x86_64/cuda-keyring_1.1-1_all.deb
+dpkg -i cuda-keyring_1.1-1_all.deb && apt-get update
+apt-get install -y --no-install-recommends nvidia-driver-cuda=<ver>   # pulls no DKMS package
 nvidia-smi
 ```
+
+`/dev/nvidiaN` counts host-driver NVIDIA GPUs in PCI order, so with GPU 0 on `vfio-pci` the
+shared A2 is `/dev/nvidia0`. Intel/AMD GPUs use `/dev/dri/renderD128` (add `,gid=<render gid>`).
 
 Several containers can mount the same GPU. They share VRAM with no isolation, which suits
 inference services you trust. Use `/dev/nvidia1` for the second card.

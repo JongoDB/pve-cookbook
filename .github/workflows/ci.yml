@@ -39,3 +39,68 @@ jobs:
       - name: no private identifiers
         run: |
           ! grep -rniE '192\.168\.86\.|BEGIN (RSA|OPENSSH) PRIVATE KEY|PVEAPIToken=[a-z0-9@!]+=[0-9a-f-]{36}' --exclude-dir=.git .
+  galley:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: dashboard/go.mod
+          cache-dependency-path: dashboard/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: dashboard/web/package-lock.json
+      - name: web (typecheck, lint, test, build)
+        working-directory: dashboard/web
+        run: npm ci && npm run typecheck && npm run lint && npm test && npm run build
+      - name: go vet + gofmt
+        run: go vet ./cmd/... ./internal/... ./docs/... && test -z "$(gofmt -l cmd internal docs)"
+      - name: go test (race)
+        run: go test -race -count=1 ./cmd/... ./internal/... ./docs/...
+      - name: build static binaries with embedded UI
+        run: |
+          for a in amd64 arm64; do CGO_ENABLED=0 GOOS=linux GOARCH=$a go build -trimpath -o /tmp/galley-$a ./cmd/galley; done
+          /tmp/galley-amd64 --version
+      - name: installer lint
+        run: shellcheck -S warning install/galley-lxc.sh
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: dashboard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: dashboard/go.mod
+          cache-dependency-path: dashboard/go.sum
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            dashboard/web/package-lock.json
+            dashboard/e2e/package-lock.json
+      - name: build web and the binary with the embedded UI
+        run: make web build
+      - name: install the e2e suite and Chromium
+        working-directory: dashboard/e2e
+        run: npm ci && npx tsc --noEmit && npx playwright install --with-deps chromium
+      - name: run the e2e suite against galley --demo
+        working-directory: dashboard/e2e
+        run: npx playwright test
+      - name: upload the report and traces
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            dashboard/e2e/playwright-report/
+            dashboard/e2e/test-results/
+          retention-days: 14
