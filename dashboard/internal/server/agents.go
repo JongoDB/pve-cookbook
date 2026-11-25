@@ -2,11 +2,13 @@ package server
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"regexp"
 	"strings"
 	"time"
 
+	"github.com/JongoDB/pve-cookbook/dashboard/internal/pve"
 	"github.com/JongoDB/pve-cookbook/dashboard/internal/store"
 )
 
@@ -125,7 +127,14 @@ func (s *Server) createAgentToken(w http.ResponseWriter, r *http.Request, ss *se
 		full, secret, err := cl.CreateToken(ctx, cr.PVEUser, "galley-agent-"+randHex(5), exp, "galley agent token: "+req.Name)
 		cancel()
 		if err != nil {
-			warnings = append(warnings, cm.ClusterID+": PVE refused to create an API token: "+err.Error())
+			msg := "PVE refused to create an API token: " + err.Error()
+			var ae *pve.APIError
+			if cr.Kind == "token" && errors.As(err, &ae) && ae.Status == http.StatusForbidden {
+				// PVE compares the caller with the token's owner, and a token is
+				// not its user: only users with User.Modify may do this.
+				msg = "this cluster keeps logins as personal API tokens, and PVE lets an API token create another token only for users with User.Modify. Ask an administrator, or use a cluster that keeps PVE login tickets"
+			}
+			warnings = append(warnings, cm.ClusterID+": "+msg)
 			continue
 		}
 		if err := s.store.PutCred(agent.id, agent.key, store.Cred{ClusterID: cm.ClusterID, PVEUser: cr.PVEUser, Kind: "token", TokenID: full, Secret: secret, Expires: exp}); err != nil {

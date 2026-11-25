@@ -13,7 +13,7 @@ When you create a token you choose its scope:
 
 - **read**: query only. List guests, nodes and storage, read findings, tasks and metrics, read any PVE API path you can read, look up the API schema, and read this user guide.
 - **draft**: everything in **read**, plus drafting changes. A draft waits for a person to review and apply it in **Changes**, like the assistant's drafts. Drafts are titled **Agent draft (<token name>): …** and always need typed confirmation.
-- **apply**: everything in **draft**, plus applying changes itself. The agent passes the change's confirmation text, then follows the change until it finishes. Use this scope only for agents you trust to act without review: they act as you.
+- **apply**: everything in **draft**, plus applying changes itself. The agent passes the change's confirmation text, then follows the change until it finishes. Use this scope only for agents you trust to act without review: they act as you. If you can run host commands, so can the agent, as root on the nodes and with no person in between. galley's check for host commands that name secret files can be worded around.
 
 Whatever the scope, an agent token can never:
 
@@ -42,6 +42,8 @@ Clusters you were not logged in to when you created the token are not available 
 4. Create the token. galley shows it once: a string starting with `glly_`. Copy it now and store it like a password; galley cannot show it again.
 
 If a cluster refuses to create a PVE token for you, galley lists it as a warning and creates the agent token for the other clusters. If no cluster accepts, no agent token is created.
+
+On a cluster that keeps logins as **Personal API tokens** (see [Clusters and access](clusters-and-access.md)), only users with the PVE privilege **User.Modify** can create agent tokens: PVE does not let an API token create another token for anyone else. Other users get a warning that says so.
 
 Your tokens are listed under **Your agent tokens** with their scope, when they were created and expire, and when an agent last used them (**Never** until the first use).
 
@@ -102,5 +104,6 @@ Anything else answers `403` with code `agent_scope`. The API is described in gal
 
 - Give each agent its own token, with the smallest scope that does the job, and the shortest validity.
 - Prefer **draft**: you see every change before it runs.
+- For **apply**, log in as a PVE user with only the privileges the agent needs, and create the token from that account. Do not create apply tokens as `root@pam`.
 - Remember that an agent reads cluster data, including VM notes and names that anyone with access could have written. A malicious text there can try to steer the agent. With **draft** you still review the result.
 - Revoke tokens you no longer use.

@@ -569,7 +569,7 @@ func (s *Store) CredMetas(sessionID string) ([]CredMeta, error) {
 // (metadata only: renewal needs the session's K, which only memory holds).
 func (s *Store) CredsExpiringBefore(t int64) ([]CredMeta, error) {
 	return scanMetas(s.db.Query(`SELECT `+credMetaCols+` FROM session_creds c JOIN sessions s ON s.id_hash=c.session_hash
-	  WHERE c.expires < ? AND s.expires > ?`, t, time.Now().Unix()))
+	  WHERE c.expires < ? AND c.secret <> '' AND s.expires > ?`, t, time.Now().Unix()))
 }
 
 func (s *Store) sealCred(hash string, k []byte, c Cred) (string, string, error) {
@@ -607,6 +607,13 @@ func (s *Store) PutCredByHash(hash string, k []byte, c Cred) error {
 		return err
 	}
 	_, err = s.db.Exec(`UPDATE session_creds SET secret=?, csrf=?, expires=? WHERE session_hash=? AND cluster_id=?`, sec, csrf, c.Expires, hash, c.ClusterID)
+	return err
+}
+
+// LapseCredByHash erases a credential PVE no longer accepts but remembers that
+// the session had a login there, so the user is told it lapsed.
+func (s *Store) LapseCredByHash(hash, clusterID string) error {
+	_, err := s.db.Exec(`UPDATE session_creds SET secret='', csrf='', expires=0 WHERE session_hash=? AND cluster_id=?`, hash, clusterID)
 	return err
 }
 
@@ -657,6 +664,9 @@ func (s *Store) scanCreds(rows *sql.Rows, hash string, k []byte) ([]Cred, error)
 		var sec, csrf string
 		if err := rows.Scan(&c.ClusterID, &c.PVEUser, &c.Kind, &c.TokenID, &sec, &csrf, &c.Expires); err != nil {
 			return nil, err
+		}
+		if sec == "" { // lapsed (see LapseCredByHash)
+			continue
 		}
 		if aerr != nil {
 			continue // no usable session secret: nothing can be decrypted

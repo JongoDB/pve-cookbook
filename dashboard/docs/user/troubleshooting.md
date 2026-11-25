@@ -98,6 +98,7 @@ See [Consoles](consoles.md).
 ## Agent token problems
 
 - **403** with code `agent_scope`: the token's scope does not allow that call, or the call is galley administration, which agent tokens can never do.
+- **this cluster keeps logins as personal API tokens, and PVE lets an API token create another token only for users with User.Modify**: ask an administrator to create the agent token, or to switch the cluster back to **PVE login tickets** on the **Clusters** page, then log in again.
 - **the agent token was rejected (expired or revoked)** (from `galley mcp`): create a new token.
 - **galley certificate does not match --fingerprint**: the fingerprint passed to `galley mcp` is not galley's current certificate.
 

@@ -89,6 +89,20 @@ func (s *Server) savePins(p map[string]map[string]HostPin) error {
 	return s.store.PutSetting(hostPinsSetting, string(b))
 }
 
+// dropHostAccess destroys what galley holds for host commands over SSH on a
+// cluster: its key and every pinned host key.
+func (s *Server) dropHostAccess(cid string) error {
+	hostMu.Lock()
+	defer hostMu.Unlock()
+	err := s.store.DeleteSetting(hostKeySetting + "." + cid)
+	pins := s.hostPins()
+	if _, ok := pins[cid]; ok {
+		delete(pins, cid)
+		err = errors.Join(err, s.savePins(pins))
+	}
+	return err
+}
+
 // hostRunner runs host commands of one change; cl is the acting user's client.
 func (s *Server) hostRunner(cid string, cl *pve.Client) plan.HostRunner {
 	return func(ctx context.Context, node, command string) (string, int, error) {

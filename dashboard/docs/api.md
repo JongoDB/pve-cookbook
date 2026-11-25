@@ -258,7 +258,7 @@ Endpoints:
 
 ## Assistant
 
-- `GET /api/assistant` → `{"enabled","provider","model","dataNotice"}`
+- `GET /api/assistant` → `{"enabled","state":"ready"|"off"|"not_configured","provider","model","dataNotice"}`
 - `GET/PUT /api/settings/assistant` (galley admins) → `{"config":{"enabled","provider":"anthropic"|"openai","baseUrl"?,"model","effort"?,"fallback","maxTokens"?},"hasApiKey"}`.
   The API key is write-only (`"apiKey"` to set, `"clearApiKey":true` to remove); stored encrypted.
 - `POST /api/assistant/chat {"conversationId"?, "message"}` → `text/event-stream` with
@@ -313,8 +313,9 @@ Examples: Claude Code `claude mcp add --transport http galley https://galley:844
 
 Tool results that contain data other people can write are prefixed with a note that they are
 data, not instructions, and secret values (passwords, token secrets, tickets, private keys) are
-redacted. The assistant and agents cannot draft host commands that touch secret material
-(`/etc/pve/priv`, `/etc/shadow`, SSH private keys, `/var/lib/galley`, …). Answers end with a
+redacted. Host commands drafted by the assistant or agents that name secret material
+(`/etc/pve/priv`, `/etc/shadow`, SSH private keys, `/var/lib/galley`, …) are refused; this is a
+pattern check that can be worded around, not a boundary. Answers end with a
 `<suggestions>` block of follow-ups that the UI shows as buttons.
 
 ## User guide

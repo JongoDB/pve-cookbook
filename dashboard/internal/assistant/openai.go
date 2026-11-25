@@ -174,6 +174,10 @@ func (c *openAIConv) Step(ctx context.Context, emit func(Event)) ([]ToolCall, er
 	if finish == "content_filter" {
 		return nil, ErrDeclined
 	}
+	if len(tcs) == 0 && strings.TrimSpace(text.String()) == "" {
+		// Reasoning models can spend the whole reply thinking.
+		return nil, errors.New("the model returned an empty answer; try again, or choose another model in Settings")
+	}
 	am := oaMsg{"role": "assistant", "content": text.String()}
 	if len(tcs) > 0 {
 		am["tool_calls"] = tcs

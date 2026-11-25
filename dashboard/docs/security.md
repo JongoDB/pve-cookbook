@@ -104,6 +104,8 @@ Then galley discards the ticket and stores only the token, sealed per session as
     for a token.
   - Console websockets with a token need a PVE version that accepts API tokens on `vncwebsocket`.
   - Tokens appear in the user's PVE account.
+  - Only users with `User.Modify` can create agent tokens: PVE's "self" check compares the caller
+    with the token's owner, and a token is not its user (verified on PVE 9.2).
 - **Revocation:**
   - On logout galley tries to delete the token using the token itself. PVE may not let a token
     delete itself.
@@ -178,7 +180,9 @@ would have expired and retried at the user's next login.
 - Bearer tokens are not sent by browsers on their own, so agent requests skip the CSRF check;
   a token presented as a cookie, or a cookie presented as a token, is rejected.
 - Risk: a leaked `apply` token can do whatever its user can do in PVE until it expires or is
-  revoked. Prefer `draft`, short lifetimes, and a dedicated PVE user with narrow ACLs for agents.
+  revoked. If that user is a host administrator this includes root commands on the nodes, with no
+  person in between; the refusal of host commands that name secret files is a pattern check that
+  can be worded around. Prefer `draft`, short lifetimes, and a dedicated PVE user with narrow ACLs for agents.
 
 ### Unchanged controls
 

@@ -600,11 +600,12 @@ func Execute(ctx context.Context, cl *pve.Client, p *Plan, progress func([]Resul
 				r.Status, r.Error = "error", "host commands are not available"
 			} else {
 				out, code, err := host(ctx, s.Path, s.Body["command"])
-				r.Output, r.ExitStatus = out, fmt.Sprintf("exit %d", code)
+				r.Output = out
 				switch {
-				case err != nil:
+				case err != nil: // never ran, or its outcome is unknown: there is no exit status
 					r.Status, r.Error = "error", err.Error()
 				case code != 0:
+					r.ExitStatus = fmt.Sprintf("exit %d", code)
 					r.Status, r.Error = "error", fmt.Sprintf("command exited with status %d", code)
 				default:
 					r.Status, r.OK, r.ExitStatus = "ok", true, "OK"
