@@ -20,7 +20,7 @@ func load(t *testing.T) *schema.Schema {
 
 func TestParseAndMatch(t *testing.T) {
 	s := load(t)
-	if len(s.Paths()) != 13 {
+	if len(s.Paths()) != 18 { // fakepve.APIDoc
 		t.Fatalf("paths: %d", len(s.Paths()))
 	}
 	n, vars, err := s.Match("/nodes/pve1/qemu/120/config")

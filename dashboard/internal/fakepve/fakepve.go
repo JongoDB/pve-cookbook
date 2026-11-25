@@ -11,6 +11,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -78,6 +79,17 @@ type Server struct {
 	StorageConfig []map[string]any
 	// HAServices are the "service" entries of /cluster/ha/status/current.
 	HAServices []map[string]any
+	// HARules are the PVE 9 HA rules (GET/POST /cluster/ha/rules): rule,
+	// type, resources, nodes, strict, ...
+	HARules []map[string]any
+	// created holds the create parameters of guests made through POST
+	// /nodes/{node}/{qemu,lxc} (by vmid), so their config can be read back.
+	// They do not join Guests (other tests count those).
+	created map[string]map[string]string
+	// edits are config changes made through PUT/POST .../config, by vmid
+	// (nil value = key deleted); configSeq makes the digest change.
+	edits     map[string]map[string]any
+	configSeq int
 	// TokenSelfRevoke lets a user token delete itself (otherwise only the
 	// user's ticket can delete it).
 	TokenSelfRevoke bool
@@ -173,6 +185,7 @@ func (f *Server) removeGuestLocked(vmid string) {
 		}
 	}
 	f.Guests = out
+	delete(f.edits, vmid)
 }
 
 // Endpoint returns this server as a pinned galley endpoint.
@@ -406,6 +419,10 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		f.Calls = append(f.Calls, Call{Method: r.Method, Path: p, Form: form, User: user, Token: tokID})
 		f.mu.Unlock()
+		if r.Method == http.MethodPost && (p == "/cluster/ha/resources" || p == "/cluster/ha/rules") {
+			f.haCreate(w, p, form, user)
+			return
+		}
 		if p == "/cluster/backup/nightly-all" && r.Method == http.MethodPut {
 			write(w, 200, nil)
 			return
@@ -434,6 +451,22 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			f.mu.Unlock()
+		}
+		if len(parts) == 5 && parts[0] == "nodes" && (parts[2] == "qemu" || parts[2] == "lxc") && parts[4] == "config" && (r.Method == http.MethodPut || r.Method == http.MethodPost) {
+			f.editConfig(parts[3], form) // the synchronous config API: in effect at once
+		}
+		if len(parts) == 3 && parts[0] == "nodes" && r.Method == http.MethodPost && (parts[2] == "qemu" || parts[2] == "lxc") && form["vmid"] != "" {
+			cfg := map[string]string{"node": parts[1], "type": parts[2]}
+			for k, v := range form {
+				cfg[k] = v
+			}
+			effect = func() { // runs under f.mu (settle)
+				if f.created == nil {
+					f.created = map[string]map[string]string{}
+				}
+				f.created[cfg["vmid"]] = cfg
+				delete(f.edits, cfg["vmid"])
+			}
 		}
 		f.mu.Lock()
 		upid := fmt.Sprintf("UPID:%s:0000ABCD:%08X:%08X:fake:%s:%s:", nodeOf(p), len(f.Calls), time.Now().Unix(), strings.ReplaceAll(p, "/", "_"), user)
@@ -497,6 +530,9 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 			for k, v := range g {
 				x[k] = v
 			}
+			if st := f.haStateOf(g); st != "" {
+				x["hastate"] = st
+			}
 			res = append(res, x)
 		}
 		write(w, 200, res)
@@ -520,6 +556,8 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 		out = append(out, f.HAServices...)
 		f.mu.Unlock()
 		write(w, 200, out)
+	case p == "/cluster/ha/resources" || p == "/cluster/ha/rules":
+		f.haList(w, r, p, user)
 	case p == "/cluster/nextid":
 		write(w, 200, "301")
 	case p == "/cluster/mapping/pci":
@@ -858,14 +896,18 @@ func (f *Server) demoGet(w http.ResponseWriter, p, user string) bool {
 		write(w, 200, []map[string]any{{"upid": "UPID:" + node + ":1:2:3:qmstart:120:root@pam:", "node": node, "type": "qmstart", "id": "120", "user": "root@pam", "starttime": 1795480000, "endtime": 1795480004, "status": "OK"}})
 	case len(seg) == 5 && (seg[2] == "qemu" || seg[2] == "lxc") && seg[4] == "config":
 		g := guestOK(seg[3])
+		if c := f.createdConfig(seg[3], node, seg[2]); g == nil && c != nil && !restricted {
+			write(w, 200, f.withEdits(seg[3], c))
+			return true
+		}
 		if g == nil {
 			write(w, 403, nil)
 			return true
 		}
 		name := fmt.Sprint(g["name"])
 		if seg[2] == "lxc" {
-			write(w, 200, map[string]any{"hostname": name, "arch": "amd64", "cores": 2, "memory": 2048, "swap": 512, "ostype": "debian", "unprivileged": 1, "features": "nesting=1",
-				"rootfs": "vm-pool:vm-" + seg[3] + "-disk-0,size=8G", "net0": "name=eth0,bridge=servers,ip=dhcp,type=veth", "onboot": 1, "digest": "f00d" + seg[3]})
+			write(w, 200, f.withEdits(seg[3], map[string]any{"hostname": name, "arch": "amd64", "cores": 2, "memory": 2048, "swap": 512, "ostype": "debian", "unprivileged": 1, "features": "nesting=1",
+				"rootfs": "vm-pool:vm-" + seg[3] + "-disk-0,size=8G", "net0": "name=eth0,bridge=servers,ip=dhcp,type=veth", "onboot": 1, "digest": "f00d" + seg[3]}))
 			return true
 		}
 		cfg := map[string]any{"name": name, "cores": 4, "sockets": 1, "cpu": "host", "memory": "8192", "balloon": 0, "machine": "q35", "bios": "ovmf", "ostype": "l26",
@@ -875,7 +917,7 @@ func (f *Server) demoGet(w http.ResponseWriter, p, user string) bool {
 			cfg["cores"], cfg["memory"] = 16, "65536"
 			cfg["hostpci0"] = "mapping=gpu-a2-0,pcie=1"
 		}
-		write(w, 200, cfg)
+		write(w, 200, f.withEdits(seg[3], cfg))
 	case len(seg) == 5 && (seg[2] == "qemu" || seg[2] == "lxc") && seg[4] == "snapshot":
 		if guestOK(seg[3]) == nil {
 			write(w, 403, nil)
@@ -896,4 +938,216 @@ func (f *Server) DeleteUserTokens() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.userTokens = map[string]*UserToken{}
+}
+
+// haStateOf is a guest's requested HA state ("" when HA does not manage it).
+func (f *Server) haStateOf(g map[string]any) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	sid := haSID(g)
+	for _, h := range f.HAServices {
+		if h["sid"] == sid || h["id"] == sid {
+			return fmt.Sprint(h["state"])
+		}
+	}
+	return ""
+}
+
+func haSID(g map[string]any) string {
+	if g["type"] == "lxc" {
+		return fmt.Sprint("ct:", g["vmid"])
+	}
+	return fmt.Sprint("vm:", g["vmid"])
+}
+
+// haList answers GET /cluster/ha/resources and GET /cluster/ha/rules
+// (Sys.Audit on /: restricted users get 403, like PVE).
+func (f *Server) haList(w http.ResponseWriter, r *http.Request, p, user string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, restricted := f.Restricted[user]; restricted {
+		write(w, 403, nil)
+		return
+	}
+	out := []map[string]any{}
+	q := r.URL.Query()
+	if p == "/cluster/ha/resources" {
+		for _, h := range f.HAServices {
+			sid := fmt.Sprint(h["sid"])
+			typ, _, _ := strings.Cut(sid, ":")
+			if t := q.Get("type"); t != "" && t != typ {
+				continue
+			}
+			m := map[string]any{"sid": sid, "state": h["state"], "type": typ, "digest": "fakeha"}
+			if c, ok := h["comment"]; ok {
+				m["comment"] = c
+			}
+			out = append(out, m)
+		}
+		write(w, 200, out)
+		return
+	}
+	for i, rule := range f.HARules {
+		if t := q.Get("type"); t != "" && rule["type"] != t {
+			continue
+		}
+		if res := q.Get("resource"); res != "" && !containsStr(strings.Split(fmt.Sprint(rule["resources"]), ","), res) {
+			continue
+		}
+		m := map[string]any{"order": i + 1, "digest": "fakeha"}
+		for k, v := range rule {
+			m[k] = v
+		}
+		out = append(out, m)
+	}
+	write(w, 200, out)
+}
+
+var configIDRe = regexp.MustCompile(`^[a-z][a-z0-9_-]+$`)
+
+// haCreate handles POST /cluster/ha/resources and POST /cluster/ha/rules like
+// PVE 9: synchronous (no task), Sys.Console on / required, ids unique. A
+// resource requested "started" starts its guest (the HA manager would).
+func (f *Server) haCreate(w http.ResponseWriter, p string, form map[string]string, user string) {
+	fail := func(msg string) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(500)
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": nil, "message": msg + "\n"})
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.Admins[user] {
+		write(w, 403, nil)
+		return
+	}
+	if p == "/cluster/ha/resources" {
+		sid := form["sid"]
+		if _, err := strconv.Atoi(sid); err == nil {
+			sid = "vm:" + sid
+		}
+		for _, h := range f.HAServices {
+			if h["sid"] == sid {
+				fail("resource ID '" + sid + "' already defined")
+				return
+			}
+		}
+		state := form["state"]
+		if state == "" {
+			state = "started"
+		}
+		node := "pve1"
+		_, id, _ := strings.Cut(sid, ":")
+		if g := f.guestLocked(id); g != nil {
+			node = fmt.Sprint(g["node"])
+			if state == "started" {
+				g["status"] = "running"
+			}
+		}
+		h := map[string]any{"type": "service", "id": sid, "sid": sid, "node": node, "state": state}
+		if c := form["comment"]; c != "" {
+			h["comment"] = c
+		}
+		f.HAServices = append(f.HAServices, h)
+		write(w, 200, nil)
+		return
+	}
+	id := form["rule"]
+	if !configIDRe.MatchString(id) {
+		fail("invalid configuration ID '" + id + "'")
+		return
+	}
+	for _, rule := range f.HARules {
+		if rule["rule"] == id {
+			fail("HA rule '" + id + "' already defined")
+			return
+		}
+	}
+	rule := map[string]any{"rule": id, "type": form["type"], "resources": form["resources"]}
+	for _, k := range []string{"nodes", "comment", "affinity"} {
+		if v := form[k]; v != "" {
+			rule[k] = v
+		}
+	}
+	for _, k := range []string{"strict", "disable"} {
+		if v := form[k]; v != "" {
+			b := 0
+			if v == "1" || v == "true" {
+				b = 1
+			}
+			rule[k] = b
+		}
+	}
+	f.HARules = append(f.HARules, rule)
+	write(w, 200, nil)
+}
+
+func containsStr(xs []string, v string) bool {
+	for _, x := range xs {
+		if strings.TrimSpace(x) == v {
+			return true
+		}
+	}
+	return false
+}
+
+// createdConfig is the config of a guest created through the API (nil if none):
+// its create parameters, minus the ones that are not config keys.
+func (f *Server) createdConfig(vmid, node, typ string) map[string]any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	c := f.created[vmid]
+	if c == nil || c["node"] != node || c["type"] != typ {
+		return nil
+	}
+	out := map[string]any{"digest": "c0ffee" + vmid}
+	for k, v := range c {
+		switch k {
+		case "node", "type", "vmid", "start", "password", "ssh-public-keys", "storage", "pool", "ostemplate":
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
+// editConfig records a config change: body keys are set, `delete` removes
+// keys, digest and the path variables are not config.
+func (f *Server) editConfig(vmid string, form map[string]string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.edits == nil {
+		f.edits = map[string]map[string]any{}
+	}
+	e := f.edits[vmid]
+	if e == nil {
+		e = map[string]any{}
+		f.edits[vmid] = e
+	}
+	for k, v := range form {
+		switch k {
+		case "digest", "node", "vmid", "skiplock", "force":
+		case "delete", "revert":
+			for _, d := range strings.FieldsFunc(v, func(r rune) bool { return r == ',' || r == ';' || r == ' ' }) {
+				e[d] = nil
+			}
+		default:
+			e[k] = v
+		}
+	}
+	f.configSeq++
+	e["digest"] = fmt.Sprintf("e%03d%s", f.configSeq, vmid)
+}
+
+// withEdits applies recorded config changes to a base config.
+func (f *Server) withEdits(vmid string, cfg map[string]any) map[string]any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for k, v := range f.edits[vmid] {
+		if v == nil {
+			delete(cfg, k)
+		} else {
+			cfg[k] = v
+		}
+	}
+	return cfg
 }

@@ -82,7 +82,7 @@ const apiSchema = [
           "node":{"type":"string"},"vmid":{"type":"integer","minimum":100},"ostemplate":{"type":"string","maxLength":255},
           "hostname":{"type":"string","optional":1},"unprivileged":{"type":"boolean","optional":1},"features":{"type":"string","optional":1},
           "cores":{"type":"integer","optional":1,"minimum":1},"memory":{"type":"integer","optional":1,"minimum":16},"swap":{"type":"integer","optional":1,"minimum":0},
-          "rootfs":{"type":"string","optional":1},"net[n]":{"type":"string","optional":1},"ssh-public-keys":{"type":"string","optional":1},
+          "rootfs":{"type":"string","optional":1},"net[n]":{"type":"string","optional":1},"dev[n]":{"type":"string","optional":1,"format":"pve-lxc-dev","typetext":"[[path=]<Path>] [,deny-write=<1|0>] [,gid=<integer>] [,mode=<Octal access mode>] [,uid=<integer>]","description":"Device to pass through to the container"},"ssh-public-keys":{"type":"string","optional":1},
           "password":{"type":"string","optional":1},"start":{"type":"boolean","optional":1},"onboot":{"type":"boolean","optional":1},"tags":{"type":"string","optional":1}}}}},
       "children":[
        {"path":"/nodes/{node}/lxc/{vmid}","text":"{vmid}","leaf":0,"info":{
@@ -93,7 +93,7 @@ const apiSchema = [
             "PUT":{"method":"PUT","description":"Set container options.","protected":1,"parameters":{"type":"object","properties":{
               "node":{"type":"string"},"vmid":{"type":"integer","minimum":100},"cores":{"type":"integer","optional":1,"minimum":1},"memory":{"type":"integer","optional":1,"minimum":16},
               "swap":{"type":"integer","optional":1,"minimum":0},"hostname":{"type":"string","optional":1},"onboot":{"type":"boolean","optional":1},"features":{"type":"string","optional":1},
-              "net[n]":{"type":"string","optional":1},"mp[n]":{"type":"string","optional":1},"tags":{"type":"string","optional":1},"description":{"type":"string","optional":1},
+              "net[n]":{"type":"string","optional":1},"mp[n]":{"type":"string","optional":1},"dev[n]":{"type":"string","optional":1,"format":"pve-lxc-dev"},"tags":{"type":"string","optional":1},"description":{"type":"string","optional":1},
               "delete":{"type":"string","optional":1},"digest":{"type":"string","optional":1,"maxLength":64}}}}}}
         ]}
       ]},
@@ -111,6 +111,42 @@ const apiSchema = [
         "GET":{"method":"GET","description":"List PCI Hardware Mapping","parameters":{"type":"object","properties":{}}},
         "POST":{"method":"POST","description":"Create a new hardware mapping.","protected":1,"permissions":{"description":"Only admins can create mappings"},"parameters":{"type":"object","properties":{
           "id":{"type":"string","maxLength":128},"map":{"type":"array","items":{"type":"string"}},"description":{"type":"string","optional":1},"mdev":{"type":"boolean","optional":1}}}}}}
+    ]},
+   {"path":"/cluster/ha","text":"ha","leaf":0,"info":{"GET":{"method":"GET","description":"Directory index.","parameters":{"type":"object","properties":{}}}},
+    "children":[
+     {"path":"/cluster/ha/resources","text":"resources","leaf":0,"info":{
+        "GET":{"method":"GET","description":"List HA resources.","permissions":{"check":["perm","/",["Sys.Audit"]]},"parameters":{"type":"object","properties":{
+          "type":{"type":"string","optional":1,"enum":["ct","vm"],"description":"Only list resources of specific type"}}}},
+        "POST":{"method":"POST","description":"Create a new HA resource.","protected":1,"permissions":{"check":["perm","/",["Sys.Console"]]},"parameters":{"type":"object","additionalProperties":0,"properties":{
+          "sid":{"type":"string","format":"pve-ha-resource-or-vm-id","typetext":"<type>:<name>","description":"HA resource ID. This consists of a resource type followed by a resource specific name, separated with colon (example: vm:100 / ct:100). For virtual machines and containers, you can simply use the VM or CT id as a shortcut (example: 100)."},
+          "state":{"type":"string","optional":1,"enum":["started","stopped","enabled","disabled","ignored"],"default":"started","description":"Requested resource state."},
+          "comment":{"type":"string","optional":1,"maxLength":4096,"description":"Description."},
+          "failback":{"type":"boolean","optional":1,"default":1,"description":"Automatically migrate HA resource to the node with the highest priority according to their node affinity rules, if a node with a higher priority than the current node comes online."},
+          "max_restart":{"type":"integer","optional":1,"minimum":0,"default":1,"description":"Maximal number of tries to restart the service on a node after its start failed."},
+          "max_relocate":{"type":"integer","optional":1,"minimum":0,"default":1,"description":"Maximal number of service relocate tries when a service failes to start."}}}}}},
+     {"path":"/cluster/ha/rules","text":"rules","leaf":0,"info":{
+        "GET":{"method":"GET","description":"Get HA rules.","permissions":{"check":["perm","/",["Sys.Audit"]]},"parameters":{"type":"object","properties":{
+          "type":{"type":"string","optional":1,"enum":["node-affinity","resource-affinity"],"description":"Limit the returned list to the specified rule type."},
+          "resource":{"type":"string","optional":1,"format":"pve-ha-resource-id","description":"Limit the returned list to rules affecting the specified resource."}}}},
+        "POST":{"method":"POST","description":"Create HA rule.","protected":1,"permissions":{"check":["perm","/",["Sys.Console"]]},"parameters":{"allOf":[
+          {"additionalProperties":0,"properties":{"rule":{"type":"string","format":"pve-configid","optional":0,"description":"HA rule identifier."}}},
+          {"type-property":"type","type-property-schema":{"type":"string","enum":["node-affinity","resource-affinity"],"description":"HA rule type."},"oneOf":[
+            {"instance-type":"node-affinity","additionalProperties":0,"properties":{
+              "resources":{"type":"string","format":"pve-ha-resource-id-list","description":"List of HA resource IDs. This consists of a list of resource types followed by a resource specific name separated with a colon (example: vm:100,ct:101)."},
+              "nodes":{"type":"string","format":"pve-ha-node-list","description":"List of cluster node names with optional priority."},
+              "strict":{"type":"boolean","optional":1,"default":0,"description":"Describes whether the node affinity rule is strict or non-strict."},
+              "comment":{"type":"string","optional":1,"maxLength":4096,"description":"HA rule description."},
+              "affinity":{"type":"string","optional":1,"enum":["positive","negative"],"description":"Describes whether the HA resources are supposed to be kept on the same node ('positive'), or are supposed to be kept on separate nodes ('negative')."},
+              "disable":{"type":"boolean","optional":1,"default":0,"description":"Whether the HA rule is disabled."}}},
+            {"instance-type":"resource-affinity","additionalProperties":0,"properties":{
+              "resources":{"type":"string","format":"pve-ha-resource-id-list","description":"List of HA resource IDs."},
+              "affinity":{"type":"string","enum":["positive","negative"],"description":"Describes whether the HA resources are supposed to be kept on the same node ('positive'), or are supposed to be kept on separate nodes ('negative')."},
+              "comment":{"type":"string","optional":1,"maxLength":4096,"description":"HA rule description."},
+              "disable":{"type":"boolean","optional":1,"default":0,"description":"Whether the HA rule is disabled."}}}]}]}}}},
+     {"path":"/cluster/ha/status","text":"status","leaf":0,"info":{"GET":{"method":"GET","description":"Directory index.","parameters":{"type":"object","properties":{}}}},
+      "children":[
+       {"path":"/cluster/ha/status/current","text":"current","leaf":1,"info":{"GET":{"method":"GET","description":"Get HA manger status.","parameters":{"type":"object","properties":{}}}}}
+      ]}
     ]}
   ]}
 ];

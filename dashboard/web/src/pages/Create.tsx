@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { ApiError } from '../api/http';
 import { useApp, useCrumbs } from '../state/app';
 import { usePve } from '../lib/hooks';
 import { formatBytes } from '../lib/units';
 import {
-  callsCli, ctCalls, ctProblems, defaultCt, defaultVm, llmPreset, vmCalls, vmProblems, withGpu,
+  callsCli, ctCalls, ctGpuDevices, ctProblems, defaultCt, defaultVm, gpuNodes, llmPreset, pinsGpu, vmCalls, vmProblems, withGpu,
   type ApiCall, type CtSpec, type GpuChoice, type VmSpec,
 } from '../lib/wizard';
+import { mappingNodes, type HaRule } from '../lib/ha';
 import { deviceName, groupPeers, isDisplay, isGpu, mapEntries, mappingFor, mappingsOnNode, type PciDevice, type PciMapping } from '../lib/pci';
 import { ApiErrorView } from '../components/ClusterLogin';
 import { ClusterPicker, useClusterParam } from '../components/ClusterPicker';
@@ -171,6 +172,8 @@ function VmWizard({ cluster, nodes }: { cluster: string; nodes: string[] }) {
   const net = useNetworks(cluster, s.node);
   const mappings = usePve<PciMapping[]>(cluster, 'cluster/mapping/pci');
   const pci = usePve<PciDevice[]>(s.node ? cluster : null, `nodes/${s.node}/hardware/pci`);
+  // only read when pinning: rule ids already in use (reading needs Sys.Audit on /)
+  const haRules = usePve<HaRule[]>(pinsGpu(s) ? cluster : null, 'cluster/ha/rules');
 
   // default the storage to the first one that can hold disks
   useEffect(() => {
@@ -179,7 +182,8 @@ function VmWizard({ cluster, nodes }: { cluster: string; nodes: string[] }) {
   }, [images.data, s.disk.storage]);
 
   const spec: VmSpec = { ...s, iso: media === 'iso' ? s.iso : '', cloudInit: { ...s.cloudInit, enabled: media === 'cloud' }, disk: { ...s.disk, importFrom: media === 'cloud' ? s.disk.importFrom : '' } };
-  const calls = vmCalls(spec);
+  const calls = vmCalls(spec, (haRules.data ?? []).map((r) => r.rule));
+  const pin = pinsGpu(s);
   const problems = vmProblems(spec);
   const idx = VM_STEPS.findIndex((x) => x.id === step);
   const nodeMappings = mappingsOnNode(mappings.data ?? [], s.node);
@@ -188,9 +192,11 @@ function VmWizard({ cluster, nodes }: { cluster: string; nodes: string[] }) {
     <div className="notice notice-info small">
       <div className="grow">
         <strong>{s.gpu.label ?? s.gpu.mapping ?? s.gpu.host}</strong> is attached as hostpci0. The VM uses q35 and OVMF with ballooning off.
-        {s.gpu.mapping
-          ? <> If you put it under HA, add a node-affinity rule for the nodes this mapping covers ({mapEntries(mappings.data?.find((m) => m.id === s.gpu!.mapping) ?? { id: '', map: [] }).map((e) => e.node).join(', ') || s.node}) so HA never moves it to a node without the card.</>
-          : <> A raw device ties the VM to {s.node}: HA and migration cannot move it. Create a PCI mapping on the Hardware page to fix that.</>}
+        {!s.gpu.mapping
+          ? <> A raw device ties the VM to {s.node}: HA and migration cannot move it. Create a PCI mapping on the Hardware page to fix that.</>
+          : pin
+            ? <> HA keeps it on {gpuNodes(s).join(', ')}{s.start ? ' and starts it once it is created' : ''}.</>
+            : <> If you put it under HA later, add a node-affinity rule for {gpuNodes(s).join(', ')} so HA never moves it to a node without the card.</>}
       </div>
     </div>
   );
@@ -199,7 +205,7 @@ function VmWizard({ cluster, nodes }: { cluster: string; nodes: string[] }) {
     action: 'api.call', clusterId: cluster,
     params: {
       title: `Create VM ${s.vmid}${s.name ? ` (${s.name})` : ''} on ${s.node}`,
-      summary: `${s.cores} cores, ${formatBytes(s.memoryMiB * 1024 ** 2)} memory, ${spec.disk.importFrom ? 'disk imported from an image' : `${s.disk.sizeGiB} GiB disk`} on ${s.disk.storage}${s.gpu ? `, GPU ${s.gpu.mapping ?? s.gpu.host}` : ''}.${s.start ? ' Starts when created.' : ''}`,
+      summary: `${s.cores} cores, ${formatBytes(s.memoryMiB * 1024 ** 2)} memory, ${spec.disk.importFrom ? 'disk imported from an image' : `${s.disk.sizeGiB} GiB disk`} on ${s.disk.storage}${s.gpu ? `, GPU ${s.gpu.mapping ?? s.gpu.host}` : ''}.${pin ? ` HA keeps it on ${gpuNodes(s).join(', ')}.` : ''}${s.start ? ' Starts when created.' : ''}`,
       calls,
     },
   });
@@ -212,7 +218,7 @@ function VmWizard({ cluster, nodes }: { cluster: string; nodes: string[] }) {
           <div className="panel-head"><h2>{VM_STEPS[idx].label}</h2>
             {step === 'general' && <button type="button" className="btn btn-sm" onClick={() => {
               const m = nodeMappings[0];
-              setS((x) => llmPreset(x, m ? { mapping: m.id, label: m.id } : null)); setMedia('cloud');
+              setS((x) => llmPreset(x, m ? { mapping: m.id, label: m.id, nodes: mappingNodes(m) } : null)); setMedia('cloud');
             }}>Use the LLM server preset</button>}
           </div>
           <div className="panel-body form-stack">
@@ -339,7 +345,8 @@ function VmWizard({ cluster, nodes }: { cluster: string; nodes: string[] }) {
             </>}
 
             {step === 'gpu' && <GpuStep node={s.node} gpu={s.gpu} mappings={mappings.data} mapErr={mappings.error} pci={pci.data} pciErr={pci.error}
-              onPick={(g) => setS((x) => withGpu(x, g))} onPreset={(g) => { setS((x) => llmPreset(x, g)); setMedia('cloud'); }} cluster={cluster} />}
+              onPick={(g) => setS((x) => withGpu(x, g))} onPreset={(g) => { setS((x) => llmPreset(x, g)); setMedia('cloud'); }} cluster={cluster}
+              pin={s.pinGpu} onPin={(v) => set({ pinGpu: v })} start={s.start} />}
           </div>
           <div className="panel-body wizard-nav">
             <button type="button" className="btn" disabled={idx === 0} onClick={() => setStep(VM_STEPS[idx - 1].id)}>Back</button>
@@ -352,9 +359,10 @@ function VmWizard({ cluster, nodes }: { cluster: string; nodes: string[] }) {
   );
 }
 
-function GpuStep({ node, gpu, mappings, mapErr, pci, pciErr, onPick, onPreset, cluster }: {
+function GpuStep({ node, gpu, mappings, mapErr, pci, pciErr, onPick, onPreset, cluster, pin, onPin, start }: {
   node: string; gpu: GpuChoice | null; mappings: PciMapping[] | null; mapErr: unknown; pci: PciDevice[] | null; pciErr: unknown;
   onPick: (g: GpuChoice | null) => void; onPreset: (g: GpuChoice | null) => void; cluster: string;
+  pin: boolean; onPin: (v: boolean) => void; start: boolean;
 }) {
   const onNode = mappingsOnNode(mappings ?? [], node);
   const others = (mappings ?? []).filter((m) => !onNode.includes(m));
@@ -365,7 +373,7 @@ function GpuStep({ node, gpu, mappings, mapErr, pci, pciErr, onPick, onPreset, c
       <p className="explain">A PCI mapping is the safe choice: it names the card cluster-wide, so HA and migration know which nodes have it. Selecting a GPU switches the VM to q35 and OVMF and turns ballooning off.</p>
       <div className="row-actions">
         <label className="check"><input type="radio" name="gpu" checked={!gpu} onChange={() => onPick(null)} />No GPU</label>
-        <button type="button" className="btn btn-sm" disabled={!onNode.length} onClick={() => onPreset(onNode[0] ? { mapping: onNode[0].id, label: onNode[0].id } : null)}>Use the LLM server preset</button>
+        <button type="button" className="btn btn-sm" disabled={!onNode.length} onClick={() => onPreset(onNode[0] ? { mapping: onNode[0].id, label: onNode[0].id, nodes: mappingNodes(onNode[0]) } : null)}>Use the LLM server preset</button>
       </div>
       <div>
         <div className="section-label">PCI mappings</div>
@@ -380,7 +388,7 @@ function GpuStep({ node, gpu, mappings, mapErr, pci, pciErr, onPick, onPreset, c
                   return (
                     <li key={m.id}>
                       <label className={`choice${sel({ mapping: m.id }) ? ' sel' : ''}${here ? '' : ' disabled'}`}>
-                        <input type="radio" name="gpu" disabled={!here} checked={!!sel({ mapping: m.id })} onChange={() => onPick({ mapping: m.id, label: m.id })} />
+                        <input type="radio" name="gpu" disabled={!here} checked={!!sel({ mapping: m.id })} onChange={() => onPick({ mapping: m.id, label: m.id, nodes: mappingNodes(m) })} />
                         <span className="grow"><span className="mono">{m.id}</span>{m.description ? <span className="muted"> {m.description}</span> : null}
                           <div className="ws">{here ? `${e?.path}${dev ? `, ${deviceName(dev)}` : ''}${e?.iommugroup ? `, IOMMU group ${e.iommugroup}` : ''}` : `Not on ${node}: ${mapEntries(m).map((x) => x.node).join(', ')}`}</div></span>
                       </label>
@@ -390,6 +398,13 @@ function GpuStep({ node, gpu, mappings, mapErr, pci, pciErr, onPick, onPreset, c
               </ul>
             )}
       </div>
+      {gpu?.mapping && (
+        <div className="form-stack">
+          <label className="check"><input type="checkbox" checked={pin} onChange={(e) => onPin(e.target.checked)} />Keep this VM on nodes that have this GPU</label>
+          <p className="explain">Adds the VM to HA with a strict node-affinity rule for {(gpu.nodes?.length ? gpu.nodes : [node]).join(', ')}: HA then restarts it only on those nodes{start ? ', and starts it once it is created' : ''}. Live migration is not possible with passthrough.</p>
+        </div>
+      )}
+      {gpu?.host && <p className="explain">Keeping a VM on the nodes that have its GPU needs a PCI mapping: HA only knows where a card is through a mapping. Create one on the Hardware page.</p>}
       <div>
         <div className="section-label">Display controllers on {node}</div>
         {pciErr ? (pciErr instanceof ApiError && pciErr.status === 403
@@ -425,12 +440,14 @@ function GpuStep({ node, gpu, mappings, mapErr, pci, pciErr, onPick, onPreset, c
 
 const CT_STEPS = [
   { id: 'general', label: 'General' }, { id: 'template', label: 'Template' }, { id: 'disk', label: 'Root disk' },
-  { id: 'cpu', label: 'CPU and memory' }, { id: 'network', label: 'Network' },
+  { id: 'cpu', label: 'CPU and memory' }, { id: 'network', label: 'Network' }, { id: 'gpu', label: 'GPU' },
 ] as const;
 type CtStep = (typeof CT_STEPS)[number]['id'];
 
 function CtWizard({ cluster, nodes }: { cluster: string; nodes: string[] }) {
-  const { openPlan } = useApp();
+  const { openPlan, me } = useApp();
+  const mc = me.clusters.find((c) => c.id === cluster);
+  const hostAdmin = !!(mc?.hostAdmin ?? mc?.admin);
   const [s, setS] = useState<CtSpec>(() => defaultCt(nodes[0]));
   const [step, setStep] = useState<CtStep>('general');
   const set = (p: Partial<CtSpec>) => setS((x) => ({ ...x, ...p }));
@@ -450,7 +467,7 @@ function CtWizard({ cluster, nodes }: { cluster: string; nodes: string[] }) {
   const idx = CT_STEPS.findIndex((x) => x.id === step);
   const review = () => void openPlan({
     action: 'api.call', clusterId: cluster,
-    params: { title: `Create container ${s.vmid} (${s.hostname}) on ${s.node}`, summary: `${s.unprivileged ? 'Unprivileged' : 'Privileged'} container from ${s.template.split('/').pop()}, ${s.cores} cores, ${formatBytes(s.memoryMiB * 1024 ** 2)} memory, ${s.rootfs.sizeGiB} GiB root disk.`, calls },
+    params: { title: `Create container ${s.vmid} (${s.hostname}) on ${s.node}`, summary: `${s.unprivileged ? 'Unprivileged' : 'Privileged'} container from ${s.template.split('/').pop()}, ${s.cores} cores, ${formatBytes(s.memoryMiB * 1024 ** 2)} memory, ${s.rootfs.sizeGiB} GiB root disk.${s.gpu.kind !== 'none' ? ` Shares ${ctGpuDevices(s.gpu)[0].split(',')[0]} of ${s.node}.` : ''}`, calls },
   });
 
   return (
@@ -521,6 +538,33 @@ function CtWizard({ cluster, nodes }: { cluster: string; nodes: string[] }) {
                 </div>
               )}
               <label className="check"><input type="checkbox" checked={s.net.firewall} onChange={(e) => set({ net: { ...s.net, firewall: e.target.checked } })} />PVE firewall on this interface</label>
+            </>}
+            {step === 'gpu' && <>
+              <p className="explain">A container shares a GPU with the host: the host keeps its driver and the container gets the device nodes. Several containers can share one card. A GPU passed through to a VM (vfio-pci) cannot be shared.</p>
+              <fieldset className="field fieldset"><legend className="label">GPU</legend>
+                <div className="row-actions">
+                  {([['none', 'No GPU'], ['nvidia', 'Share an NVIDIA GPU (host driver)'], ['dri', 'Share an Intel/AMD GPU (/dev/dri)']] as const).map(([v, l]) => (
+                    <label key={v} className="check"><input type="radio" name="ct-gpu" checked={s.gpu.kind === v} onChange={() => set({ gpu: { ...s.gpu, kind: v } })} />{l}</label>))}
+                </div>
+              </fieldset>
+              {s.gpu.kind === 'nvidia' && <>
+                <div className="form-row">
+                  <label className="field"><span className="label">NVIDIA GPU number</span>
+                    <input type="number" min={0} value={s.gpu.index} onChange={(e) => set({ gpu: { ...s.gpu, index: e.target.value === '' ? 0 : Number(e.target.value) } })} />
+                    <span className="hint">N in /dev/nvidiaN counts the GPUs on the NVIDIA host driver of {s.node} in PCI order (cards on vfio-pci do not count). Check with <code>nvidia-smi -L</code> on the node.</span></label>
+                </div>
+                {hostAdmin && <div><button type="button" className="btn btn-sm" onClick={() => void openPlan({ action: 'host.exec', clusterId: cluster, params: { node: s.node, command: 'nvidia-smi -L', reason: 'List the GPUs on the NVIDIA host driver' } })}>Check on {s.node}</button></div>}
+                <p className="explain">Adds /dev/nvidia{s.gpu.index}, /dev/nvidiactl, /dev/nvidia-uvm and /dev/nvidia-uvm-tools. The container needs the NVIDIA userland of the same driver version as the host, without the kernel module. <Link to="/help/hardware-and-gpus">How to set it up</Link></p>
+              </>}
+              {s.gpu.kind === 'dri' && (
+                <div className="form-row">
+                  <label className="field" style={{ flex: '2 1 220px' }}><span className="label">Render node</span>
+                    <input value={s.gpu.dri} onChange={(e) => set({ gpu: { ...s.gpu, dri: e.target.value } })} spellCheck={false} className="mono" /></label>
+                  <label className="field"><span className="label">Group id in the container (optional)</span>
+                    <input value={s.gpu.gid} onChange={(e) => set({ gpu: { ...s.gpu, gid: e.target.value.trim() } })} inputMode="numeric" placeholder="render group, e.g. 104" /></label>
+                </div>
+              )}
+              {s.gpu.kind !== 'none' && <p className="explain">A shared GPU has no PCI mapping, so galley does not pin the container to this node with HA. Keep it out of HA, or pin it yourself.</p>}
             </>}
           </div>
           <div className="panel-body wizard-nav">

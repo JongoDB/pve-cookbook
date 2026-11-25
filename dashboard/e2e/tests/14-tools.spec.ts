@@ -32,6 +32,37 @@ test.describe('hardware @fast', () => {
   });
 });
 
+test.describe('hardware: GPU pinning and driver check @fast', () => {
+  test('pin a VM that uses a mapping to the nodes with the card', async ({ page }) => {
+    await page.goto('/hardware');
+    await settle(page);
+    const row = page.getByRole('region', { name: 'PCI mappings' }).getByRole('row').filter({ hasText: 'gpu-a2-0' });
+    await expect(row).toContainText('llm-vllm');
+    const req = planReq(page);
+    await row.getByRole('button', { name: 'Pin to GPU nodes' }).click();
+    const calls = (await req).postDataJSON().params.calls;
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toMatchObject({ method: 'POST', path: '/cluster/ha/resources', body: { sid: 'vm:300' } });
+    expect(calls[0].body.state).toMatch(/^(started|stopped)$/); // follows the VM's power state (earlier specs start it)
+    expect(calls[1]).toMatchObject({ method: 'POST', path: '/cluster/ha/rules', body: { rule: 'gpu-300', type: 'node-affinity', resources: 'vm:300', nodes: 'pve1', strict: '1' } });
+    await applyChange(page, { title: 'Pin VM 300 (llm-vllm) to the nodes with gpu-a2-0' });
+    await expect(row).toContainText('pinned to pve1');
+    await expect(row.getByRole('button', { name: 'Pin to GPU nodes' })).toHaveCount(0);
+  });
+
+  test('check driver drafts lspci on the node for a host admin', async ({ page }) => {
+    await page.goto('/hardware');
+    await settle(page);
+    const gpu = page.getByRole('region', { name: 'pve1' }).getByRole('row').filter({ hasText: '0000:16:00.0' });
+    const req = planReq(page);
+    await gpu.getByRole('button', { name: 'Check driver' }).click();
+    expect((await req).postDataJSON()).toMatchObject({ action: 'host.exec', clusterId: CLUSTER, params: { node: 'pve1', command: 'lspci -nnk -s 0000:16:00.0', reason: 'Show which kernel driver uses NVIDIA Corporation GA107GL [A2 / A16]' } });
+    await expect(changes(page).getByLabel('Commands this change runs')).toContainText('lspci -nnk -s 0000:16:00.0');
+    await changes(page).getByRole('button', { name: 'Discard' }).click();
+    await expect(changes(page).getByText('No change open')).toBeVisible();
+  });
+});
+
 test.describe('protection @fast', () => {
   test('add an unprotected guest to the backup job', async ({ page }) => {
     await page.goto('/protection');

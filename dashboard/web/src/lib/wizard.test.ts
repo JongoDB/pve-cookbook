@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { callsCli, ctCalls, ctProblems, defaultCt, defaultVm, llmPreset, vmCalls, vmProblems, withGpu, type VmSpec } from './wizard';
+import { callsCli, ctCalls, ctProblems, defaultCt, defaultCtGpu, defaultVm, llmPreset, vmCalls, vmProblems, withGpu, type VmSpec } from './wizard';
 
 const base = (): VmSpec => ({ ...defaultVm('pve1'), vmid: '301', name: 'web03', disk: { ...defaultVm().disk, storage: 'vm-pool', sizeGiB: 40 } });
 
@@ -32,6 +32,23 @@ describe('VM wizard → calls', () => {
     expect(vmProblems({ ...s, machine: 'pc' })).toContain('GPU passthrough needs machine q35 and OVMF.');
   });
 
+  it('a mapped GPU pins the VM with an HA resource and a strict node-affinity rule (on by default)', () => {
+    const s = withGpu(base(), { mapping: 'gpu-a2-0', nodes: ['pve1', 'pve2'] });
+    const calls = vmCalls(s);
+    expect(calls.map((c) => `${c.method} ${c.path}`)).toEqual(['POST /nodes/pve1/qemu', 'POST /cluster/ha/resources', 'POST /cluster/ha/rules']);
+    expect(calls[1].body).toEqual({ sid: 'vm:301', state: 'stopped' });
+    expect(calls[2].body).toEqual({ rule: 'gpu-301', type: 'node-affinity', resources: 'vm:301', nodes: 'pve1,pve2', strict: '1', comment: 'galley: gpu-a2-0 only exists on these nodes' });
+    // "start after it is created": HA starts it, no start= on the create call
+    const started = vmCalls({ ...s, start: true }, ['gpu-301']);
+    expect(started[0].body.start).toBeUndefined();
+    expect(started[1].body.state).toBe('started');
+    expect(started[2].body.rule).toBe('gpu-301-2');
+    // option off, or a raw device: one call, start as before
+    expect(vmCalls({ ...s, pinGpu: false, start: true })).toHaveLength(1);
+    expect(vmCalls({ ...s, pinGpu: false, start: true })[0].body.start).toBe('1');
+    expect(vmCalls(withGpu(base(), { host: '0000:16:00.0' }))).toHaveLength(1);
+  });
+
   it('the LLM server preset: GPU, 16+ cores, 64 GiB, 200 GiB disk, cloud-init', () => {
     const s = llmPreset({ ...base(), name: '' }, { mapping: 'gpu-a2-0' });
     expect(s).toMatchObject({ name: 'llm-server', cores: 16, memoryMiB: 65536, balloonMiB: 0, machine: 'q35', bios: 'ovmf' });
@@ -61,6 +78,20 @@ describe('VM wizard → calls', () => {
 
   it('previews the exact pvesh commands', () => {
     expect(callsCli(vmCalls(base()))).toMatch(/^pvesh create \/nodes\/pve1\/qemu --agent 1 --bios ovmf --boot 'order=scsi0;net0' --cores 2 /);
+  });
+});
+
+describe('container GPU share', () => {
+  const ct = () => ({ ...defaultCt('pve1'), vmid: '410', hostname: 'cuda01', template: 'local:vztmpl/x.tar.zst', rootfs: { storage: 'vm-pool', sizeGiB: 8 }, sshKeys: 'ssh-ed25519 AAAAC3Nza me@laptop' });
+  it('NVIDIA (host driver): dev0..dev3 with the chosen GPU number', () => {
+    const [c] = ctCalls({ ...ct(), gpu: { ...defaultCtGpu(), kind: 'nvidia', index: 1 } });
+    expect(c.body).toMatchObject({ dev0: '/dev/nvidia1', dev1: '/dev/nvidiactl', dev2: '/dev/nvidia-uvm', dev3: '/dev/nvidia-uvm-tools' });
+  });
+  it('Intel/AMD: the render node, with an optional gid', () => {
+    expect(ctCalls({ ...ct(), gpu: { ...defaultCtGpu(), kind: 'dri', gid: '104' } })[0].body.dev0).toBe('/dev/dri/renderD128,gid=104');
+    expect(ctCalls(ct())[0].body.dev0).toBeUndefined();
+    expect(ctProblems({ ...ct(), gpu: { ...defaultCtGpu(), kind: 'dri', dri: '/dev/sda', gid: 'x' } })).toEqual(['The render node must look like /dev/dri/renderD128.', 'The group id must be a number.']);
+    expect(ctProblems({ ...ct(), gpu: { ...defaultCtGpu(), kind: 'nvidia', index: -1 } })).toEqual(['The NVIDIA GPU number must be 0 or more.']);
   });
 });
 

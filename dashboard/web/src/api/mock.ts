@@ -284,6 +284,8 @@ export class MockApi implements Api {
   private seededAgentDraft = false;
   private feedbackCfg: FeedbackConfig = { enabled: true, repo: 'JongoDB/pve-cookbook' };
   private mappings: MockMapping[] = seedMappings();
+  /** PVE 9 HA rules (GET/POST /cluster/ha/rules), per cluster */
+  private haRules: { clusterId: string; rule: string; type: string; resources: string; nodes?: string; strict?: number; affinity?: string; comment?: string }[] = [];
   /** config edits applied by api.call changes; null = deleted key */
   private configEdits = new Map<string, Record<string, string | null>>();
   private schemaNodes = mockSchema();
@@ -814,6 +816,23 @@ export class MockApi implements Api {
       if (gx && s.body.name) gx.name = String(s.body.name);
       return;
     }
+    const str = (k: string) => (s.body[k] === undefined ? '' : String(s.body[k]));
+    if (s.method === 'POST' && s.path === '/cluster/ha/resources') {
+      const sid = /^\d+$/.test(str('sid')) ? `vm:${str('sid')}` : str('sid');
+      const gx = this.guestsState.find((x) => x.clusterId === clusterId && `${x.type === 'qemu' ? 'vm' : 'ct'}:${x.vmid}` === sid);
+      if (!gx) throw new Error(`unable to find ${sid}`);
+      if (gx.hastate) throw new Error(`resource ID '${sid}' already defined`);
+      gx.hastate = str('state') || 'started';
+      if (gx.hastate === 'started' && gx.status !== 'running') { gx.status = 'running'; gx.uptime = 1; }
+      return;
+    }
+    if (s.method === 'POST' && s.path === '/cluster/ha/rules') {
+      const b = Object.fromEntries(Object.keys(s.body).map((k) => [k, str(k)]));
+      if (this.haRules.some((x) => x.clusterId === clusterId && x.rule === b.rule)) throw new Error(`HA rule '${b.rule}' already defined`);
+      this.haRules.push({ clusterId, rule: b.rule, type: b.type, resources: b.resources, ...(b.nodes ? { nodes: b.nodes } : {}), ...(b.strict ? { strict: Number(b.strict === '1' || b.strict === 'true') } : {}),
+        ...(b.affinity ? { affinity: b.affinity } : {}), ...(b.comment ? { comment: b.comment } : {}) });
+      return;
+    }
     if (s.method === 'POST' && s.path === '/cluster/mapping/pci') {
       const id = String(s.body.id);
       if (this.mappings.some((x) => x.id === id)) throw new Error(`mapping '${id}' already exists`);
@@ -1126,6 +1145,10 @@ export class MockApi implements Api {
     if (p === 'cluster/mapping/pci') return (clusterId === 'pve-lab' ? structuredClone(this.mappings) : []) as T;
     if (p === 'version') return { version: '9.2.32', release: '9.2', repoid: '2a0f1e3c' } as T;
     if (p === 'access/users') return [{ userid: 'root@pam', enable: 1, expire: 0, firstname: '', comment: 'Built-in superuser' }, { userid: 'galley@pve', enable: 1, comment: 'galley poller' }] as T;
+    if (p === 'cluster/ha/rules') {
+      return this.haRules.filter((x) => x.clusterId === clusterId && (!query.type || x.type === query.type) && (!query.resource || x.resources.split(',').includes(String(query.resource))))
+        .map((x, i) => { const { clusterId: cid, ...rest } = x; void cid; return { ...rest, order: i + 1, digest: 'beef' }; }) as T;
+    }
     if (p === 'cluster/ha/resources') return this.guestsState.filter((x) => x.clusterId === clusterId && x.hastate).map((x) => ({ sid: `${x.type === 'qemu' ? 'vm' : 'ct'}:${x.vmid}`, state: x.hastate, type: x.type === 'qemu' ? 'vm' : 'ct' })) as T;
     if ((m = p.match(/^nodes\/([^/]+)\/(qemu|lxc)$/))) {
       return this.guestsState.filter((x) => x.clusterId === clusterId && x.node === m![1] && x.type === m![2]).map((x) => ({ vmid: x.vmid, name: x.name, status: x.status, maxmem: x.maxmem, cpus: x.maxcpu })) as T;

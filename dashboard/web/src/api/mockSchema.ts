@@ -246,6 +246,22 @@ export function mockSchema(): MockSchemaNode[] {
         }, perm(['perm', '/', ['Sys.Console']])),
       },
     },
+    {
+      // PVE 9 describes POST with allOf + oneOf on "type" (see internal/schema); the mock lists the union.
+      path: '/cluster/ha/rules', text: 'rules', info: {
+        GET: m('GET', 'index', 'Get HA rules.', { type: en('Limit the returned list to the specified rule type.', ['node-affinity', 'resource-affinity']), resource: str('Limit the returned list to rules affecting the specified resource.') }, perm(['perm', '/', ['Sys.Audit']]), { type: 'array' }),
+        POST: m('POST', 'create_rule', 'Create HA rule.', {
+          rule: { type: 'string', description: 'HA rule identifier.', format: 'pve-configid' },
+          type: { type: 'string', enum: ['node-affinity', 'resource-affinity'], description: 'HA rule type.' },
+          resources: { type: 'string', description: 'List of HA resource IDs. This consists of a list of resource types followed by a resource specific name separated with a colon (example: vm:100,ct:101).', format: 'pve-ha-resource-id-list' },
+          nodes: str('List of cluster node names with optional priority. (node-affinity)', { format: 'pve-ha-node-list' }),
+          strict: bool('Describes whether the node affinity rule is strict or non-strict. (node-affinity)', 0),
+          affinity: en('Describes whether the HA resources are supposed to be kept on the same node (\'positive\'), or are supposed to be kept on separate nodes (\'negative\'). (resource-affinity)', ['positive', 'negative']),
+          comment: str('HA rule description.', { maxLength: 4096 }),
+          disable: bool('Whether the HA rule is disabled.', 0),
+        }, perm(['perm', '/', ['Sys.Console']])),
+      },
+    },
     { path: '/access/users', text: 'users', info: { GET: m('GET', 'index', 'User index.', { enabled: bool('Optional filter for enable property.'), full: bool('Include group and token information.', 0) }, perm([], 'The returned list is restricted to users where you have \'User.Modify\' or \'Sys.Audit\' permissions on \'/access/groups\' or on a group the user belongs too.'), { type: 'array' }) } },
     { path: '/version', text: 'version', info: { GET: m('GET', 'version', 'API version details, including some parts of the global datacenter config.', {}, perm([], 'Accessible by all authenticated users.'), { type: 'object' }) } },
   ];

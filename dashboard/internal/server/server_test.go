@@ -782,3 +782,80 @@ func TestAPICallPathCanonicalAndDestructive(t *testing.T) {
 		t.Fatalf("encoded pass-through path accepted: %+v", e)
 	}
 }
+
+// Pinning a GPU VM: an HA resource plus a strict node-affinity rule (PVE 9's
+// composite rules schema). Adding a stopped guest as "stopped" stops nothing,
+// so it needs no typed confirmation; a running guest would be stopped.
+func TestHAPinGPUChange(t *testing.T) {
+	h := newHarness(t)
+	h.setup()
+	root := h.login("root@pam", "secret")
+	pin := []map[string]any{
+		{"method": "POST", "path": "/cluster/ha/resources", "body": map[string]string{"sid": "vm:300", "state": "stopped"}},
+		{"method": "POST", "path": "/cluster/ha/rules", "body": map[string]string{"rule": "gpu-300", "type": "node-affinity", "resources": "vm:300", "nodes": "pve1", "strict": "1", "comment": "galley: gpu-a2-0 only exists on these nodes"}},
+	}
+	var p plan.Plan
+	if code := root.do("POST", "/api/plans", map[string]any{"action": "api.call", "clusterId": "pve-lab", "params": map[string]any{"calls": pin}}, &p); code != 200 && code != 201 {
+		t.Fatalf("pin plan: %d", code)
+	}
+	if p.Destructive || p.ConfirmText != "" {
+		t.Fatalf("adding a stopped guest to HA as stopped treated as destructive: %+v", p)
+	}
+	if e := root.runAndWait("api.call", map[string]any{"title": "Pin VM 300", "calls": pin}, ""); !e.OK {
+		t.Fatalf("pin: %+v", e)
+	}
+	var rules struct{ Data []map[string]any }
+	if code := root.do("GET", "/api/clusters/pve-lab/pve/cluster/ha/rules", nil, &rules); code != 200 || len(rules.Data) != 1 ||
+		rules.Data[0]["rule"] != "gpu-300" || rules.Data[0]["nodes"] != "pve1" || rules.Data[0]["strict"] != float64(1) || rules.Data[0]["type"] != "node-affinity" {
+		t.Fatalf("rules: %d %+v", code, rules.Data)
+	}
+	var res struct{ Data []map[string]any }
+	if code := root.do("GET", "/api/clusters/pve-lab/pve/cluster/ha/resources", nil, &res); code != 200 || len(res.Data) != 2 || res.Data[1]["sid"] != "vm:300" || res.Data[1]["state"] != "stopped" {
+		t.Fatalf("resources: %d %+v", code, res.Data)
+	}
+	// a running guest added as stopped would be stopped by HA
+	p = plan.Plan{}
+	root.do("POST", "/api/plans", map[string]any{"action": "api.call", "clusterId": "pve-lab", "params": map[string]any{"calls": []map[string]any{
+		{"method": "POST", "path": "/cluster/ha/resources", "body": map[string]string{"sid": "vm:121", "state": "stopped"}}}}}, &p)
+	if !p.Destructive {
+		t.Fatalf("stopping a running guest through HA not destructive: %+v", p)
+	}
+	// the chosen variant decides the parameters: node-affinity needs nodes
+	var e struct{ Error string }
+	if code := root.do("POST", "/api/plans", map[string]any{"action": "api.call", "clusterId": "pve-lab", "params": map[string]any{"calls": []map[string]any{
+		{"method": "POST", "path": "/cluster/ha/rules", "body": map[string]string{"rule": "x1", "type": "node-affinity", "resources": "vm:300"}}}}}, &e); code != 400 || !strings.Contains(e.Error, "nodes") {
+		t.Fatalf("rule without nodes accepted: %d %+v", code, e)
+	}
+}
+
+// A container sharing the host's NVIDIA GPU: devN entries pass schema
+// validation, and the fake cluster keeps the created config for reading back.
+func TestContainerGPUShare(t *testing.T) {
+	h := newHarness(t)
+	h.setup()
+	root := h.login("root@pam", "secret")
+	body := map[string]string{"vmid": "410", "hostname": "cuda01", "ostemplate": "local:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst",
+		"dev0": "/dev/nvidia0", "dev1": "/dev/nvidiactl", "dev2": "/dev/nvidia-uvm", "dev3": "/dev/nvidia-uvm-tools"}
+	if e := root.runAndWait("api.call", map[string]any{"calls": []map[string]any{{"method": "POST", "path": "/nodes/pve1/lxc", "body": body}}}, ""); !e.OK {
+		t.Fatalf("create: %+v", e)
+	}
+	var cfg struct{ Data map[string]any }
+	if code := root.do("GET", "/api/clusters/pve-lab/pve/nodes/pve1/lxc/410/config", nil, &cfg); code != 200 || cfg.Data["dev0"] != "/dev/nvidia0" || cfg.Data["dev3"] != "/dev/nvidia-uvm-tools" || cfg.Data["hostname"] != "cuda01" {
+		t.Fatalf("config: %d %+v", code, cfg.Data)
+	}
+}
+
+// The fake cluster keeps config edits: later reads see them, with a new digest.
+func TestFakeConfigEditsPersist(t *testing.T) {
+	h := newHarness(t)
+	h.setup()
+	root := h.login("root@pam", "secret")
+	if e := root.runAndWait("api.call", map[string]any{"calls": []map[string]any{
+		{"method": "PUT", "path": "/nodes/pve1/qemu/120/config", "body": map[string]string{"cores": "6", "delete": "onboot", "digest": "f00d120"}}}}, "confirm 120/config"); !e.OK {
+		t.Fatalf("edit: %+v", e)
+	}
+	var cfg struct{ Data map[string]any }
+	if code := root.do("GET", "/api/clusters/pve-lab/pve/nodes/pve1/qemu/120/config", nil, &cfg); code != 200 || cfg.Data["cores"] != "6" || cfg.Data["onboot"] != nil || cfg.Data["digest"] == "f00d120" || cfg.Data["name"] != "web01" {
+		t.Fatalf("config after edit: %d %+v", code, cfg.Data)
+	}
+}

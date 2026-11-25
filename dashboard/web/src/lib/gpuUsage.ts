@@ -8,7 +8,7 @@ export interface GpuUser { guest: Guest; key: string; mapping?: string; host?: s
 export interface ClusterGpus {
   clusterId: string;
   mappings: PciMapping[];
-  /** running VMs with a hostpciN, by what they reference */
+  /** VMs with a hostpciN (running ones only, unless includeStopped), by what they reference */
   users: GpuUser[];
   error?: string;
 }
@@ -40,14 +40,16 @@ async function pool<T, R>(items: T[], n: number, fn: (t: T) => Promise<R>): Prom
 
 /**
  * PCI mappings and which running VMs use passthrough, per cluster. A mapping counts as assigned
- * when a running VM's config has a hostpciN with mapping=<id>. Reads at most 60 VM configs per
- * cluster (cached for a minute), through the user's own PVE session.
+ * when a running VM's config has a hostpciN with mapping=<id>. includeStopped also reads the
+ * configs of stopped VMs (Hardware lists them, e.g. to pin them to their GPU's nodes). Reads at
+ * most 60 VM configs per cluster (cached for a minute), through the user's own PVE session.
  */
-export function useGpuUsage(clusterIds: string[], refresh = ''): ClusterGpus[] | null {
+export function useGpuUsage(clusterIds: string[], refresh = '', includeStopped = false): ClusterGpus[] | null {
   const { api, guests } = useApp();
   const [data, setData] = useState<ClusterGpus[] | null>(null);
-  const running = (guests ?? []).filter((g) => g.type === 'qemu' && g.status === 'running' && clusterIds.includes(g.clusterId));
-  const key = `${clusterIds.join(',')}|${running.map((g) => `${g.clusterId}:${g.vmid}@${g.node}`).join(',')}|${refresh}`;
+  const running = (guests ?? []).filter((g) => g.type === 'qemu' && !g.template && (includeStopped || g.status === 'running') && clusterIds.includes(g.clusterId))
+    .sort((a, b) => Number(b.status === 'running') - Number(a.status === 'running'));
+  const key = `${clusterIds.join(',')}|${running.map((g) => `${g.clusterId}:${g.vmid}@${g.node}:${g.status}`).join(',')}|${refresh}`;
   const ready = guests !== null;
   useEffect(() => {
     if (!ready) return;
@@ -76,3 +78,5 @@ export function useGpuUsage(clusterIds: string[], refresh = ''): ClusterGpus[] |
 }
 
 export const usersOf = (c: ClusterGpus, mappingId: string) => c.users.filter((u) => u.mapping === mappingId);
+/** Users of a mapping whose VM is running (the one holding the card). */
+export const runningUsersOf = (c: ClusterGpus, mappingId: string) => usersOf(c, mappingId).filter((u) => u.guest.status === 'running');

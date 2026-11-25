@@ -1,5 +1,6 @@
 // Create wizards → api.call changes. Pure so the exact calls can be tested and previewed.
 import { pveshCli, type Body } from './schemaForm';
+import { pinCalls } from './ha';
 
 export interface ApiCall { method: 'POST' | 'PUT' | 'DELETE'; path: string; body: Body }
 
@@ -10,6 +11,8 @@ export interface GpuChoice {
   host?: string;
   /** shown in previews and notes */
   label?: string;
+  /** nodes the mapping has a device on (from its map entries) */
+  nodes?: string[];
 }
 
 export interface VmSpec {
@@ -34,6 +37,8 @@ export interface VmSpec {
   iso: string;
   cloudInit: { enabled: boolean; storage: string; user: string; sshKeys: string; ip: 'dhcp' | 'static'; cidr: string; gateway: string };
   gpu: GpuChoice | null;
+  /** with a mapped GPU: add the VM to HA with a strict node-affinity rule for the mapping's nodes */
+  pinGpu: boolean;
   start: boolean;
   onboot: boolean;
   tags: string;
@@ -45,7 +50,7 @@ export const defaultVm = (node = ''): VmSpec => ({
   disk: { storage: '', sizeGiB: 32, iothread: true, discard: true, ssd: true, importFrom: '' },
   net: { bridge: 'vmbr0', model: 'virtio', vlan: '', firewall: true },
   iso: '', cloudInit: { enabled: false, storage: '', user: '', sshKeys: '', ip: 'dhcp', cidr: '', gateway: '' },
-  gpu: null, start: false, onboot: false, tags: '',
+  gpu: null, pinGpu: true, start: false, onboot: false, tags: '',
 });
 
 /**
@@ -88,8 +93,18 @@ export function vmProblems(s: VmSpec): string[] {
   return p;
 }
 
-/** The one create call for a VM. Starting is the `start` parameter of the same call. */
-export function vmCalls(s: VmSpec): ApiCall[] {
+/** Whether the VM is pinned to its GPU's nodes by HA (a mapped GPU with the option on). */
+export const pinsGpu = (s: VmSpec) => !!s.gpu?.mapping && s.pinGpu;
+
+/** Nodes HA may run a pinned VM on: the mapping's nodes, or at least the VM's own. */
+export const gpuNodes = (s: VmSpec) => (s.gpu?.nodes?.length ? s.gpu.nodes : [s.node]);
+
+/**
+ * The create call for a VM. Starting is the `start` parameter of the same call, unless the VM is
+ * pinned to its GPU's nodes: then an HA resource (state started or stopped) and a strict
+ * node-affinity rule follow, and HA starts it. takenRules: HA rule ids already in use.
+ */
+export function vmCalls(s: VmSpec, takenRules: string[] = []): ApiCall[] {
   const b: Body = {
     vmid: s.vmid,
     ostype: s.ostype,
@@ -129,8 +144,11 @@ export function vmCalls(s: VmSpec): ApiCall[] {
   if (s.gpu) b.hostpci0 = `${s.gpu.mapping ? `mapping=${s.gpu.mapping}` : s.gpu.host},pcie=1`;
   if (s.onboot) b.onboot = '1';
   if (s.tags.trim()) b.tags = s.tags.trim().split(/[\s,;]+/).filter(Boolean).join(';');
-  if (s.start) b.start = '1';
-  return [{ method: 'POST', path: `/nodes/${s.node}/qemu`, body: b }];
+  const pin = pinsGpu(s);
+  if (s.start && !pin) b.start = '1';
+  const calls: ApiCall[] = [{ method: 'POST', path: `/nodes/${s.node}/qemu`, body: b }];
+  if (pin) calls.push(...pinCalls({ vmid: s.vmid, mapping: s.gpu!.mapping!, nodes: gpuNodes(s), state: s.start ? 'started' : 'stopped', takenRules }));
+  return calls;
 }
 
 // ---- containers ----
@@ -150,15 +168,39 @@ export interface CtSpec {
   net: { bridge: string; vlan: string; ip: 'dhcp' | 'static'; cidr: string; gateway: string; firewall: boolean };
   /** OpenSSH public keys, one per line. galley never asks for a root password. */
   sshKeys: string;
+  /** a GPU shared with the host (its driver stays on the host): device nodes as devN entries */
+  gpu: CtGpu;
   start: boolean;
   onboot: boolean;
   tags: string;
 }
 
+export interface CtGpu {
+  kind: 'none' | 'nvidia' | 'dri';
+  /** NVIDIA: N of /dev/nvidiaN, counting the GPUs on the host driver in PCI order (nvidia-smi -L) */
+  index: number;
+  /** Intel/AMD: the render node, e.g. /dev/dri/renderD128 */
+  dri: string;
+  /** Intel/AMD: optional gid for the node inside the container (the render group) */
+  gid: string;
+}
+
+export const defaultCtGpu = (): CtGpu => ({ kind: 'none', index: 0, dri: '/dev/dri/renderD128', gid: '' });
+
+/** The NVIDIA device nodes a CUDA container needs: the GPU, the control device and UVM. */
+export const nvidiaDevices = (index: number) => [`/dev/nvidia${index}`, '/dev/nvidiactl', '/dev/nvidia-uvm', '/dev/nvidia-uvm-tools'];
+
+/** PVE 9 devN values (`devN: <path>[,gid=…]`) for a shared GPU. */
+export function ctGpuDevices(g: CtGpu): string[] {
+  if (g.kind === 'nvidia') return nvidiaDevices(g.index);
+  if (g.kind === 'dri') return [`${g.dri.trim()}${g.gid.trim() ? `,gid=${g.gid.trim()}` : ''}`];
+  return [];
+}
+
 export const defaultCt = (node = ''): CtSpec => ({
   node, vmid: '', hostname: '', template: '', unprivileged: true, nesting: true, cores: 1, memoryMiB: 1024, swapMiB: 512,
   rootfs: { storage: '', sizeGiB: 8 }, net: { bridge: 'vmbr0', vlan: '', ip: 'dhcp', cidr: '', gateway: '', firewall: true },
-  sshKeys: '', start: true, onboot: false, tags: '',
+  sshKeys: '', gpu: defaultCtGpu(), start: true, onboot: false, tags: '',
 });
 
 export function ctProblems(s: CtSpec): string[] {
@@ -174,6 +216,9 @@ export function ctProblems(s: CtSpec): string[] {
   if (!s.sshKeys.trim()) p.push('Add at least one SSH public key: galley does not set root passwords.');
   else if (s.sshKeys.split('\n').some((l) => l.trim() && !/^(ssh-(ed25519|rsa|dss)|ecdsa-sha2-\S+|sk-\S+) \S+/.test(l.trim()))) p.push('Every SSH key line must be an OpenSSH public key (ssh-ed25519 AAAA…).');
   if (/PRIVATE KEY/.test(s.sshKeys)) p.push('That is a private key. Paste the public key (.pub) only.');
+  if (s.gpu.kind === 'nvidia' && !(Number.isInteger(s.gpu.index) && s.gpu.index >= 0 && s.gpu.index < 64)) p.push('The NVIDIA GPU number must be 0 or more.');
+  if (s.gpu.kind === 'dri' && !/^\/dev\/dri\/[A-Za-z0-9_-]+$/.test(s.gpu.dri.trim())) p.push('The render node must look like /dev/dri/renderD128.');
+  if (s.gpu.kind === 'dri' && s.gpu.gid.trim() && !/^\d+$/.test(s.gpu.gid.trim())) p.push('The group id must be a number.');
   return p;
 }
 
@@ -196,6 +241,7 @@ export function ctCalls(s: CtSpec): ApiCall[] {
     'ssh-public-keys': s.sshKeys.trim(),
   };
   if (s.nesting) b.features = 'nesting=1';
+  ctGpuDevices(s.gpu).forEach((d, i) => { b[`dev${i}`] = d; });
   if (s.onboot) b.onboot = '1';
   if (s.tags.trim()) b.tags = s.tags.trim().split(/[\s,;]+/).filter(Boolean).join(';');
   if (s.start) b.start = '1';

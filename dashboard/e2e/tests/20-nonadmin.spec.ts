@@ -65,6 +65,7 @@ test.describe('restricted user @fast', () => {
     await settle(page);
     await expect(page.getByRole('region', { name: 'PCI mappings' })).toContainText('gpu-a2-0');
     await expect(page.getByRole('region', { name: 'pve1' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Check driver' })).toHaveCount(0); // host admins only
   });
 
   test('its changes run as itself', async ({ page }) => {

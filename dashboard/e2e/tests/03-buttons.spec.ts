@@ -13,7 +13,7 @@ const SKIP = new RegExp([
   '^(Destroy|Remove|Revoke|Delete|Unpin|Log out|Apply|Discard|Reset to default|Send|Start|Shut down|Reboot|Stop)\\b',
   'Review', '^Save', 'Create token', 'Rename cluster', '^Pin ', '^Add to ', 'Delete the key', '^Run$', '^Log in',
   '^Add (?!device$)', '^Move .* (earlier|later)$', '^Change width', '^Choose what', 'Use the LLM server preset',
-  '^Keep', '^Done, I copied', '^Read host key', 'Try again', 'Take snapshot',
+  '^Keep', '^Check driver', '^Check on ', '^Done, I copied', '^Read host key', 'Try again', 'Take snapshot',
 ].join('|'));
 
 const CANDIDATES = 'button, [role="tab"], [role="menuitem"], [role="radio"]:not(input), summary';

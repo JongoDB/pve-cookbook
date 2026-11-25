@@ -1,6 +1,6 @@
 ---
 title: Create a VM or container
-summary: Use the Create wizards to build a new VM or container, attach a GPU, use the LLM server preset, and boot from a cloud image.
+summary: Use the Create wizards to build a new VM or container, attach a GPU and pin the VM to its nodes with HA, share a GPU with a container, use the LLM server preset, and boot from a cloud image.
 order: 60
 route: /create
 ---
@@ -36,7 +36,7 @@ The **Create** page builds a new VM or container step by step. It does not creat
 
 Defaults: 2 cores, 1 socket, CPU type `host`, 4096 MiB memory, q35 with OVMF, a 32 GiB disk, and a VirtIO network device on `vmbr0` with the firewall on.
 
-The result is a single call, `POST /nodes/<node>/qemu` (`pvesh create /nodes/<node>/qemu …`). If you ticked **Start after it is created**, the same call starts the VM.
+The result is a single call, `POST /nodes/<node>/qemu` (`pvesh create /nodes/<node>/qemu …`). If you ticked **Start after it is created**, the same call starts the VM. With a mapped GPU and **Keep this VM on nodes that have this GPU** on, two HA calls follow; see [Keep a GPU VM on the nodes with its card](#keep-a-gpu-vm-on-the-nodes-with-its-card).
 
 ## Boot from a cloud image
 
@@ -65,9 +65,19 @@ Choosing a GPU:
 - turns ballooning off, because a passed-through device pins all guest memory;
 - sets CPU type `host`.
 
-If the VM will be under HA, add a node-affinity rule for the nodes the mapping covers, so HA never moves it to a node without the card. The preview reminds you of this.
-
 Choose **No GPU** to remove the GPU again.
+
+### Keep a GPU VM on the nodes with its card
+
+When you choose a PCI mapping, the GPU step shows **Keep this VM on nodes that have this GPU**, on by default. It pins the VM with HA, so HA never moves or recovers it to a node without the card. The change then has three calls:
+
+1. `POST /nodes/<node>/qemu`: creates the VM.
+2. `POST /cluster/ha/resources` with `sid=vm:<vmid>`: adds the VM to HA, with state `started` if you ticked **Start after it is created**, otherwise `stopped`. With the option on, HA starts the VM, so the create call does not.
+3. `POST /cluster/ha/rules`: a strict node-affinity HA rule named `gpu-<vmid>` (`type=node-affinity`, `resources=vm:<vmid>`, `nodes=` the nodes the mapping covers, `strict=1`, comment `galley: <mapping> only exists on these nodes`).
+
+HA then restarts the VM only on those nodes if its node fails. Live migration is not possible with passthrough. HA rules need PVE 9 and `Sys.Console` on `/`. Turn the option off to create the VM without HA; you can pin it later from the [Hardware](hardware-and-gpus.md#pin-a-gpu-vm-with-ha) page.
+
+A raw device (no mapping) has no HA option: HA only knows where a card is through a mapping.
 
 ## Use the LLM server preset
 
@@ -87,10 +97,21 @@ The preset only sets the VM's hardware. It does not install a model server; inst
 3. **Root disk**: **Storage** and **Size (GiB)**.
 4. **CPU and memory**: **Cores**, **Memory (MiB)** and **Swap (MiB)**.
 5. **Network**: **Bridge or VNet**, optional **VLAN tag**, **IPv4** (**DHCP** or **Static**, with **Address/prefix** and **Gateway**), and **PVE firewall on this interface**.
+6. **GPU**: optional. See [Share a GPU with a container](#share-a-gpu-with-a-container).
 
 Defaults: unprivileged with nesting, 1 core, 1024 MiB memory, 512 MiB swap, an 8 GiB root disk, DHCP on `vmbr0` with the firewall on.
 
 The result is a single call, `POST /nodes/<node>/lxc`. galley refuses private keys in the SSH key field; paste the public key (`.pub`). To set a root password later, run `pct enter <id>` on the node and use `passwd`.
+
+## Share a GPU with a container
+
+A container does not take a GPU over like a VM does: the node keeps its driver, and the container gets the device nodes. Several containers can share one card. A card passed through to a VM (on `vfio-pci`) cannot be shared. The container wizard's **GPU** step offers:
+
+- **No GPU** (the default).
+- **Share an NVIDIA GPU (host driver)**: adds `dev0: /dev/nvidiaN`, `dev1: /dev/nvidiactl`, `dev2: /dev/nvidia-uvm` and `dev3: /dev/nvidia-uvm-tools`. **NVIDIA GPU number** is N: it counts the GPUs on the NVIDIA host driver of the node in PCI order (cards on `vfio-pci` do not count). Check with `nvidia-smi -L` on the node; host administrators can select **Check on <node>** to draft that command.
+- **Share an Intel/AMD GPU (/dev/dri)**: adds `dev0: /dev/dri/renderD128` (change the **Render node** if the node has several) with an optional **Group id in the container**, usually the container's `render` group.
+
+The container needs the GPU's userland: for NVIDIA, the same driver version as the node, without the kernel module. See [Share a GPU with containers](hardware-and-gpus.md#share-a-gpu-with-containers). A shared GPU has no PCI mapping, so galley does not pin the container with HA.
 
 ## After you apply
 

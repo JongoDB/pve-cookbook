@@ -4,7 +4,8 @@ import { ApiError } from '../api/http';
 import { useApp, useCrumbs } from '../state/app';
 import { usePve } from '../lib/hooks';
 import { guestPath } from '../lib/links';
-import { useGpuUsage, usersOf } from '../lib/gpuUsage';
+import { runningUsersOf, useGpuUsage, usersOf, type GpuUser } from '../lib/gpuUsage';
+import { mappingNodes, pinCalls, pinRuleFor, ruleNodes, vmSid, type HaResource, type HaRule } from '../lib/ha';
 import { deviceName, groupPeers, isDisplay, isGpu, mapEntries, mapLine, mappingFor, suggestMappingId, type PciDevice, type PciMapping } from '../lib/pci';
 import { ApiErrorView } from '../components/ClusterLogin';
 import { ClusterPicker, useClusterParam } from '../components/ClusterPicker';
@@ -17,13 +18,41 @@ const CHIPSET = /^0x(05|06|0b)/;
 
 export function Hardware() {
   useCrumbs([{ label: 'Hardware' }]);
-  const { me, fleet, lastAudit } = useApp();
+  const { me, fleet, lastAudit, openPlan } = useApp();
   const [cluster, setCluster] = useClusterParam();
-  const authed = !!me.clusters.find((c) => c.id === cluster)?.authed;
+  const mc = me.clusters.find((c) => c.id === cluster);
+  const authed = !!mc?.authed;
+  const hostAdmin = !!(mc?.hostAdmin ?? mc?.admin);
   const nodes = fleet?.clusters.find((c) => c.id === cluster)?.nodes ?? [];
   const refresh = lastAudit?.status === 'running' ? '' : lastAudit?.id ?? '';
   const mappings = usePve<PciMapping[]>(authed ? cluster : null, 'cluster/mapping/pci', {}, refresh);
-  const usage = useGpuUsage(authed ? [cluster] : [], refresh)?.[0];
+  const usage = useGpuUsage(authed ? [cluster] : [], refresh, true)?.[0];
+  // HA pinning of VMs that use a mapping (read only when there are such VMs: needs Sys.Audit on /)
+  const haNeeded = !!usage?.users.some((u) => u.mapping);
+  const haRules = usePve<HaRule[]>(haNeeded ? cluster : null, 'cluster/ha/rules', {}, refresh);
+  const haRes = usePve<HaResource[]>(haNeeded ? cluster : null, 'cluster/ha/resources', {}, refresh);
+
+  const pin = (u: GpuUser, m: PciMapping) => {
+    const g = u.guest;
+    const nodes = mappingNodes(m);
+    const inHa = haRes.data ? haRes.data.some((r) => r.sid === vmSid(g.vmid)) : !!g.hastate;
+    void openPlan({
+      action: 'api.call', clusterId: cluster,
+      params: {
+        title: `Pin VM ${g.vmid} (${g.name}) to the nodes with ${m.id}`,
+        summary: `${inHa ? 'Adds a' : `Adds the VM to HA (${g.status === 'running' ? 'started' : 'stopped'}) with a`} strict node-affinity rule for ${nodes.join(', ')}: HA then restarts it only where ${m.id} exists.`,
+        calls: pinCalls({ vmid: g.vmid, mapping: m.id, nodes, state: g.status === 'running' ? 'started' : 'stopped', haResource: inHa, takenRules: (haRules.data ?? []).map((r) => r.rule) }),
+      },
+    });
+  };
+
+  const pinState = (u: GpuUser, m: PciMapping) => {
+    if (!haRules.data) return null; // loading, or HA rules not readable (older PVE, no Sys.Audit)
+    const r = pinRuleFor(haRules.data, u.guest.vmid);
+    return r
+      ? <span className="ws">pinned to {ruleNodes(r).join(', ')}{Number(r.strict ?? 0) ? '' : ' (not strict)'}</span>
+      : <button type="button" className="btn btn-sm" onClick={() => pin(u, m)}>Pin to GPU nodes</button>;
+  };
 
   return (
     <div className="page">
@@ -42,13 +71,19 @@ export function Hardware() {
                   <thead><tr><th scope="col">Mapping</th><th scope="col">Devices</th><th scope="col">Used by</th></tr></thead>
                   <tbody>{mappings.data.map((m) => {
                     const users = usage ? usersOf(usage, m.id) : null;
+                    const holding = usage ? runningUsersOf(usage, m.id) : [];
                     return (
                       <tr key={m.id}>
                         <td><span className="mono">{m.id}</span>{m.description && <div className="ws">{m.description}</div>}</td>
                         <td>{mapEntries(m).map((e) => <div key={`${e.node}${e.path}`} className="mono small">{e.node} {e.path}{e.iommugroup ? `, IOMMU group ${e.iommugroup}` : ''}</div>)}</td>
-                        <td>{users === null ? <span className="muted">Checking</span> : users.length
-                          ? users.map((u) => <div key={`${u.guest.vmid}${u.key}`}><Link to={guestPath(u.guest.clusterId, u.guest.vmid)}>{u.guest.name}</Link> <span className="ws">{u.guest.vmid}, {u.key}</span></div>)
-                          : <Badge kind="ok">Free</Badge>}</td>
+                        <td>{users === null ? <span className="muted">Checking</span> : <>
+                          {!holding.length && <Badge kind="ok">Free</Badge>}
+                          {users.map((u) => (
+                            <div key={`${u.guest.vmid}${u.key}`}>
+                              <Link to={guestPath(u.guest.clusterId, u.guest.vmid)}>{u.guest.name}</Link> <span className="ws">{u.guest.vmid}, {u.key}{u.guest.status === 'running' ? '' : `, ${u.guest.status}`}</span> {pinState(u, m)}
+                            </div>
+                          ))}
+                        </>}</td>
                       </tr>
                     );
                   })}</tbody>
@@ -60,13 +95,15 @@ export function Hardware() {
             </div>
           )}
         </section>
-        {nodes.map((n) => <NodePci key={n.name} cluster={cluster} node={n.name} mappings={mappings.data ?? []} refresh={refresh} />)}
+        {haNeeded && haRules.data && <p className="explain">Pinning adds a VM to HA with a strict node-affinity rule for the nodes its mapping covers, so HA restarts it only where the card exists. Live migration is not possible with passthrough.</p>}
+        {nodes.map((n) => <NodePci key={n.name} cluster={cluster} node={n.name} mappings={mappings.data ?? []} refresh={refresh} hostAdmin={hostAdmin} />)}
       </>}
     </div>
   );
 }
 
-function NodePci({ cluster, node, mappings, refresh }: { cluster: string; node: string; mappings: PciMapping[]; refresh: string }) {
+function NodePci({ cluster, node, mappings, refresh, hostAdmin }: { cluster: string; node: string; mappings: PciMapping[]; refresh: string; hostAdmin: boolean }) {
+  const { openPlan } = useApp();
   const pci = usePve<PciDevice[]>(cluster, `nodes/${node}/hardware/pci`, { 'pci-class-blacklist': '' }, refresh);
   const [creating, setCreating] = useState<string | null>(null);
   const [showAll, setShowAll] = useState(false);
@@ -83,7 +120,11 @@ function NodePci({ cluster, node, mappings, refresh }: { cluster: string; node: 
     return [
       <tr key={d.id} className={gpu ? 'gpu-row' : ''}>
         <td className="mono nowrap">{d.id}</td>
-        <td>{deviceName(d)}{gpu && <> <Badge kind="info">GPU</Badge></>}<div className="ws mono">{d.class} {d.vendor?.replace(/^0x/, '')}:{d.device?.replace(/^0x/, '')}</div></td>
+        <td>{deviceName(d)}{gpu && <> <Badge kind="info">GPU</Badge></>}<div className="ws mono">{d.class} {d.vendor?.replace(/^0x/, '')}:{d.device?.replace(/^0x/, '')}</div>
+          {gpu && hostAdmin && (
+            <button type="button" className="btn btn-sm" style={{ marginTop: 4 }} title="PVE's API does not say which kernel driver a device uses. Drafts a read-only lspci on the node."
+              onClick={() => void openPlan({ action: 'host.exec', clusterId: cluster, params: { node, command: `lspci -nnk -s ${d.id}`, reason: `Show which kernel driver uses ${deviceName(d)}` } })}>Check driver</button>
+          )}</td>
         <td className="num">{d.iommugroup >= 0 ? d.iommugroup : 'none'}{gpu && <div className="ws">{peers.length ? `shared with ${peers.map((p) => p.id).join(', ')}` : 'isolated'}</div>}</td>
         <td>{m ? <span className="mono">{m.id}</span> : gpu
           ? <button type="button" className="btn btn-sm" aria-expanded={creating === d.id} onClick={() => setCreating(creating === d.id ? null : d.id)}>Create mapping</button>

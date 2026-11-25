@@ -119,6 +119,8 @@ test.describe('guest page @fast', () => {
     const cli = await applyChange(page);
     expect(cli).toContain('pvesh set /nodes/pve1/qemu/120/config');
     expect(cli).toContain('--cores 6');
+    // the Hardware tab reloads the config after the change (the fake cluster keeps the edit)
+    await expect(page.getByText(/^6 cores, 1 socket, type /)).toBeVisible({ timeout: 5000 });
 
     // adding a device: the menu offers the device families
     await page.getByRole('button', { name: 'Add device' }).click();

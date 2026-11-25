@@ -719,6 +719,23 @@ func isDestructive(method, template string, body map[string]string) bool {
 	return false
 }
 
+// haAddKeepsStopped reports whether a call adds a new HA resource as
+// "stopped" (or disabled/ignored) for a guest that is not running: nothing
+// is stopped, e.g. a VM created in the same change and pinned to its GPU
+// nodes. Adding a running guest that way stops it, so that stays destructive.
+func (m *Manager) haAddKeepsStopped(cluster, method, template string, body map[string]string) bool {
+	if method != http.MethodPost || template != "/cluster/ha/resources" || m.fleet == nil {
+		return false
+	}
+	sid := body["sid"]
+	id, err := strconv.Atoi(sid[strings.LastIndexByte(sid, ':')+1:])
+	if err != nil {
+		return false
+	}
+	g, ok := m.fleet.Guest(cluster, id)
+	return !ok || (g.Status != "running" && g.Status != "paused")
+}
+
 // buildAPICall turns arbitrary API calls into a reviewable plan. Every call is
 // validated against the cluster's own API schema; PVE checks permissions when
 // it runs as the user.
@@ -762,7 +779,7 @@ func (m *Manager) buildAPICall(ctx context.Context, p *Plan, req Request) error 
 		if desc == "" {
 			desc = c.Method + " " + c.Path
 		}
-		if isDestructive(c.Method, node.Path, c.Body) {
+		if isDestructive(c.Method, node.Path, c.Body) && !m.haAddKeepsStopped(req.ClusterID, c.Method, node.Path, c.Body) {
 			p.Destructive = true
 			deletes++
 		}
