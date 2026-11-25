@@ -256,3 +256,27 @@ func TestAgentBoundaries(t *testing.T) {
 		t.Fatalf("audit does not name the agent: %+v", entries)
 	}
 }
+
+// Found live: an agent created a VM and immediately drafted its destroy;
+// galley's cache had not seen the VM yet ("guest not found"). Guests missing
+// from the cache are looked up live, as the user.
+func TestActOnGuestBeforeCacheSeesIt(t *testing.T) {
+	h := newHarness(t)
+	h.setup()
+	root := h.login("root@pam", "secret")
+	root.do("GET", "/api/guests", nil, nil) // warm the cache and the user's view
+	h.fake.AddGuest(map[string]any{"vmid": 99020, "name": "just-created", "type": "qemu", "node": "pve1", "status": "stopped"})
+	var p struct {
+		ID    string
+		Title string
+		Steps []struct{ Path string }
+	}
+	code := root.do("POST", "/api/plans", map[string]any{"action": "guest.destroy", "clusterId": "pve-lab", "params": map[string]any{"targets": []any{map[string]any{"vmid": 99020}}}}, &p)
+	if code != 201 || len(p.Steps) == 0 || !strings.Contains(p.Steps[len(p.Steps)-1].Path, "/qemu/99020") {
+		t.Fatalf("draft for a just-created guest: %d %+v", code, p)
+	}
+	// still refused for a guest that doesn't exist at all
+	if code := root.do("POST", "/api/plans", map[string]any{"action": "guest.start", "clusterId": "pve-lab", "params": map[string]any{"targets": []any{map[string]any{"vmid": 99999}}}}, nil); code != 400 {
+		t.Fatalf("unknown guest: %d", code)
+	}
+}

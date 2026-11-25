@@ -184,7 +184,7 @@ func tool(t string) string {
 	return "qm"
 }
 
-func (m *Manager) resolve(cluster string, ts []Target, vis Visible) ([]Target, []fleet.Guest, error) {
+func (m *Manager) resolve(ctx context.Context, cluster string, ts []Target, vis Visible, reader *pve.Client) ([]Target, []fleet.Guest, error) {
 	if len(ts) == 0 || len(ts) > 100 {
 		return nil, nil, fmt.Errorf("%w: 1–100 targets required", ErrBadRequest)
 	}
@@ -192,7 +192,16 @@ func (m *Manager) resolve(cluster string, ts []Target, vis Visible) ([]Target, [
 	gs := make([]fleet.Guest, 0, len(ts))
 	for _, t := range ts {
 		g, ok := m.fleet.Guest(cluster, t.VMID)
-		if !ok || (vis != nil && !vis(t.VMID)) {
+		if ok && vis != nil && !vis(t.VMID) {
+			ok = false
+		}
+		if !ok {
+			// Not in galley's cache (or the user's cached view) yet: a guest
+			// created moments ago — PVE reports it up to ~10 s late — is
+			// looked up live, as the user, so PVE decides visibility.
+			g, ok = liveGuest(ctx, reader, cluster, t.VMID)
+		}
+		if !ok {
 			return nil, nil, fmt.Errorf("%w: guest %d not found in cluster", ErrBadRequest, t.VMID)
 		}
 		// Authoritative node/type come from the cache, not the client.
@@ -201,6 +210,41 @@ func (m *Manager) resolve(cluster string, ts []Target, vis Visible) ([]Target, [
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].VMID < out[j].VMID })
 	return out, gs, nil
+}
+
+// liveGuest reads one guest from PVE as the user (nil reader: not found).
+func liveGuest(ctx context.Context, reader *pve.Client, cluster string, vmid int) (fleet.Guest, bool) {
+	if reader == nil {
+		return fleet.Guest{}, false
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	var rs []struct {
+		VMID     int    `json:"vmid"`
+		Name     string `json:"name"`
+		Type     string `json:"type"`
+		Node     string `json:"node"`
+		Status   string `json:"status"`
+		Template int    `json:"template"`
+	}
+	if err := reader.Do(ctx, http.MethodGet, "/cluster/resources", url.Values{"type": {"vm"}}, &rs); err != nil {
+		return fleet.Guest{}, false
+	}
+	for _, r := range rs {
+		if r.VMID != vmid || (r.Type != "qemu" && r.Type != "lxc") {
+			continue
+		}
+		g := fleet.Guest{ClusterID: cluster, VMID: r.VMID, Name: r.Name, Type: r.Type, Node: r.Node, Status: r.Status, Template: r.Template == 1}
+		// the resource list's status can lag too; the guest's own status is current
+		var st struct {
+			Status string `json:"status"`
+		}
+		if err := reader.Do(ctx, http.MethodGet, "/nodes/"+r.Node+"/"+r.Type+"/"+strconv.Itoa(vmid)+"/status/current", nil, &st); err == nil && st.Status != "" {
+			g.Status = st.Status
+		}
+		return g, true
+	}
+	return fleet.Guest{}, false
 }
 
 // titleIDs lists VMIDs for people ("120, 121"); vmids keeps the compact
@@ -231,7 +275,7 @@ func (m *Manager) Build(ctx context.Context, user string, req Request, vis Visib
 		if err := json.Unmarshal(req.Params, &prm); err != nil {
 			return nil, fmt.Errorf("%w: %v", ErrBadRequest, err)
 		}
-		ts, _, err := m.resolve(req.ClusterID, prm.Targets, vis)
+		ts, _, err := m.resolve(ctx, req.ClusterID, prm.Targets, vis, reader)
 		if err != nil {
 			return nil, err
 		}
@@ -261,7 +305,7 @@ func (m *Manager) Build(ctx context.Context, user string, req Request, vis Visib
 		if !nodeRegexp.MatchString(prm.Target) || !contains(m.fleet.OnlineNodes(req.ClusterID), prm.Target) {
 			return nil, fmt.Errorf("%w: target node %q is not an online node of this cluster", ErrBadRequest, prm.Target)
 		}
-		ts, gs, err := m.resolve(req.ClusterID, prm.Targets, vis)
+		ts, gs, err := m.resolve(ctx, req.ClusterID, prm.Targets, vis, reader)
 		if err != nil {
 			return nil, err
 		}
@@ -302,7 +346,7 @@ func (m *Manager) Build(ctx context.Context, user string, req Request, vis Visib
 		if !snapNameRegexp.MatchString(prm.Name) {
 			return nil, fmt.Errorf("%w: snapshot name must start with a letter, 2–40 chars of [A-Za-z0-9_-]", ErrBadRequest)
 		}
-		ts, _, err := m.resolve(req.ClusterID, prm.Targets, vis)
+		ts, _, err := m.resolve(ctx, req.ClusterID, prm.Targets, vis, reader)
 		if err != nil {
 			return nil, err
 		}
@@ -323,7 +367,7 @@ func (m *Manager) Build(ctx context.Context, user string, req Request, vis Visib
 		if err := json.Unmarshal(req.Params, &prm); err != nil {
 			return nil, fmt.Errorf("%w: %v", ErrBadRequest, err)
 		}
-		ts, gs, err := m.resolve(req.ClusterID, prm.Targets, vis)
+		ts, gs, err := m.resolve(ctx, req.ClusterID, prm.Targets, vis, reader)
 		if err != nil {
 			return nil, err
 		}

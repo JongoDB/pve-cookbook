@@ -176,6 +176,13 @@ func (f *Server) guestLocked(vmid string) map[string]any {
 	return nil
 }
 
+// AddGuest adds a guest, as if it had just been created (tests).
+func (f *Server) AddGuest(g map[string]any) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Guests = append(f.Guests, g)
+}
+
 // removeGuestLocked deletes a guest, as a finished destroy task does.
 func (f *Server) removeGuestLocked(vmid string) {
 	out := f.Guests[:0]
