@@ -199,7 +199,7 @@ func (s *Server) userClient(ctx context.Context, ss *session, cid string) (*pve.
 	hash := store.HashID(ss.id)
 	if cr.Kind == "token" {
 		if time.Now().Unix() >= cr.Expires {
-			_ = s.store.DeleteCredByHash(hash, cid)
+			_ = s.store.LapseCredByHash(hash, cid)
 			return nil, cr, fmt.Errorf("your login to %s expired; log in again", c.Name)
 		}
 		return base.WithAuth(pve.TokenAuth{ID: cr.TokenID, Secret: cr.Secret}), cr, nil
@@ -264,7 +264,7 @@ func (s *Server) renew(ctx context.Context, hash string, k []byte, cr store.Cred
 		return cr, err
 	}
 	if time.Now().Unix() >= cr.Expires {
-		_ = s.store.DeleteCredByHash(hash, cr.ClusterID)
+		_ = s.store.LapseCredByHash(hash, cr.ClusterID)
 		return cr, errNoCred
 	}
 	rctx, cancel := context.WithTimeout(ctx, 20*time.Second)
@@ -273,7 +273,7 @@ func (s *Server) renew(ctx context.Context, hash string, k []byte, cr store.Cred
 	if err != nil {
 		var ae *pve.APIError
 		if errors.As(err, &ae) && ae.Status == 401 {
-			_ = s.store.DeleteCredByHash(hash, cr.ClusterID)
+			_ = s.store.LapseCredByHash(hash, cr.ClusterID)
 		}
 		return cr, err
 	}

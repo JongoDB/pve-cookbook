@@ -318,3 +318,35 @@ func TestTokenCredentialMode(t *testing.T) {
 }
 
 func encodeB64URL(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
+
+// Found on real PVE: a personal token revoked in PVE was dropped by the first
+// background read, so /api/me no longer knew there had been a login and the
+// user never saw why they had to log in again.
+func TestLoginRevokedInPVEIsReportedAsLapsed(t *testing.T) {
+	h := newHarness(t)
+	h.setup()
+	root := h.login("root@pam", "secret")
+	if code := root.do("PUT", "/api/clusters/pve-lab", map[string]any{"credentialMode": "token"}, nil); code != 200 {
+		t.Fatalf("token mode: %d", code)
+	}
+	dev := h.login("dev@pve", "devpass")
+	h.fake.RevokeUserTokens("dev@pve")
+	h.srv.DropViews()
+	var gs []any
+	dev.do("GET", "/api/guests", nil, &gs)
+	if len(gs) != 0 {
+		t.Fatalf("revoked login still reads: %v", gs)
+	}
+	for i := range 2 {
+		var me struct {
+			Clusters []struct{ Authed, LoginExpired bool }
+		}
+		if code := dev.do("GET", "/api/me", nil, &me); code != 200 || me.Clusters[0].Authed || !me.Clusters[0].LoginExpired {
+			t.Fatalf("me #%d: %d %+v", i, code, me)
+		}
+	}
+	id, k := dev.sessionSecret()
+	if cs, err := h.st.Creds(id, k); err != nil || len(cs) != 0 {
+		t.Fatalf("the dead secret must be erased: %v %v", cs, err)
+	}
+}

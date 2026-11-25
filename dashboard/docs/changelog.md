@@ -20,6 +20,7 @@ plain words, written for the person using galley. Link help pages as
 - **Help, What's new and feedback.** The full user guide is built in (**Help**), this dialog shows what changed after each update, and **Send feedback** files an issue on GitHub.
 - **Fixes found by the new end-to-end tests.** The Clusters page no longer goes blank while you are not yet logged in to a newly added cluster; a removed cluster's history stays in the audit log for galley admins; searches with several words (`qemu config`) match each word; the **API** page opened from a link fills in `{node}`; **Create** says so when your account sees no node; new agent tokens show **Never** as last used; the Changes count updates as soon as the assistant drafts a change; and a page that fails to show says so instead of blanking galley. [Troubleshooting](/help/troubleshooting)
 - **Safer logins.** Stored PVE logins are encrypted with a key only your browser holds, and lapse when you stop using galley. [Security](/help/security)
+- **Fixes from validating on real PVE.** Switching host commands from SSH back to the PVE node terminal, or removing a cluster, now also deletes its pinned host keys. A login revoked in PVE says it lapsed. Agent tokens explain why PVE refuses them on clusters that keep personal API tokens. [Agents and MCP](/help/agents-and-mcp)
 
 ## 0.1.0 — 2026-11-10
 

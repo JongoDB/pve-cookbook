@@ -96,8 +96,8 @@ func (s *Server) view(ctx context.Context, ss *session, cid string) *userView {
 		}
 		if errors.As(rerr, &ae) && ae.Status == 401 || errors.As(perr, &ae) && ae.Status == 401 {
 			// PVE no longer accepts this login (ticket expired, token revoked in
-			// PVE): drop it so the user is asked to log in to this cluster again.
-			_ = s.store.DeleteCred(ss.id, cid)
+			// PVE): erase it so the user is asked to log in to this cluster again.
+			_ = s.store.LapseCredByHash(store.HashID(ss.id), cid)
 		}
 	} else {
 		for _, r := range res {
@@ -580,12 +580,9 @@ func (s *Server) updateCluster(w http.ResponseWriter, r *http.Request, ss *sessi
 		return
 	}
 	if dropSSHKey {
-		// galley no longer needs root SSH access to this cluster: destroy the key.
-		hostMu.Lock()
-		err := s.store.DeleteSetting(hostKeySetting + "." + c.ID)
-		hostMu.Unlock()
-		if err != nil {
-			s.log.Error("delete SSH key", "cluster", c.ID, "err", err)
+		// galley no longer needs root SSH access to this cluster.
+		if err := s.dropHostAccess(c.ID); err != nil {
+			s.log.Error("delete SSH key and host key pins", "cluster", c.ID, "err", err)
 		}
 	}
 	s.securityEvent(ss.user, c.ID, "cluster.update", "Updated cluster "+c.Name, true, map[string]any{"name": c.Name, "endpoints": c.Endpoints,
@@ -613,9 +610,9 @@ func (s *Server) deleteCluster(w http.ResponseWriter, r *http.Request, ss *sessi
 		apiError(w, 500, "store", err.Error())
 		return
 	}
-	hostMu.Lock()
-	_ = s.store.DeleteSetting(hostKeySetting + "." + id) // its SSH key, if any
-	hostMu.Unlock()
+	if err := s.dropHostAccess(id); err != nil {
+		s.log.Error("delete SSH key and host key pins", "cluster", id, "err", err)
+	}
 	s.securityEvent(ss.user, id, "cluster.delete", "Removed cluster "+c.Name, true, nil)
 	s.fleet.Forget(id)
 	s.dropClient(id)

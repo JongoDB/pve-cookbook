@@ -176,6 +176,17 @@ func (f *Server) guestLocked(vmid string) map[string]any {
 	return nil
 }
 
+// RevokeUserTokens deletes a user's API tokens behind galley's back (tests).
+func (f *Server) RevokeUserTokens(user string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for id, t := range f.userTokens {
+		if t.User == user {
+			delete(f.userTokens, id)
+		}
+	}
+}
+
 // AddGuest adds a guest, as if it had just been created (tests).
 func (f *Server) AddGuest(g map[string]any) {
 	f.mu.Lock()
@@ -651,7 +662,9 @@ func (f *Server) userToken(w http.ResponseWriter, r *http.Request, p, caller str
 	}
 	switch r.Method {
 	case http.MethodPost:
-		if tok != nil {
+		// Real PVE: a token is not "self", so only a token whose user holds
+		// User.Modify (an unrestricted user here) may create tokens.
+		if _, restricted := f.Restricted[user]; tok != nil && restricted {
 			write(w, 403, nil)
 			return
 		}

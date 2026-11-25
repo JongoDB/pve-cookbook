@@ -188,6 +188,9 @@ func TestHostCommands(t *testing.T) {
 	if _, err := h.st.GetSetting("hosts.key.pve-lab"); err == nil {
 		t.Fatal("SSH key kept after switching to the PVE transport")
 	}
+	if raw, _ := h.st.GetSetting("hosts.pins"); strings.Contains(raw, "pve-lab") {
+		t.Fatalf("host key pins kept after switching to the PVE transport: %s", raw)
+	}
 	_ = plan.MethodSSH
 }
 

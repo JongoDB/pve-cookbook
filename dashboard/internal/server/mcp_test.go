@@ -280,3 +280,19 @@ func TestActOnGuestBeforeCacheSeesIt(t *testing.T) {
 		t.Fatalf("unknown guest: %d", code)
 	}
 }
+
+// Verified on PVE 9.2: in token mode PVE answers 403 when a non-admin's
+// personal token creates another token; admins (User.Modify) may.
+func TestAgentTokenInTokenMode(t *testing.T) {
+	h := newHarness(t)
+	h.setup()
+	admin := h.login("root@pam", "secret")
+	if code := admin.do("PUT", "/api/clusters/pve-lab", map[string]any{"credentialMode": "token"}, nil); code != 200 {
+		t.Fatalf("token mode: %d", code)
+	}
+	agentToken(t, h.login("root@pam", "secret"), "read")
+	var e struct{ Code, Error string }
+	if code := h.login("dev@pve", "devpass").do("POST", "/api/agent-tokens", map[string]any{"name": "x", "scope": "read", "days": 1}, &e); code != 502 || !strings.Contains(e.Error, "User.Modify") {
+		t.Fatalf("non-admin in token mode: %d %+v", code, e)
+	}
+}
