@@ -83,8 +83,8 @@ func (s *Server) extraToolSpecs() []assistant.ToolSpec {
 		{Name: "read_doc", Description: "Read one page of galley's user guide by slug (see the docs index in your instructions or search_docs results).",
 			Properties: map[string]any{"slug": str("page slug, e.g. changes")}, Required: []string{"slug"}},
 		{Name: "list_changes", Description: "The user's pending changes (drafted, not yet applied) with their steps and commands.", Properties: map[string]any{}},
-		{Name: "get_change", Description: "Status of an applied change from the audit log: running, ok, error or unknown, per step, with output.",
-			Properties: map[string]any{"auditId": map[string]any{"type": "integer"}}, Required: []string{"auditId"}},
+		{Name: "get_change", Description: "Status of a change, by auditId (an applied change) or changeId (a draft): waiting, running, ok, error or unknown, per step, with output.",
+			Properties: map[string]any{"auditId": map[string]any{"type": "integer"}, "changeId": str("the draft's change id")}},
 		{Name: "propose_action", Description: "Draft any action galley offers, for review in Changes. Actions and params:\n" +
 			"- guest.start | guest.shutdown | guest.reboot | guest.stop: {\"targets\":[{\"vmid\":120}]}\n" +
 			"- guest.migrate: {\"targets\":[{\"vmid\":120}],\"target\":\"pve2\",\"online\":true}\n" +
@@ -94,11 +94,12 @@ func (s *Server) extraToolSpecs() []assistant.ToolSpec {
 			"- host.exec: {\"node\":\"pve1\",\"command\":\"…\",\"reason\":\"…\"} (administrators)\n" +
 			"- api.call: {\"title\":\"…\",\"calls\":[{\"method\":\"PUT\",\"path\":\"/nodes/pve1/qemu/120/config\",\"body\":{\"cores\":\"4\"}}]} (any PVE create/update/delete; check api_schema first)\n" +
 			"- galley.cluster.update: {\"name\"?,\"shareLogin\"?,\"credentialMode\"?: ticket|token,\"hostTransport\"?: pve|ssh}\n" +
-			"- galley.cluster.remove: {} · galley.host.pin: {\"node\",\"fingerprint\"} · galley.host.unpin: {\"node\"} · galley.prefs.set: {\"key\":\"dashboard\",\"value\":\"<JSON>\"}",
+			"- galley.cluster.remove: {} · galley.host.pin: {\"node\",\"fingerprint\"} · galley.host.unpin: {\"node\"} · galley.prefs.set: {\"key\":\"dashboard\",\"value\":\"<JSON>\"}\n" +
+			"- galley.agents.update: {\"approval\": all|risky|hosts|always} (what apply-scope agent tokens need a person for: every change, everything but routine guest work, host commands and access changes, or nothing; galley admins)",
 			Properties: map[string]any{"cluster": str("cluster id"), "action": map[string]any{"type": "string", "enum": actions},
 				"params": map[string]any{"type": "object", "description": "action parameters (see description)"}},
 			Required: []string{"cluster", "action", "params"}},
-		{Name: "apply_change", Description: "Apply a pending change (agent tokens with scope apply only). Pass confirm = the change's confirmText when it has one. Returns an auditId; poll get_change until it is no longer running.",
+		{Name: "apply_change", Description: "Apply a pending change (agent tokens with scope apply only). Changes drafted with needsPerson are refused: a person applies them in Changes. Pass confirm = the change's confirmText when it has one. Returns an auditId; poll get_change until it is no longer running.",
 			Properties: map[string]any{"changeId": str("change id"), "confirm": str("the change's confirmText, if any")}, Required: []string{"changeId"}},
 	}
 }
@@ -162,9 +163,23 @@ func (s *Server) runExtraTool(ctx context.Context, ss *session, call assistant.T
 	case "list_changes":
 		return out(s.plans.List(planOwner(ss)))
 	case "get_change":
-		var in struct{ AuditID int64 }
+		var in struct {
+			AuditID  int64
+			ChangeID string
+		}
 		if err := decodeStrict(call.Input, &in); err != nil {
 			return fail(err)
+		}
+		if in.ChangeID != "" {
+			if p, err := s.plans.Peek(in.ChangeID, planOwner(ss)); err == nil {
+				return out(map[string]any{"status": "waiting", "changeId": p.ID, "title": p.Title, "expiresAt": p.ExpiresAt,
+					"note": "not applied yet; it is in the Changes tab"})
+			}
+			id, ok := s.changeAudit(in.ChangeID, planOwner(ss))
+			if !ok {
+				return out(map[string]any{"status": "gone", "changeId": in.ChangeID, "note": "not waiting and not applied: discarded, expired, or galley restarted since. Check the audit log before drafting it again"})
+			}
+			in.AuditID = id
 		}
 		e, err := s.store.AuditEntry(in.AuditID)
 		if err != nil || !s.auditVisible(ctx, ss, e, s.userViews(ctx, ss)) {
@@ -195,8 +210,8 @@ func (s *Server) runExtraTool(ctx context.Context, ss *session, call assistant.T
 			return fail(err)
 		}
 		onChange(p)
-		return out(map[string]any{"status": "drafted; the user reviews and applies it in the Changes tab", "changeId": p.ID,
-			"title": p.Title, "destructive": p.Destructive, "confirmText": p.ConfirmText, "commands": p.CLI()})
+		return out(s.draftNote(ss, p, map[string]any{"status": "drafted; the user reviews and applies it in the Changes tab", "changeId": p.ID,
+			"title": p.Title, "destructive": p.Destructive, "confirmText": p.ConfirmText, "commands": p.CLI()}))
 	case "apply_change":
 		if !ss.agent || !scopeAtLeast(ss, "apply") {
 			return fail(errors.New("only agent tokens with scope apply can apply changes; the user applies changes in the Changes tab"))

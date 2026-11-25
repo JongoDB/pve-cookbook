@@ -81,6 +81,26 @@ var galleyActions = map[string]galleyAction{
 		describe: func(cid string, b map[string]string) string { return "Forget the SSH host key of node " + b["node"] },
 		payload:  func(b map[string]string) ([]byte, error) { return nil, nil },
 	},
+	"galley.agents.update": {
+		method: http.MethodPut, path: "/api/settings/agents",
+		describe: func(_ string, b map[string]string) string {
+			switch b["approval"] {
+			case approvalAlways:
+				return "Let apply-scope agents apply every change without a person, including root commands on nodes"
+			case approvalAll:
+				return "Require a person to apply every change agents draft"
+			case approvalHosts:
+				return "Let apply-scope agents apply everything except host commands and access changes, including destroying guests"
+			}
+			return "Require a person to apply everything agents draft beyond routine guest work"
+		},
+		payload: func(b map[string]string) ([]byte, error) {
+			if len(b) != 1 || !validApproval(b["approval"]) {
+				return nil, fmt.Errorf("approval must be all, risky, hosts or always")
+			}
+			return json.Marshal(agentPolicy{Approval: b["approval"]})
+		},
+	},
 	"galley.prefs.set": {
 		method: http.MethodPut, path: "/api/prefs/{key}",
 		describe: func(cid string, b map[string]string) string { return "Change your galley preference " + b["key"] },
@@ -195,6 +215,7 @@ func (s *Server) galleyRunner(ss *session, cid string) plan.GalleyRunner {
 		h := map[string]handler{
 			"galley.cluster.update": s.updateCluster, "galley.cluster.remove": s.deleteCluster,
 			"galley.host.pin": s.pinHost, "galley.host.unpin": s.unpinHost, "galley.prefs.set": s.putPref,
+			"galley.agents.update": s.putAgentPolicy,
 		}[action]
 		h(w, r, ss)
 		if w.Code >= 300 {

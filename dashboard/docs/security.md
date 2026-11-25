@@ -171,7 +171,7 @@ deletes those PVE tokens; if a cluster is unreachable the revocation is kept unt
 would have expired and retried at the user's next login.
 
 - Scopes: `read` (GET, metrics, user guide), `draft` (also drafts changes, at most 10 waiting per
-  agent), `apply` (also applies changes, still passing the typed confirmation).
+  agent, kept 24 hours), `apply` (also applies changes, still passing the typed confirmation).
 - Agent tokens never reach galley administration: clusters, settings, agent tokens, logins,
   consoles, the in-app assistant — directly or as a `galley.*` change (refused when drafted and
   when applied).
@@ -180,9 +180,15 @@ would have expired and retried at the user's next login.
 - Bearer tokens are not sent by browsers on their own, so agent requests skip the CSRF check;
   a token presented as a cookie, or a cookie presented as a token, is rejected.
 - Risk: a leaked `apply` token can do whatever its user can do in PVE until it expires or is
-  revoked. If that user is a host administrator this includes root commands on the nodes, with no
-  person in between; the refusal of host commands that name secret files is a pattern check that
-  can be worded around. Prefer `draft`, short lifetimes, and a dedicated PVE user with narrow ACLs for agents.
+  revoked. By default (`risky`) an agent applies only an allowlist of routine, reversible
+  guest work (method, path and parameters; `routine` in `internal/server/approval.go`); everything
+  else is refused when an agent applies it, however and by whomever it was drafted, and the draft
+  waits for the user's browser session. `hosts` refuses only host commands and calls that open
+  another way in (`/access`, node shells, `execute`, `apt`, `/cluster/config`). A galley admin
+  can also set `all` or `always` (`PUT /api/settings/agents`, audited as `settings.agents`, never
+  available to agents). An unreadable value means `risky`. PVE itself refuses API tokens a root node terminal,
+  so root commands by an agent also need the SSH transport. The refusal of host commands that name
+  secret files is a pattern check that can be worded around. Prefer `draft`, short lifetimes, and a dedicated PVE user with narrow ACLs for agents.
 
 ### Unchanged controls
 

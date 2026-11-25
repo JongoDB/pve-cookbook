@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { ApiError } from '../api/http';
-import type { FeedbackConfig, AssistantConfig, AssistantProvider, AssistantSettingsUpdate, Effort } from '../api/types';
+import type { AgentApproval, FeedbackConfig, AssistantConfig, AssistantProvider, AssistantSettingsUpdate, Effort } from '../api/types';
 import { errMsg, useApp, useCrumbs } from '../state/app';
 import { useAsync } from '../lib/hooks';
 import { ApiErrorView } from '../components/ClusterLogin';
@@ -41,6 +41,7 @@ export function Settings() {
         <div className="sub">Galley-wide settings. Every change here is recorded in the audit log.</div>
       </div>
       <AssistantSettingsForm />
+      <AgentApprovalForm />
       <FeedbackSettingsForm />
     </div>
   );
@@ -190,6 +191,86 @@ function AssistantSettingsForm() {
         <div className="row-actions">
           <button type="submit" className="btn btn-primary" disabled={busy}>{busy ? 'Saving' : 'Save assistant settings'}</button>
           <button type="button" className="btn" disabled={busy} onClick={() => { setCfg(orig); setKey(''); setClearKey(false); setErr(null); setOk(null); }}>Undo changes</button>
+        </div>
+      </div>
+    </form>
+  );
+}
+
+/** Strictest first: choosing a later one than the saved one lifts a guardrail. */
+const APPROVALS: { id: AgentApproval; label: string; short: string; text: string }[] = [
+  { id: 'all', label: 'Every change', short: 'For every change', text: 'apply tokens work like draft tokens.' },
+  { id: 'risky', label: 'Everything but routine guest work', short: 'For everything but routine guest work', text: 'agents start, shut down, reboot, snapshot, migrate and back up guests, add them to backup jobs, and change their CPU, memory, name, notes and tags. A person applies the rest. This is the default.' },
+  { id: 'hosts', label: 'Host commands and access changes', short: 'For host commands and access changes', text: 'a person applies root commands on nodes and changes to users, roles, tokens, node shells, package sources and cluster membership. Agents apply the rest, including destroying guests.' },
+  { id: 'always', label: 'Nothing, always allow', short: 'Off, always allow', text: 'agents apply every change themselves, limited only by their user\u2019s PVE permissions.' },
+];
+const rank = (id: AgentApproval) => APPROVALS.findIndex((a) => a.id === id);
+const LIFT: Partial<Record<AgentApproval, { text: string; tick: string }>> = {
+  hosts: { text: 'Agents would create, change and destroy guests, storage and networks with nobody reviewing it.', tick: 'I understand, let agents apply these' },
+  always: { text: 'Agents would also run root commands on nodes and change who has access, with nobody reviewing it. An agent misled by text in a VM note could do the same.', tick: 'I understand, let agents apply everything' },
+};
+
+function AgentApprovalForm() {
+  const { api } = useApp();
+  const [rev, setRev] = useState(0);
+  const saved = useAsync(() => api.agentPolicy(), `agent-policy|${rev}`);
+  const [pick, setPick] = useState<AgentApproval | null>(null);
+  const [sure, setSure] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [ok, setOk] = useState<string | null>(null);
+
+  useEffect(() => { if (saved.data) { setPick(saved.data.approval); setSure(false); } }, [saved.data]);
+
+  if (saved.error) return <ApiErrorView error={saved.error} what="the agent approval setting" onRetry={saved.reload} />;
+  if (!saved.data || !pick) return <div className="panel"><div className="muted panel-body" role="status">Loading the agent approval setting</div></div>;
+
+  const orig = saved.data.approval;
+  const lift = rank(pick) > rank(orig) ? LIFT[pick] : undefined;
+  const choose = (v: AgentApproval) => { setPick(v); setSure(false); setOk(null); setErr(null); };
+  const save = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (lift && !sure) return;
+    setBusy(true); setErr(null); setOk(null);
+    try {
+      await api.putAgentPolicy({ approval: pick });
+      setOk('Saved. It applies to every agent token from now on.');
+      setRev((r) => r + 1);
+    } catch (e2) {
+      setErr(`Could not save: ${errMsg(e2)}`);
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <form className="panel" onSubmit={save} aria-labelledby="aa-h">
+      <div className="panel-head"><h2 id="aa-h">Agent approval</h2><span className="muted">{APPROVALS.find((a) => a.id === orig)?.short}</span></div>
+      <div className="panel-body form-stack settings-form">
+        <fieldset className="field fieldset">
+          <legend className="label">What agent tokens with the apply scope need a person for</legend>
+          {APPROVALS.map((a) => (
+            <label key={a.id} className="check choice-line">
+              <input type="radio" name="agent-approval" checked={pick === a.id} onChange={() => choose(a.id)} />
+              <span><strong>{a.label}:</strong><span className="ws"> {a.text}</span></span>
+            </label>
+          ))}
+          <span className="hint">What an agent may not apply waits in Changes for its user, for 24 hours. Agents can never change this setting.</span>
+        </fieldset>
+        {lift && (
+          <div className="notice notice-warn" role="note">
+            <div className="grow">
+              {lift.text}
+              <label className="check" style={{ marginTop: 8 }}>
+                <input type="checkbox" checked={sure} onChange={(e) => setSure(e.target.checked)} />
+                {lift.tick}
+              </label>
+            </div>
+          </div>
+        )}
+        {err && <div className="notice notice-error" role="alert"><div className="grow">{err}</div></div>}
+        {ok && <div className="notice notice-ok" role="status"><div className="grow">{ok}</div></div>}
+        <div className="row-actions">
+          <button type="submit" className="btn btn-primary" disabled={busy || pick === orig || (!!lift && !sure)}>{busy ? 'Saving' : 'Save agent approval'}</button>
+          <button type="button" className="btn" disabled={busy || pick === orig} onClick={() => choose(orig)}>Undo changes</button>
         </div>
       </div>
     </form>

@@ -415,7 +415,7 @@ func (s *Server) runToolInner(ctx context.Context, ss *session, call assistant.T
 			return fail(err)
 		}
 		onChange(p)
-		return out(map[string]any{"status": "drafted, waiting for the user to review and apply it in the Changes tab", "changeId": p.ID, "destructive": p.Destructive, "confirmText": p.ConfirmText, "commands": p.CLI()})
+		return out(s.draftNote(ss, p, map[string]any{"status": "drafted, waiting for the user to review and apply it in the Changes tab", "changeId": p.ID, "destructive": p.Destructive, "confirmText": p.ConfirmText, "commands": p.CLI()}))
 	case "propose_host_command":
 		var in struct{ Cluster, Node, Command, Reason string }
 		if err := decodeStrict(call.Input, &in); err != nil {
@@ -434,7 +434,7 @@ func (s *Server) runToolInner(ctx context.Context, ss *session, call assistant.T
 			return fail(err)
 		}
 		onChange(p)
-		return out(map[string]any{"status": "drafted, waiting for the user to review and apply it", "changeId": p.ID, "confirmText": p.ConfirmText})
+		return out(s.draftNote(ss, p, map[string]any{"status": "drafted, waiting for the user to review and apply it", "changeId": p.ID, "confirmText": p.ConfirmText}))
 	}
 	if res, isErr, ok := s.runExtraTool(ctx, ss, call, onChange); ok {
 		return res, isErr

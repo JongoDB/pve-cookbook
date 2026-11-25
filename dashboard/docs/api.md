@@ -305,6 +305,11 @@ Examples: Claude Code `claude mcp add --transport http galley https://galley:844
 - `GET /api/whats-new` → `{"version","releases":[{"version","date","markdown"}]}` — release notes
   from `docs/changelog.md` (embedded), newest first. The UI shows the dialog once per version
   (remembered in the `whatsnew` preference).
+- `GET /api/agent-policy` → `{"approval":"all"|"risky"|"hosts"|"always"}`; `PUT /api/settings/agents` (galley
+  admins, never agents). What apply-scope tokens need a person for: every change, everything but
+  routine guest work (default), host commands and access changes, or nothing. `POST /api/plans/{id}/run` then answers 403 `needs_person` and
+  keeps the plan; over MCP, drafts carry `"needsPerson":true` and `needsPersonReason`, and
+  `get_change {"changeId"}` follows a draft (`waiting`, `gone`, or its audit entry).
 - `GET /api/feedback` → `{"enabled","repo"}`; `PUT /api/settings/feedback` (galley admins).
   Feedback is filed by the user on GitHub through a pre-filled new-issue link; galley holds no
   GitHub credential and sends nothing itself.
@@ -376,7 +381,7 @@ memory until it finishes, so it keeps renewing even if the user closes the tab.
 
 `GET /api/plans` lists your pending changes (including drafts by the assistant or agents).
 `DELETE /api/plans/{id}` discards a pending plan. galley.* actions change galley's own
-configuration and are applied through the same handlers (and permission checks) as the UI. Plans expire after 10 minutes, run at most
+configuration and are applied through the same handlers (and permission checks) as the UI. Plans expire after 10 minutes (agents' drafts after 24 hours), run at most
 once, are visible only to their owner (max 50 pending per user), and only target guests the
 user can see.
 
