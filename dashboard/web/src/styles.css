@@ -730,3 +730,9 @@ details > summary { cursor: pointer; color: var(--text-2); }
   .modal-backdrop { padding: 16px; }
   .modal { max-height: calc(100vh - 32px); }
 }
+
+/* Inline forms opened from a page header (migrate, snapshot) take their own
+   full-width row under the status line instead of squeezing the title. */
+.page-head .sub { order: 5; }
+.page-head .guest-actions { display: contents; }
+.page-head .inline-form { order: 6; flex-basis: 100%; }

@@ -82,6 +82,24 @@ test.describe('guest page @fast', () => {
     await expect(page.getByRole('button', { name: '7 d' })).toHaveAttribute('aria-pressed', 'true');
   });
 
+  test('header forms open below the status line without moving the title', async ({ page }) => {
+    await page.goto(`/guests/${CLUSTER}/120`);
+    await settle(page);
+    const h1 = page.locator('.page-head h1');
+    const before = await h1.boundingBox();
+    for (const [button, form] of [['Snapshot', page.locator('.page-head form.inline-form')], ['Migrate', page.locator('.page-head form.inline-form')]] as const) {
+      await page.locator('.page-head').getByRole('button', { name: button, exact: true }).click();
+      await expect(form).toBeVisible();
+      const after = await h1.boundingBox();
+      expect(Math.abs((after?.y ?? 0) - (before?.y ?? 0))).toBeLessThan(2);
+      const sub = await page.locator('.page-head .sub').boundingBox();
+      const f = await form.boundingBox();
+      expect(f!.y).toBeGreaterThanOrEqual(sub!.y + sub!.height - 1);
+      await form.getByRole('button', { name: 'Cancel' }).click();
+      await expect(form).toHaveCount(0);
+    }
+  });
+
   test('snapshot', async ({ page }) => {
     await page.goto(`/guests/${CLUSTER}/120?tab=snapshots`);
     await settle(page);

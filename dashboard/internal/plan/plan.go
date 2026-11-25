@@ -775,7 +775,7 @@ func (m *Manager) buildAPICall(ctx context.Context, p *Plan, req Request) error 
 			return fmt.Errorf("%w: call %d (%s %s): %v", ErrBadRequest, i+1, c.Method, c.Path, err)
 		}
 		node, _, _ := sc.Match(c.Path)
-		desc, _, _ := strings.Cut(strings.TrimSpace(meth.Description), "\n")
+		desc := plainDescription(meth.Description)
 		if desc == "" {
 			desc = c.Method + " " + c.Path
 		}
@@ -843,4 +843,21 @@ func (m *Manager) List(user string) []*Plan {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt > out[j].CreatedAt })
 	return out
+}
+
+// apiNotes trims PVE's notes for API developers from method descriptions
+// ("Set virtual machine options (synchronous API) - You should consider using
+// the POST method instead…"), keeping the plain first sentence for people.
+var apiNotes = regexp.MustCompile(`(?i)\s*\((a)?synchronous API\)`)
+
+func plainDescription(d string) string {
+	d, _, _ = strings.Cut(strings.TrimSpace(d), "\n")
+	d = apiNotes.ReplaceAllString(d, "")
+	if i := strings.Index(d, " - "); i > 0 {
+		d = d[:i]
+	}
+	if i := strings.Index(d, ". "); i > 0 {
+		d = d[:i]
+	}
+	return strings.TrimSuffix(strings.TrimSpace(d), ".")
 }

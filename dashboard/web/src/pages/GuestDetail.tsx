@@ -186,7 +186,7 @@ export function GuestDetail() {
 }
 
 function GuestActionsWrapper({ g }: { g: Guest }) {
-  return <div className="form-stack" style={{ gap: 10, alignItems: 'flex-end' }}><GuestActions g={g} /></div>;
+  return <div className="guest-actions"><GuestActions g={g} /></div>;
 }
 
 const loginNeeded = () => new ApiError(409, 'cluster_login_required', 'log in first');
