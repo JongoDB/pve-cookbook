@@ -63,6 +63,7 @@ export function Protection() {
                 <>
                   <div className="big">{c.backups.covered} <span className="of">of {c.backups.total} guests in a backup job</span></div>
                   <Meter used={c.backups.covered} total={c.backups.total} label={`${c.name} backup coverage`} warnAt={101} critAt={101} />
+                  <div className="ws">Templates and test guests (VMID 99000 and up) are not counted.</div>
                 </>
               )}
             </section>
