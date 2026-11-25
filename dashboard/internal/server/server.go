@@ -94,7 +94,8 @@ type Server struct {
 	consoles   map[string]consoleTicket
 	limiter    *limiter
 	auditSubs  map[chan store.AuditEntry]*session
-	keys       map[string]*heldKey // session hash -> session secret, while in use
+	ran        map[string]ranChange // change id -> its audit entry, for agents following a draft
+	keys       map[string]*heldKey  // session hash -> session secret, while in use
 
 	// newClient is swappable in tests.
 	newClient func(eps []pve.Endpoint, a pve.Auth) *pve.Client
@@ -114,7 +115,7 @@ func New(st *store.Store, f *fleet.Poller, static fs.FS, log *slog.Logger, opt O
 		base: ctx, cancel: cancel,
 		clients: map[string]*pve.Client{}, views: map[string]*userView{}, renewing: map[string]*sync.Mutex{},
 		sseCount: map[string]int{}, lastTouch: map[string]time.Time{}, oidc: map[string]oidcPending{}, consoles: map[string]consoleTicket{},
-		limiter: newLimiter(), auditSubs: map[chan store.AuditEntry]*session{}, newClient: pve.New}
+		limiter: newLimiter(), auditSubs: map[chan store.AuditEntry]*session{}, ran: map[string]ranChange{}, newClient: pve.New}
 	if n, err := st.InterruptRunning(); err != nil {
 		log.Error("could not mark interrupted changes", "err", err)
 	} else if n > 0 {

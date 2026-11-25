@@ -149,6 +149,7 @@ func (s *Server) runPlan(w http.ResponseWriter, r *http.Request, ss *session) {
 		apiError(w, 500, "audit_unavailable", "could not record the change, so it was not run: "+err.Error())
 		return
 	}
+	s.noteRan(id, planOwner(ss), entry.ID)
 	s.broadcastAudit(entry)
 	s.log.Info("change started", "audit", entry.ID, "user", ss.user, "as", cr.PVEUser, "action", p.Action, "title", p.Title)
 

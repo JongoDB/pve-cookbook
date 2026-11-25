@@ -308,7 +308,8 @@ Examples: Claude Code `claude mcp add --transport http galley https://galley:844
 - `GET /api/agent-policy` → `{"approval":"hosts"|"all"|"always"}`; `PUT /api/settings/agents` (galley
   admins, never agents). What apply-scope tokens need a person for: host commands and access changes
   (default), every change, or nothing. `POST /api/plans/{id}/run` then answers 403 `needs_person` and
-  keeps the plan; over MCP, drafts carry `"needsPerson":true` and `needsPersonReason`.
+  keeps the plan; over MCP, drafts carry `"needsPerson":true` and `needsPersonReason`, and
+  `get_change {"changeId"}` follows a draft (`waiting`, `gone`, or its audit entry).
 - `GET /api/feedback` → `{"enabled","repo"}`; `PUT /api/settings/feedback` (galley admins).
   Feedback is filed by the user on GitHub through a pre-filled new-issue link; galley holds no
   GitHub credential and sends nothing itself.

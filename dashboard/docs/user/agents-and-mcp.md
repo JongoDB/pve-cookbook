@@ -34,7 +34,7 @@ By default an agent with the **apply** scope cannot apply these changes itself:
 - changes under `/access`: users, groups, roles, permissions, API tokens, passwords and realms;
 - node shells and PVE's batch call (`termproxy`, `vncshell`, `spiceshell`, `execute`), package sources and updates (`apt`), and cluster membership (`/cluster/config`).
 
-The agent drafts the change and is told that it needs a person. The draft waits in your **Changes** tab for 24 hours; you review and apply it like any other. This holds for every change of this kind, also one you drafted yourself.
+The agent drafts the change and is told that it needs a person. The draft waits in your **Changes** tab for 24 hours; you review and apply it like any other. The agent can follow it with `get_change` and the change's id: waiting, running, its result, or gone (discarded or expired). This holds for every change of this kind, also one you drafted yourself.
 
 A galley admin can require a person for every change, or for none (**always allow**), in [Settings](settings.md#agent-approval).
 

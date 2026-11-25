@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/JongoDB/pve-cookbook/dashboard/internal/plan"
 )
@@ -107,7 +108,33 @@ func (s *Server) needsPerson(ss *session, p *plan.Plan) string {
 	return hostAccess(p)
 }
 
-const needsPersonHint = ". The draft is waiting in the Changes tab: ask the user to review and apply it there, then look for it with list_changes. Do not work around this"
+const needsPersonHint = ". The draft is waiting in the Changes tab: ask the user to review and apply it there, then follow it with get_change and its changeId. Do not work around this"
+
+// ranChange remembers which audit entry a change became.
+type ranChange struct {
+	owner   string
+	auditID int64
+	at      time.Time
+}
+
+func (s *Server) noteRan(changeID, owner string, auditID int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for k, v := range s.ran {
+		if time.Since(v.at) > 2*plan.AgentTTL {
+			delete(s.ran, k)
+		}
+	}
+	s.ran[changeID] = ranChange{owner, auditID, time.Now()}
+}
+
+// changeAudit returns the audit entry a change of owner became, if it ran.
+func (s *Server) changeAudit(changeID, owner string) (int64, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, ok := s.ran[changeID]
+	return r.auditID, ok && r.owner == owner
+}
 
 // draftNote tells an apply-scope agent up front that it cannot apply this draft.
 func (s *Server) draftNote(ss *session, p *plan.Plan, m map[string]any) map[string]any {

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/JongoDB/pve-cookbook/dashboard/internal/fakepve"
 )
@@ -87,9 +88,34 @@ func TestAgentHostCommandsNeedAPerson(t *testing.T) {
 	if ran != 0 {
 		t.Fatalf("host commands run: %d", ran)
 	}
+	status := func() string {
+		text, isErr := ag.tool("get_change", map[string]any{"changeId": d.ChangeID})
+		var r struct{ Status string }
+		if i := strings.Index(text, "{"); isErr || i < 0 || json.NewDecoder(strings.NewReader(text[i:])).Decode(&r) != nil {
+			t.Fatalf("get_change: %s", text)
+		}
+		return r.Status
+	}
+	if status() != "waiting" {
+		t.Fatalf("status %q", status())
+	}
 	// the person applies the same draft
 	if code := root.do("POST", "/api/plans/"+d.ChangeID+"/run", map[string]string{"confirm": d.ConfirmText}, nil); code != 202 {
 		t.Fatalf("person could not apply the agent's draft: %d", code)
+	}
+	for i := 0; status() == "running" && i < 100; i++ {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if s := status(); s != "ok" {
+		t.Fatalf("agent sees %q after the person applied it", s)
+	}
+	root.do("DELETE", "/api/plans/"+d2.ChangeID, nil, nil)
+	d = d2
+	if s := status(); s != "gone" {
+		t.Fatalf("discarded draft: %q", s)
+	}
+	if text, _ := agentToken(t, h.login("dev@pve", "devpass"), "read").tool("get_change", map[string]any{"changeId": mine.ID}); strings.Contains(text, "id -un") {
+		t.Fatalf("another user's change is visible: %s", text)
 	}
 }
 

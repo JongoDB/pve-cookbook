@@ -83,8 +83,8 @@ func (s *Server) extraToolSpecs() []assistant.ToolSpec {
 		{Name: "read_doc", Description: "Read one page of galley's user guide by slug (see the docs index in your instructions or search_docs results).",
 			Properties: map[string]any{"slug": str("page slug, e.g. changes")}, Required: []string{"slug"}},
 		{Name: "list_changes", Description: "The user's pending changes (drafted, not yet applied) with their steps and commands.", Properties: map[string]any{}},
-		{Name: "get_change", Description: "Status of an applied change from the audit log: running, ok, error or unknown, per step, with output.",
-			Properties: map[string]any{"auditId": map[string]any{"type": "integer"}}, Required: []string{"auditId"}},
+		{Name: "get_change", Description: "Status of a change, by auditId (an applied change) or changeId (a draft): waiting, running, ok, error or unknown, per step, with output.",
+			Properties: map[string]any{"auditId": map[string]any{"type": "integer"}, "changeId": str("the draft's change id")}},
 		{Name: "propose_action", Description: "Draft any action galley offers, for review in Changes. Actions and params:\n" +
 			"- guest.start | guest.shutdown | guest.reboot | guest.stop: {\"targets\":[{\"vmid\":120}]}\n" +
 			"- guest.migrate: {\"targets\":[{\"vmid\":120}],\"target\":\"pve2\",\"online\":true}\n" +
@@ -163,9 +163,23 @@ func (s *Server) runExtraTool(ctx context.Context, ss *session, call assistant.T
 	case "list_changes":
 		return out(s.plans.List(planOwner(ss)))
 	case "get_change":
-		var in struct{ AuditID int64 }
+		var in struct {
+			AuditID  int64
+			ChangeID string
+		}
 		if err := decodeStrict(call.Input, &in); err != nil {
 			return fail(err)
+		}
+		if in.ChangeID != "" {
+			if p, err := s.plans.Peek(in.ChangeID, planOwner(ss)); err == nil {
+				return out(map[string]any{"status": "waiting", "changeId": p.ID, "title": p.Title, "expiresAt": p.ExpiresAt,
+					"note": "not applied yet; it is in the Changes tab"})
+			}
+			id, ok := s.changeAudit(in.ChangeID, planOwner(ss))
+			if !ok {
+				return out(map[string]any{"status": "gone", "changeId": in.ChangeID, "note": "not waiting and not applied: discarded, expired, or galley restarted since. Check the audit log before drafting it again"})
+			}
+			in.AuditID = id
 		}
 		e, err := s.store.AuditEntry(in.AuditID)
 		if err != nil || !s.auditVisible(ctx, ss, e, s.userViews(ctx, ss)) {
