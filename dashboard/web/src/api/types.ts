@@ -484,6 +484,10 @@ export interface Api {
   whatsNew(): Promise<WhatsNew>;
   /** GET /api/feedback: whether Send feedback is on, and the GitHub repository it files to. */
   feedback(): Promise<FeedbackConfig>;
+  /** GET /api/agent-policy: what apply-scope agent tokens need a person for. */
+  agentPolicy(): Promise<AgentPolicy>;
+  /** PUT /api/settings/agents (galley admins). */
+  putAgentPolicy(p: AgentPolicy): Promise<AgentPolicy>;
   /** PUT /api/settings/feedback (galley admins). */
   putFeedback(c: FeedbackConfig): Promise<FeedbackConfig>;
 }
@@ -492,4 +496,7 @@ export interface Api {
 
 export interface Release { version: string; date: string; markdown: string }
 export interface WhatsNew { version: string; releases: Release[] }
+/** hosts: host commands and access changes need a person (default); all: every change does; always: none do. */
+export type AgentApproval = 'hosts' | 'all' | 'always';
+export interface AgentPolicy { approval: AgentApproval }
 export interface FeedbackConfig { enabled: boolean; repo: string }

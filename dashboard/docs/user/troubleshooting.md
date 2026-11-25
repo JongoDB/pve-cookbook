@@ -52,7 +52,7 @@ Check:
 ## A change failed
 
 - **Could not prepare the change: …** galley checked the change and found a problem before anything ran, for example a parameter the API does not accept, or a node that is offline. Fix it and select **Try again**.
-- **Apply change** stays unavailable: type the confirmation text exactly, or the change has expired (after 10 minutes). Start it again.
+- **Apply change** stays unavailable: type the confirmation text exactly, or the change has expired (after 10 minutes; agents' drafts after 24 hours). Start it again.
 - **Failed: …** on a step: PVE refused or the task failed. The reason is PVE's. Steps after it did not run. Check **Details** in the [Audit log](audit-log.md) and the PVE task log.
 - **Unknown: galley stopped following this task.** Check the task in PVE's task log; it may have finished.
 - A configuration change was rejected because the configuration changed meanwhile: open the editor again so it starts from the current values.
@@ -99,6 +99,7 @@ See [Consoles](consoles.md).
 
 - **403** with code `agent_scope`: the token's scope does not allow that call, or the call is galley administration, which agent tokens can never do.
 - **this cluster keeps logins as personal API tokens, and PVE lets an API token create another token only for users with User.Modify**: ask an administrator to create the agent token, or to switch the cluster back to **PVE login tickets** on the **Clusters** page, then log in again.
+- **a person must apply this change** (code `needs_person`): the agent may not apply this one itself. Review and apply its draft in **Changes**. A galley admin can change what needs a person in [Settings](settings.md#agent-approval).
 - **the agent token was rejected (expired or revoked)** (from `galley mcp`): create a new token.
 - **galley certificate does not match --fingerprint**: the fingerprint passed to `galley mcp` is not galley's current certificate.
 

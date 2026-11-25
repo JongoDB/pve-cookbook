@@ -26,7 +26,7 @@ To drop a change without running it, select **Discard**.
 
 The Changes tab holds one change. If you start another change before you apply or discard the first, the new one replaces it. The badge on the **Changes** tab counts the changes waiting for you: the one open in the tab, plus drafts by the assistant or agents that you have not applied or discarded yet.
 
-A change you have not applied expires after 10 minutes; **Apply change** is then unavailable. Start it again to get a fresh one. A change runs at most once.
+A change you have not applied expires after 10 minutes (an agent's draft after 24 hours); **Apply change** is then unavailable. Start it again to get a fresh one. A change runs at most once.
 
 ## Step statuses
 
@@ -70,6 +70,7 @@ Some changes affect only galley, not the cluster. They go through **Changes** to
 - `galley.cluster.update`: rename a cluster in galley, turn login sharing on or off, or change the credential mode (`ticket` or `token`) or the host transport (`pve` or `ssh`);
 - `galley.cluster.remove`: remove a cluster from galley. The cluster itself is not touched. Typed confirmation: `remove <cluster id>`;
 - `galley.host.pin` and `galley.host.unpin`: trust or forget a node's SSH host key (SSH transport only);
+- `galley.agents.update`: set what agents with the apply scope need a person for (see [Settings](settings.md#agent-approval));
 - `galley.prefs.set`: change one of your own preferences, such as your Overview layout.
 
 Such a change is marked **galley setting** and says it is **applied by galley for you**. Instead of commands it lists what it changes in galley; there is no command to copy. When you apply it, galley makes the change with your rights, exactly as if you had made it on the Clusters or Hosts page, so the same permission rules apply (see [Clusters and access](clusters-and-access.md)). It is recorded in the audit log like any other change.
@@ -78,11 +79,11 @@ On the Clusters and Hosts pages themselves, these settings are applied directly 
 
 ## Pending changes
 
-Every change you have not yet applied or discarded, including drafts by the assistant and by your agent tokens, stays pending for 10 minutes. Scripts and agents list them with `GET /api/plans`. You can have at most 50 pending changes. The **Changes** tab shows the one you opened last.
+Every change you have not yet applied or discarded, including drafts by the assistant and by your agent tokens, stays pending for 10 minutes; drafts by agent tokens stay for 24 hours. Pending changes are lost when galley restarts. Scripts and agents list them with `GET /api/plans`. You can have at most 50 pending changes. Agents have their own limits: 10 per agent and 50 in all. The **Changes** tab shows the one you opened last.
 
 ## Changes drafted by agents
 
-An agent token with the **draft** scope drafts changes the same way as the assistant. Its drafts are titled **Agent draft (<token name>): …** and always need typed confirmation. An agent token with the **apply** scope can apply changes itself, passing the confirmation text; those changes are recorded in the audit log like yours. See [Agents and MCP](agents-and-mcp.md).
+An agent token with the **draft** scope drafts changes the same way as the assistant. Its drafts are titled **Agent draft (<token name>): …** and always need typed confirmation. An agent token with the **apply** scope can apply changes itself, passing the confirmation text, except those that [need a person](agents-and-mcp.md#what-needs-a-person); those changes are recorded in the audit log like yours. See [Agents and MCP](agents-and-mcp.md).
 
 ## How galley validates a change
 

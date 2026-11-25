@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { AgentScope, AgentToken, CreatedAgentToken } from '../api/types';
+import type { AgentApproval, AgentScope, AgentToken, CreatedAgentToken } from '../api/types';
 import { errMsg, useApp, useCrumbs } from '../state/app';
 import { useAsync } from '../lib/hooks';
 import { ago } from '../lib/format';
@@ -10,8 +10,13 @@ import { CopyButton, Empty, ErrorBox } from '../components/ui';
 const SCOPES: { id: AgentScope; label: string; text: string }[] = [
   { id: 'read', label: 'read', text: 'query only: lists, findings, tasks, metrics, PVE API reads and this user guide.' },
   { id: 'draft', label: 'draft', text: 'also drafts changes, which wait for you to review and apply in Changes.' },
-  { id: 'apply', label: 'apply', text: 'also applies changes itself, without review. Use with care: it acts as you.' },
+  { id: 'apply', label: 'apply', text: 'also applies changes itself. Use with care: it acts as you.' },
 ];
+const APPLY_NOTE: Record<AgentApproval, string> = {
+  hosts: 'An apply token can change your clusters without anyone reviewing the change. You still apply its host commands and access changes yourself, in Changes.',
+  all: 'This galley requires a person to apply every agent change, so an apply token works like a draft token.',
+  always: 'An apply token can change your clusters without anyone reviewing the change, including root commands on nodes: a galley admin turned approval off.',
+};
 const SCOPE_LABEL: Record<string, string> = { read: 'read', draft: 'draft', apply: 'apply' };
 
 const date = (ts: number) => new Date(ts * 1000).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
@@ -70,6 +75,7 @@ export function Agents() {
 
 function CreateToken({ onCreated }: { onCreated: (c: CreatedAgentToken) => void }) {
   const { api, me } = useApp();
+  const policy = useAsync(() => api.agentPolicy(), 'agent-policy');
   const loggedIn = me.clusters.filter((c) => c.authed).map((c) => c.name).join(', ');
   const [name, setName] = useState('');
   const [scope, setScope] = useState<AgentScope>('read');
@@ -113,7 +119,7 @@ function CreateToken({ onCreated }: { onCreated: (c: CreatedAgentToken) => void 
           <span className="hint">Whatever the scope, the agent acts as you: PVE checks your permissions on every call, and the audit log shows the agent&apos;s name. Agents can never change clusters, galley settings or agent tokens.</span>
         </fieldset>
         {scope === 'apply' && (
-          <div className="notice notice-warn" role="note"><div className="grow">An apply token can change your clusters without anyone reviewing the change. Give it a short lifetime and keep it secret.</div></div>
+          <div className="notice notice-warn" role="note"><div className="grow">{APPLY_NOTE[policy.data?.approval ?? 'hosts']} Give it a short lifetime and keep it secret.</div></div>
         )}
         <ErrorBox message={error} />
         <div className="row-actions">

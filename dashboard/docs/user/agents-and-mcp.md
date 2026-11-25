@@ -13,7 +13,7 @@ When you create a token you choose its scope:
 
 - **read**: query only. List guests, nodes and storage, read findings, tasks and metrics, read any PVE API path you can read, look up the API schema, and read this user guide.
 - **draft**: everything in **read**, plus drafting changes. A draft waits for a person to review and apply it in **Changes**, like the assistant's drafts. Drafts are titled **Agent draft (<token name>): …** and always need typed confirmation.
-- **apply**: everything in **draft**, plus applying changes itself. The agent passes the change's confirmation text, then follows the change until it finishes. Use this scope only for agents you trust to act without review: they act as you. If you can run host commands, so can the agent, as root on the nodes and with no person in between. galley's check for host commands that name secret files can be worded around.
+- **apply**: everything in **draft**, plus applying changes itself. The agent passes the change's confirmation text, then follows the change until it finishes. Use this scope only for agents you trust: they act as you. Some changes still need a person, see below.
 
 Whatever the scope, an agent token can never:
 
@@ -25,6 +25,22 @@ Whatever the scope, an agent token can never:
 Each agent can have at most 10 drafts waiting for you. Changes an agent applied show **via agent <name>** below the user in the [audit log](audit-log.md) and on [Activity](activity.md).
 
 Host commands drafted or applied by an agent follow the same rules as yours: they need host administrator rights on the cluster. See [Host commands](hosts.md).
+
+## What needs a person
+
+By default an agent with the **apply** scope cannot apply these changes itself:
+
+- host commands (root commands on a node);
+- changes under `/access`: users, groups, roles, permissions, API tokens, passwords and realms;
+- node shells and PVE's batch call (`termproxy`, `vncshell`, `spiceshell`, `execute`), package sources and updates (`apt`), and cluster membership (`/cluster/config`).
+
+The agent drafts the change and is told that it needs a person. The draft waits in your **Changes** tab for 24 hours; you review and apply it like any other. This holds for every change of this kind, also one you drafted yourself.
+
+A galley admin can require a person for every change, or for none (**always allow**), in [Settings](settings.md#agent-approval).
+
+This is a checkpoint, not a sandbox: within your other PVE permissions, an apply agent acts alone. It can, for example, destroy guests or run commands inside a guest through the guest agent.
+
+With the default **PVE node terminal** transport, PVE gives API tokens no root shell, so a host command an agent applies fails even with **always allow**. It works with the **SSH** transport. A person who applies the agent's draft uses their own login.
 
 ## How a token acts as you
 

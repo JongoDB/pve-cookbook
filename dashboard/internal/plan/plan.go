@@ -104,22 +104,43 @@ func (m *Manager) Register(ctx context.Context, user string, p *Plan) error {
 	applyDraft(ctx, p)
 	p.ID, p.owner = newID(), user
 	p.CreatedAt = time.Now().Unix()
-	p.ExpiresAt = p.CreatedAt + int64(TTL.Seconds())
+	return m.admit(p)
+}
+
+// admit makes a finished plan visible, within its owner's limits. An agent's
+// drafts wait for a person who may be away, so they last longer; they have
+// their own limits and never use up the person's.
+func (m *Manager) admit(p *Plan) error {
+	ttl := TTL
+	agent := isAgent(p)
+	if agent {
+		ttl = AgentTTL
+	}
+	p.ExpiresAt = p.CreatedAt + int64(ttl.Seconds())
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.gc()
-	n := 0
+	all, same := 0, 0
 	for _, q := range m.plans {
-		if q.owner == user && !q.used {
-			n++
+		if q.owner != p.owner || q.used || isAgent(q) != agent {
+			continue
+		}
+		all++
+		if q.Source == p.Source {
+			same++
 		}
 	}
-	if n >= MaxPendingPerUser {
+	if agent && same >= MaxPendingPerAgent {
+		return ErrAgentTooMany
+	}
+	if all >= MaxPendingPerUser {
 		return ErrTooMany
 	}
 	m.plans[p.ID] = p
 	return nil
 }
+
+func isAgent(p *Plan) bool { return strings.HasPrefix(p.Source, "agent:") }
 
 // Target identifies a guest.
 type Target struct {
@@ -137,22 +158,31 @@ type Request struct {
 
 // Errors surfaced to the API layer.
 var (
-	ErrNotFound    = errors.New("plan not found or expired")
-	ErrUsed        = errors.New("plan already executed")
-	ErrConfirm     = errors.New("confirmation text does not match")
-	ErrForbidden   = errors.New("plan belongs to another user")
-	ErrBadRequest  = errors.New("invalid plan request")
-	ErrTooMany     = errors.New("too many pending plans; run or discard some first")
-	snapNameRegexp = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{1,39}$`)
-	nodeRegexp     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.-]{0,62}$`)
-	jobRegexp      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$`)
+	ErrNotFound     = errors.New("plan not found or expired")
+	ErrUsed         = errors.New("plan already executed")
+	ErrConfirm      = errors.New("confirmation text does not match")
+	ErrForbidden    = errors.New("plan belongs to another user")
+	ErrBadRequest   = errors.New("invalid plan request")
+	ErrAgentTooMany = fmt.Errorf("this agent already has %d changes waiting for a person: %w", MaxPendingPerAgent, ErrTooMany)
+	ErrTooMany      = errors.New("too many pending plans; run or discard some first")
+	snapNameRegexp  = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]{1,39}$`)
+	nodeRegexp      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.-]{0,62}$`)
+	jobRegexp       = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$`)
 )
 
-// TTL is how long a plan stays runnable.
-const TTL = 10 * time.Minute
+// TTL is how long a plan stays runnable; AgentTTL is for agents' drafts, which
+// wait for a person.
+const (
+	TTL      = 10 * time.Minute
+	AgentTTL = 24 * time.Hour
+)
 
-// MaxPendingPerUser bounds memory used by unexecuted plans.
-const MaxPendingPerUser = 50
+// MaxPendingPerUser bounds memory used by unexecuted plans (counted separately
+// for people and their agents); MaxPendingPerAgent caps one agent's drafts.
+const (
+	MaxPendingPerUser  = 50
+	MaxPendingPerAgent = 10
+)
 
 // Visible reports whether the requesting user may see guest vmid in cluster.
 // A nil Visible allows everything (tests, internal callers).
@@ -265,7 +295,6 @@ func vmids(ts []Target) string {
 // lets them read. vis limits targets to guests the user can see.
 func (m *Manager) Build(ctx context.Context, user string, req Request, vis Visible, reader *pve.Client) (*Plan, error) {
 	p := &Plan{ID: newID(), Action: req.Action, ClusterID: req.ClusterID, CreatedAt: time.Now().Unix(), owner: user}
-	p.ExpiresAt = p.CreatedAt + int64(TTL.Seconds())
 	if m.fleet.ServiceClient(req.ClusterID) == nil {
 		return nil, fmt.Errorf("%w: unknown cluster", ErrBadRequest)
 	}
@@ -484,19 +513,9 @@ func (m *Manager) Build(ctx context.Context, user string, req Request, vis Visib
 		return nil, fmt.Errorf("%w: unknown action %q", ErrBadRequest, req.Action)
 	}
 	applyDraft(ctx, p)
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.gc()
-	n := 0
-	for _, q := range m.plans {
-		if q.owner == user && !q.used {
-			n++
-		}
+	if err := m.admit(p); err != nil {
+		return nil, err
 	}
-	if n >= MaxPendingPerUser {
-		return nil, ErrTooMany
-	}
-	m.plans[p.ID] = p
 	return p, nil
 }
 

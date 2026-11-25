@@ -1,6 +1,6 @@
 ---
 title: Settings
-summary: What the Settings page holds (the assistant and feedback), who can change it, and what data leaves galley when the assistant is on.
+summary: What the Settings page holds (the assistant, agent approval and feedback), who can change it, and what data leaves galley when the assistant is on.
 order: 150
 route: /settings
 ---
@@ -26,6 +26,16 @@ The **Assistant** section connects galley's assistant to a model provider. The h
 Select **Save assistant settings** to save, or **Undo changes** to go back to the saved settings. Changes apply to new conversations.
 
 Step-by-step setup: [Assistant](assistant.md#set-up-the-assistant-galley-admins).
+
+## Agent approval
+
+The **Agent approval** section sets what agent tokens with the **apply** scope need a person for. See [Agents and MCP](agents-and-mcp.md#what-needs-a-person).
+
+- **Host commands and access changes** (default): a person applies these; agents apply everything else.
+- **Every change**: a person applies everything, so apply tokens work like draft tokens.
+- **Nothing, always allow**: agents apply every change themselves. Tick **I understand, let agents apply everything** to choose it.
+
+Select **Save agent approval**. The setting applies at once to every agent token on this galley, and the change is recorded in the audit log (`settings.agents`). Agent tokens can never change it. The assistant can draft the change for you to apply.
 
 ## Feedback
 

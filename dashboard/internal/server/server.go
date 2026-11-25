@@ -216,6 +216,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/whats-new", s.authed(s.whatsNew))
 	mux.HandleFunc("GET /api/feedback", s.authed(s.getFeedback))
 	mux.HandleFunc("PUT /api/settings/feedback", s.authed(s.putFeedback))
+	mux.HandleFunc("GET /api/agent-policy", s.authed(s.getAgentPolicy))
+	mux.HandleFunc("PUT /api/settings/agents", s.authed(s.putAgentPolicy))
 	mux.HandleFunc("GET /api/agent-tokens", s.authed(s.listAgentTokens))
 	mux.HandleFunc("POST /api/agent-tokens", s.authed(s.createAgentToken))
 	mux.HandleFunc("DELETE /api/agent-tokens/{id}", s.authed(s.deleteAgentToken))

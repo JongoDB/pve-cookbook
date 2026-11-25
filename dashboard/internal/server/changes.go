@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
 
 	"time"
@@ -19,10 +18,6 @@ import (
 
 // maxRun bounds a whole change; each PVE task is also bounded by plan.TaskTimeout.
 const maxRun = 4 * time.Hour
-
-// maxAgentPending caps one agent's waiting drafts, so an agent cannot fill
-// its user's queue.
-const maxAgentPending = 10
 
 func (s *Server) createPlan(w http.ResponseWriter, r *http.Request, ss *session) {
 	var req plan.Request
@@ -36,16 +31,6 @@ func (s *Server) createPlan(w http.ResponseWriter, r *http.Request, ss *session)
 		// wrapped in a change; and every agent change is a labelled draft.
 		if strings.HasPrefix(req.Action, "galley.") {
 			apiError(w, 403, "agent_scope", "agent tokens cannot change galley's own configuration")
-			return
-		}
-		n := 0
-		for _, q := range s.plans.List(planOwner(ss)) {
-			if q.Source == "agent:"+ss.agentName {
-				n++
-			}
-		}
-		if n >= maxAgentPending {
-			apiError(w, 429, "too_many_plans", "this agent already has "+strconv.Itoa(n)+" changes waiting for review")
 			return
 		}
 		ctx = draftCtx(ctx, ss)
@@ -134,6 +119,11 @@ func (s *Server) runPlan(w http.ResponseWriter, r *http.Request, ss *session) {
 				apiError(w, 403, "agent_scope", "agent tokens cannot change galley's own configuration")
 				return
 			}
+		}
+		// Before Take: the draft must stay in Changes for the person.
+		if why := s.needsPerson(ss, p); why != "" {
+			apiError(w, 403, "needs_person", "a person must apply this change: "+why+needsPersonHint)
+			return
 		}
 	}
 	p, err = s.plans.Take(id, planOwner(ss), req.Confirm)
