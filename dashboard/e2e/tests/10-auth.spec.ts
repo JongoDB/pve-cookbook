@@ -44,8 +44,10 @@ test.describe('authentication @fast', () => {
     // log out with the same cookie from outside the page (another tab)
     const csrf = (await (await page.request.get('/api/me')).json()).csrf;
     expect((await page.request.post('/api/logout', { headers: { 'X-Galley-CSRF': csrf, 'Content-Type': 'application/json' }, data: '{}' })).status()).toBe(204);
-    // the next request from the page (navigation reads, polling) notices
-    await page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Audit log' }).click();
+    // the next request from the page notices: navigation reads, polling, or the
+    // live event stream dropping — the app may already be back at login by now
+    const nav = page.getByRole('navigation', { name: 'Primary' }).getByRole('link', { name: 'Audit log' });
+    await nav.click({ timeout: 2000 }).catch(() => undefined);
     await expect(page.getByRole('status').filter({ hasText: /session (ended|expired)|log in again/i })).toBeVisible({ timeout: 15_000 });
     await expect(page.getByRole('button', { name: /^Log in/ })).toBeVisible();
     await loginUI(page, USERS.root);
