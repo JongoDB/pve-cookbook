@@ -203,6 +203,10 @@ func (m *Manager) resolve(cluster string, ts []Target, vis Visible) ([]Target, [
 	return out, gs, nil
 }
 
+// titleIDs lists VMIDs for people ("120, 121"); vmids keeps the compact
+// form used in typed confirmations ("destroy 120,121").
+func titleIDs(ts []Target) string { return strings.ReplaceAll(vmids(ts), ",", ", ") }
+
 func vmids(ts []Target) string {
 	s := make([]string, len(ts))
 	for i, t := range ts {
@@ -239,7 +243,7 @@ func (m *Manager) Build(ctx context.Context, user string, req Request, vis Visib
 				Body: map[string]string{}, CLI: fmt.Sprintf("%s %s %d", tool(t.Type), verb, t.VMID),
 			})
 		}
-		p.Title = fmt.Sprintf("%s %s", strings.ToUpper(verb[:1])+verb[1:], vmids(ts))
+		p.Title = fmt.Sprintf("%s %s", strings.ToUpper(verb[:1])+verb[1:], titleIDs(ts))
 		p.Summary = fmt.Sprintf("%d guest(s), one task each.", len(ts))
 		if verb == "stop" {
 			p.Destructive = true
@@ -284,7 +288,7 @@ func (m *Manager) Build(ctx context.Context, user string, req Request, vis Visib
 				Method:      http.MethodPost, Path: fmt.Sprintf("/nodes/%s/%s/%d/migrate", t.Node, t.Type, t.VMID), Body: body, CLI: cli,
 			})
 		}
-		p.Title = fmt.Sprintf("Migrate %s to %s", vmids(ts), prm.Target)
+		p.Title = fmt.Sprintf("Migrate %s to %s", titleIDs(ts), prm.Target)
 		p.Summary = "Running VMs migrate live; running containers restart on the target."
 	case "guest.snapshot":
 		var prm struct {
@@ -312,7 +316,7 @@ func (m *Manager) Build(ctx context.Context, user string, req Request, vis Visib
 			p.Steps = append(p.Steps, Step{Description: fmt.Sprintf("Snapshot %d as %q", t.VMID, prm.Name), Method: http.MethodPost,
 				Path: fmt.Sprintf("/nodes/%s/%s/%d/snapshot", t.Node, t.Type, t.VMID), Body: body, CLI: cli})
 		}
-		p.Title = fmt.Sprintf("Snapshot %s as %s", vmids(ts), prm.Name)
+		p.Title = fmt.Sprintf("Snapshot %s as %s", titleIDs(ts), prm.Name)
 		p.Summary = "Snapshots need snapshot-capable storage (Ceph RBD, ZFS, LVM-thin, qcow2)."
 	case "guest.destroy":
 		var prm struct{ Targets []Target }
@@ -334,7 +338,7 @@ func (m *Manager) Build(ctx context.Context, user string, req Request, vis Visib
 		}
 		p.Destructive = true
 		p.ConfirmText = "destroy " + vmids(ts)
-		p.Title = "Destroy " + vmids(ts)
+		p.Title = "Destroy " + titleIDs(ts)
 		p.Summary = "Permanently deletes the guest(s) and all their disks. Backups are not touched."
 	case "backup.protect":
 		var prm struct {

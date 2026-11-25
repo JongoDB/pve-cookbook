@@ -205,7 +205,7 @@ function VmWizard({ cluster, nodes }: { cluster: string; nodes: string[] }) {
     action: 'api.call', clusterId: cluster,
     params: {
       title: `Create VM ${s.vmid}${s.name ? ` (${s.name})` : ''} on ${s.node}`,
-      summary: `${s.cores} cores, ${formatBytes(s.memoryMiB * 1024 ** 2)} memory, ${spec.disk.importFrom ? 'disk imported from an image' : `${s.disk.sizeGiB} GiB disk`} on ${s.disk.storage}${s.gpu ? `, GPU ${s.gpu.mapping ?? s.gpu.host}` : ''}.${pin ? ` HA keeps it on ${gpuNodes(s).join(', ')}.` : ''}${s.start ? ' Starts when created.' : ''}`,
+      summary: `${s.cores} ${s.cores === 1 ? 'core' : 'cores'}, ${formatBytes(s.memoryMiB * 1024 ** 2)} memory, ${spec.disk.importFrom ? 'disk imported from an image' : `${s.disk.sizeGiB} GiB disk`} on ${s.disk.storage}${s.gpu ? `, GPU ${s.gpu.mapping ?? s.gpu.host}` : ''}.${pin ? ` HA keeps it on ${gpuNodes(s).join(', ')}.` : ''}${s.start ? ' Starts when created.' : ''}`,
       calls,
     },
   });
@@ -467,7 +467,7 @@ function CtWizard({ cluster, nodes }: { cluster: string; nodes: string[] }) {
   const idx = CT_STEPS.findIndex((x) => x.id === step);
   const review = () => void openPlan({
     action: 'api.call', clusterId: cluster,
-    params: { title: `Create container ${s.vmid} (${s.hostname}) on ${s.node}`, summary: `${s.unprivileged ? 'Unprivileged' : 'Privileged'} container from ${s.template.split('/').pop()}, ${s.cores} cores, ${formatBytes(s.memoryMiB * 1024 ** 2)} memory, ${s.rootfs.sizeGiB} GiB root disk.${s.gpu.kind !== 'none' ? ` Shares ${ctGpuDevices(s.gpu)[0].split(',')[0]} of ${s.node}.` : ''}`, calls },
+    params: { title: `Create container ${s.vmid} (${s.hostname}) on ${s.node}`, summary: `${s.unprivileged ? 'Unprivileged' : 'Privileged'} container from ${s.template.split('/').pop()}, ${s.cores} ${s.cores === 1 ? 'core' : 'cores'}, ${formatBytes(s.memoryMiB * 1024 ** 2)} memory, ${s.rootfs.sizeGiB} GiB root disk.${s.gpu.kind !== 'none' ? ` Shares ${ctGpuDevices(s.gpu)[0].split(',')[0]} of ${s.node}.` : ''}`, calls },
   });
 
   return (
