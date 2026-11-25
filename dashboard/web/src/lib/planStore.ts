@@ -7,6 +7,8 @@ export interface PlanState {
   /** true from pressing Run until the run (including async steps) has finished */
   running: boolean;
   error: string | null;
+  /** API error code of `error`, e.g. "cluster_login_required" */
+  errorCode?: string;
   result: RunResult | null;
 }
 
@@ -33,7 +35,7 @@ export class PlanStore {
   private pollTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
-    readonly api: Pick<Api, 'createPlan' | 'runPlan' | 'audit'>,
+    readonly api: Pick<Api, 'createPlan' | 'runPlan' | 'audit'> & Partial<Pick<Api, 'discardPlan'>>,
     private onChange: (s: PlanState) => void,
   ) {}
 
@@ -49,8 +51,20 @@ export class PlanStore {
       const plan = await this.api.createPlan(r);
       if (n === this.req) this.set({ ...EMPTY_PLAN, plan });
     } catch (e) {
-      if (n === this.req) this.set({ ...EMPTY_PLAN, error: errMsg(e) });
+      const code = (e as { code?: unknown })?.code;
+      if (n === this.req) this.set({ ...EMPTY_PLAN, error: errMsg(e), ...(typeof code === 'string' ? { errorCode: code } : {}) });
     }
+  }
+
+  /**
+   * Show a change that already exists server-side (an assistant draft): no POST, the plan's own
+   * id is what run() sends. A newer open()/show() or clear() supersedes it like any other plan.
+   */
+  show(plan: Plan): void {
+    if (this.state.plan?.id === plan.id && !this.state.loading) return;
+    ++this.req;
+    this.stopPoll();
+    this.set({ ...EMPTY_PLAN, plan });
   }
 
   async run(confirm?: string): Promise<void> {
@@ -84,6 +98,9 @@ export class PlanStore {
   }
 
   clear(): void {
+    const { plan, result } = this.state;
+    // Tell the server a pending change was discarded (best effort; it also expires on its own).
+    if (plan && !result && this.api.discardPlan) this.api.discardPlan(plan.id).catch(() => undefined);
     this.req++;
     this.stopPoll();
     this.set(EMPTY_PLAN);
@@ -100,7 +117,7 @@ export class PlanStore {
       this.pollTimer = null;
       if (n !== this.req || this.state.result?.auditId !== auditId || runFinished(this.state.result)) return;
       if (Date.now() - since > AUDIT_POLL_MAX_MS) {
-        this.set({ ...this.state, running: false, error: 'Still running after 15 minutes. Check the audit log and Operations for progress.' });
+        this.set({ ...this.state, running: false, error: 'Still running after 15 minutes. Check Activity and the audit log for progress.' });
         return;
       }
       try {

@@ -89,3 +89,30 @@ describe('PlanStore (stale-run guard)', () => {
     s.dispose();
   });
 });
+
+describe('PlanStore.show (existing plans, e.g. assistant drafts)', () => {
+  it('shows a plan without creating it and runs it by its own id', async () => {
+    const { api, runs } = fakeApi();
+    let created = 0;
+    const counting = { ...api, createPlan: async (r: Parameters<typeof api.createPlan>[0]) => { created++; return api.createPlan(r); } };
+    const states: PlanState[] = [];
+    const s = new PlanStore(counting, (x) => states.push(x));
+    const draft = { ...plan('draft-1'), source: 'assistant', confirmText: 'apply 1 step' };
+    s.show(draft);
+    expect(created).toBe(0);
+    expect(s.get().plan).toBe(draft);
+    void s.run('apply 1 step');
+    expect(runs.map((r) => r.id)).toEqual(['draft-1']);
+  });
+
+  it('supersedes a plan that is still being created', async () => {
+    const { api } = fakeApi();
+    const slow = deferred<Plan>();
+    const s = new PlanStore({ ...api, createPlan: () => slow.promise }, () => undefined);
+    const opening = s.open({ action: 'guest.start', clusterId: 'lab', params: { id: 'late' } });
+    s.show(plan('draft-2'));
+    slow.resolve(plan('late'));
+    await opening;
+    expect(s.get().plan?.id).toBe('draft-2');
+  });
+});

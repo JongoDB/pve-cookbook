@@ -154,6 +154,35 @@ type auditEntry struct {
 	Results   []plan.Result
 }
 
+var _ = plan.MethodSSH
+
+// runPlanID runs an existing plan and waits for it to finish.
+func (c *client) runPlanID(id, confirm string) auditEntry {
+	c.h.t.Helper()
+	var run struct{ AuditID int64 }
+	if code := c.do("POST", "/api/plans/"+id+"/run", map[string]any{"confirm": confirm}, &run); code != 202 {
+		c.h.t.Fatalf("run: %d", code)
+	}
+	return c.waitAudit(run.AuditID)
+}
+
+func (c *client) waitAudit(id int64) auditEntry {
+	c.h.t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		var es []auditEntry
+		c.do("GET", "/api/audit?limit=50", nil, &es)
+		for _, e := range es {
+			if e.ID == id && e.Status != "running" {
+				return e
+			}
+		}
+		time.Sleep(30 * time.Millisecond)
+	}
+	c.h.t.Fatal("change did not finish")
+	return auditEntry{}
+}
+
 // runAndWait builds and runs a plan and waits for its audit entry to finish.
 func (c *client) runAndWait(action string, params any, confirm string) auditEntry {
 	c.h.t.Helper()
@@ -516,6 +545,72 @@ func TestMissingClusterLoginIsNot401(t *testing.T) {
 	}
 }
 
+// A cluster the user has not logged in to yet is still listed with a status
+// (the Clusters page reads status.reachable for every cluster).
+func TestClusterListStatusWithoutLogin(t *testing.T) {
+	h := newHarness(t)
+	h.setup()
+	root := h.login("root@pam", "secret")
+	f2 := fakepve.New()
+	t.Cleanup(f2.Close)
+	if err := h.st.AddCluster(store.Cluster{ID: "other", Name: "other", Endpoints: []pve.Endpoint{f2.Endpoint()}, TokenID: f2.TokenID, TokenSecret: f2.Secret, CreatedAt: 1}); err != nil {
+		t.Fatal(err)
+	}
+	h.refresh()
+	var cs []struct {
+		ID     string
+		Authed bool
+		Status *struct{ Reachable, Quorate bool }
+	}
+	if code := root.do("GET", "/api/clusters", nil, &cs); code != 200 || len(cs) != 2 {
+		t.Fatalf("clusters: %d %+v", code, cs)
+	}
+	for _, c := range cs {
+		if c.Status == nil {
+			t.Fatalf("cluster %s listed without status", c.ID)
+		}
+		if c.ID == "other" && (c.Authed || !c.Status.Reachable) {
+			t.Fatalf("other: %+v %+v", c, *c.Status)
+		}
+	}
+}
+
+// Removing a cluster keeps its history readable for galley admins: who
+// removed it is exactly what the audit log is for.
+func TestRemovedClusterStaysInAudit(t *testing.T) {
+	h := newHarness(t)
+	h.setup()
+	root := h.login("root@pam", "secret")
+	f2 := fakepve.New()
+	t.Cleanup(f2.Close)
+	if err := h.st.AddCluster(store.Cluster{ID: "other", Name: "other", Endpoints: []pve.Endpoint{f2.Endpoint()}, TokenID: f2.TokenID, TokenSecret: f2.Secret, CreatedAt: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if code := root.do("POST", "/api/clusters/other/login", map[string]any{"password": "secret"}, nil); code != 200 {
+		t.Fatalf("cluster login: %d", code)
+	}
+	if code := root.do("DELETE", "/api/clusters/other", nil, nil); code != 204 {
+		t.Fatalf("remove: %d", code)
+	}
+	var es []struct{ Action, ClusterID string }
+	root.do("GET", "/api/audit", nil, &es)
+	found := false
+	for _, e := range es {
+		found = found || (e.Action == "cluster.delete" && e.ClusterID == "other")
+	}
+	if !found {
+		t.Fatalf("the removal is not in the audit log: %+v", es)
+	}
+	dev := h.login("dev@pve", "devpass")
+	es = nil
+	dev.do("GET", "/api/audit", nil, &es)
+	for _, e := range es {
+		if e.ClusterID == "other" {
+			t.Fatalf("non-admin sees a removed cluster's history: %+v", e)
+		}
+	}
+}
+
 func TestOpenIDCallbackBoundToBrowser(t *testing.T) {
 	h := newHarness(t)
 	h.setup()
@@ -550,5 +645,217 @@ func TestParallelGuessesStayWithinBudget(t *testing.T) {
 	wg.Wait()
 	if counts[401] > 10 || counts[429] < 15 {
 		t.Fatalf("parallel guesses not bounded: %v", counts)
+	}
+}
+
+func TestMetricsNormalizedAndFiltered(t *testing.T) {
+	h := newHarness(t)
+	h.setup()
+	root := h.login("root@pam", "secret")
+	var ms struct {
+		T      []int64
+		Series map[string][]*float64
+		Error  string
+	}
+	if code := root.do("GET", "/api/metrics?cluster=pve-lab&kind=node&id=pve1&timeframe=day", nil, &ms); code != 200 || len(ms.T) != 70 {
+		t.Fatalf("node metrics: %d %s %d", code, ms.Error, len(ms.T))
+	}
+	for _, k := range []string{"cpu", "memUsed", "memTotal", "netIn", "netOut", "ioWait", "load"} {
+		if len(ms.Series[k]) != 70 {
+			t.Fatalf("missing series %s", k)
+		}
+	}
+	if ms.Series["cpu"][69] != nil {
+		t.Fatal("missing samples must be null")
+	}
+	var cl struct {
+		Series map[string][]*float64
+		Error  string
+	}
+	root.do("GET", "/api/metrics?cluster=pve-lab&kind=cluster&id=&timeframe=hour", nil, &cl)
+	if cl.Error != "" || cl.Series["memTotal"] == nil || *cl.Series["memTotal"][0] < 1.6e12 {
+		t.Fatalf("cluster sum: %+v", cl.Error)
+	}
+	var batch []struct{ Error string }
+	root.do("POST", "/api/metrics", map[string]any{"queries": []map[string]any{
+		{"cluster": "pve-lab", "kind": "guest", "id": "120", "timeframe": "hour"},
+		{"cluster": "pve-lab", "kind": "storage", "id": "vm-pool", "timeframe": "week"},
+	}}, &batch)
+	if len(batch) != 2 || batch[0].Error != "" || batch[1].Error != "" {
+		t.Fatalf("batch: %+v", batch)
+	}
+	dev := h.login("dev@pve", "devpass")
+	if code := dev.do("GET", "/api/metrics?cluster=pve-lab&kind=guest&id=120&timeframe=day", nil, nil); code != 400 {
+		t.Fatalf("dev reads invisible guest metrics: %d", code)
+	}
+	if code := dev.do("GET", "/api/metrics?cluster=pve-lab&kind=node&id=pve1&timeframe=day", nil, nil); code != 400 {
+		t.Fatalf("dev reads node metrics: %d", code)
+	}
+	if code := dev.do("GET", "/api/metrics?cluster=pve-lab&kind=guest&id=121&timeframe=day", nil, nil); code != 200 {
+		t.Fatalf("dev reads own guest metrics: %d", code)
+	}
+}
+
+func TestPVEReadPassThroughRunsAsUser(t *testing.T) {
+	h := newHarness(t)
+	h.setup()
+	dev := h.login("dev@pve", "devpass")
+	var res struct{ Data []map[string]any }
+	if code := dev.do("GET", "/api/clusters/pve-lab/pve/cluster/resources", nil, &res); code != 200 {
+		t.Fatalf("passthrough: %d", code)
+	}
+	if len(res.Data) != 1 || res.Data[0]["vmid"].(float64) != 121 {
+		t.Fatalf("passthrough not filtered by PVE as the user: %+v", res.Data)
+	}
+	if code := dev.do("GET", "/api/clusters/pve-lab/pve/nodes/../../etc", nil, nil); code == 200 {
+		t.Fatal("path traversal accepted")
+	}
+}
+
+func TestGenericAPICallChange(t *testing.T) {
+	h := newHarness(t)
+	h.setup()
+	root := h.login("root@pam", "secret")
+	var paths []map[string]any
+	if code := root.do("GET", "/api/clusters/pve-lab/schema", nil, &paths); code != 200 || len(paths) == 0 {
+		t.Fatalf("schema: %d %d", code, len(paths))
+	}
+	var node struct {
+		Path string
+		Vars map[string]string
+		Info map[string]any
+	}
+	if code := root.do("GET", "/api/clusters/pve-lab/schema?path=/nodes/pve1/qemu/120/config", nil, &node); code != 200 || node.Path != "/nodes/{node}/qemu/{vmid}/config" || node.Info["PUT"] == nil {
+		t.Fatalf("schema node: %d %+v", code, node)
+	}
+	// invalid parameters never become a change
+	var e struct{ Code, Error string }
+	if code := root.do("POST", "/api/plans", map[string]any{"action": "api.call", "clusterId": "pve-lab", "params": map[string]any{
+		"calls": []map[string]any{{"method": "PUT", "path": "/nodes/pve1/qemu/300/config", "body": map[string]string{"cores": "zero"}}}}}, &e); code != 400 || !strings.Contains(e.Error, "integer") {
+		t.Fatalf("invalid call accepted: %d %+v", code, e)
+	}
+	// a valid bundle: attach a GPU and set cores, as one change
+	e1 := root.runAndWait("api.call", map[string]any{"title": "Attach second GPU to llm-vllm", "calls": []map[string]any{
+		{"method": "PUT", "path": "/nodes/pve1/qemu/300/config", "body": map[string]string{"hostpci1": "mapping=gpu-a2-1,pcie=1", "cores": "16"}},
+	}}, "")
+	if !e1.OK {
+		t.Fatalf("api.call: %+v", e1)
+	}
+	calls := h.fake.Recorded()
+	last := calls[len(calls)-1]
+	if last.Method != "PUT" || last.Form["hostpci1"] != "mapping=gpu-a2-1,pcie=1" || last.User != "root@pam" {
+		t.Fatalf("call: %+v", last)
+	}
+	// deletes need typed confirmation
+	var p plan.Plan
+	root.do("POST", "/api/plans", map[string]any{"action": "api.call", "clusterId": "pve-lab", "params": map[string]any{
+		"calls": []map[string]any{{"method": "DELETE", "path": "/nodes/pve1/qemu/300", "body": map[string]string{"purge": "1"}}}}}, &p)
+	if !p.Destructive || p.ConfirmText != "delete qemu/300" || p.Steps[0].CLI != "pvesh delete /nodes/pve1/qemu/300 --purge 1" {
+		t.Fatalf("delete plan: %+v", p)
+	}
+}
+
+func TestAPICallPathCanonicalAndDestructive(t *testing.T) {
+	h := newHarness(t)
+	h.setup()
+	root := h.login("root@pam", "secret")
+	mk := func(method, path string, body map[string]string) (int, plan.Plan) {
+		var p plan.Plan
+		code := root.do("POST", "/api/plans", map[string]any{"action": "api.call", "clusterId": "pve-lab", "params": map[string]any{
+			"calls": []map[string]any{{"method": method, "path": path, "body": body}}}}, &p)
+		return code, p
+	}
+	for _, bad := range []string{"/nodes/pve1/qemu/300/config/", "/nodes/pve1%2Fqemu/300/config", "/nodes//qemu/300/config"} {
+		if code, _ := mk("PUT", bad, map[string]string{"cores": "2"}); code != 400 {
+			t.Fatalf("non-canonical path %s accepted: %d", bad, code)
+		}
+	}
+	if _, p := mk("PUT", "/nodes/pve1/qemu/300/config", map[string]string{"delete": "balloon"}); !p.Destructive {
+		t.Fatal("config delete= not treated as destructive")
+	}
+	if _, p := mk("PUT", "/nodes/pve1/qemu/300/config", map[string]string{"cores": "2"}); p.Destructive {
+		t.Fatal("plain config change treated as destructive")
+	}
+	var e struct{ Error string }
+	root.do("GET", "/api/clusters/pve-lab/pve/nodes/pve1%2Fqemu", nil, &e)
+	if !strings.Contains(e.Error, "invalid") {
+		t.Fatalf("encoded pass-through path accepted: %+v", e)
+	}
+}
+
+// Pinning a GPU VM: an HA resource plus a strict node-affinity rule (PVE 9's
+// composite rules schema). Adding a stopped guest as "stopped" stops nothing,
+// so it needs no typed confirmation; a running guest would be stopped.
+func TestHAPinGPUChange(t *testing.T) {
+	h := newHarness(t)
+	h.setup()
+	root := h.login("root@pam", "secret")
+	pin := []map[string]any{
+		{"method": "POST", "path": "/cluster/ha/resources", "body": map[string]string{"sid": "vm:300", "state": "stopped"}},
+		{"method": "POST", "path": "/cluster/ha/rules", "body": map[string]string{"rule": "gpu-300", "type": "node-affinity", "resources": "vm:300", "nodes": "pve1", "strict": "1", "comment": "galley: gpu-a2-0 only exists on these nodes"}},
+	}
+	var p plan.Plan
+	if code := root.do("POST", "/api/plans", map[string]any{"action": "api.call", "clusterId": "pve-lab", "params": map[string]any{"calls": pin}}, &p); code != 200 && code != 201 {
+		t.Fatalf("pin plan: %d", code)
+	}
+	if p.Destructive || p.ConfirmText != "" {
+		t.Fatalf("adding a stopped guest to HA as stopped treated as destructive: %+v", p)
+	}
+	if e := root.runAndWait("api.call", map[string]any{"title": "Pin VM 300", "calls": pin}, ""); !e.OK {
+		t.Fatalf("pin: %+v", e)
+	}
+	var rules struct{ Data []map[string]any }
+	if code := root.do("GET", "/api/clusters/pve-lab/pve/cluster/ha/rules", nil, &rules); code != 200 || len(rules.Data) != 1 ||
+		rules.Data[0]["rule"] != "gpu-300" || rules.Data[0]["nodes"] != "pve1" || rules.Data[0]["strict"] != float64(1) || rules.Data[0]["type"] != "node-affinity" {
+		t.Fatalf("rules: %d %+v", code, rules.Data)
+	}
+	var res struct{ Data []map[string]any }
+	if code := root.do("GET", "/api/clusters/pve-lab/pve/cluster/ha/resources", nil, &res); code != 200 || len(res.Data) != 2 || res.Data[1]["sid"] != "vm:300" || res.Data[1]["state"] != "stopped" {
+		t.Fatalf("resources: %d %+v", code, res.Data)
+	}
+	// a running guest added as stopped would be stopped by HA
+	p = plan.Plan{}
+	root.do("POST", "/api/plans", map[string]any{"action": "api.call", "clusterId": "pve-lab", "params": map[string]any{"calls": []map[string]any{
+		{"method": "POST", "path": "/cluster/ha/resources", "body": map[string]string{"sid": "vm:121", "state": "stopped"}}}}}, &p)
+	if !p.Destructive {
+		t.Fatalf("stopping a running guest through HA not destructive: %+v", p)
+	}
+	// the chosen variant decides the parameters: node-affinity needs nodes
+	var e struct{ Error string }
+	if code := root.do("POST", "/api/plans", map[string]any{"action": "api.call", "clusterId": "pve-lab", "params": map[string]any{"calls": []map[string]any{
+		{"method": "POST", "path": "/cluster/ha/rules", "body": map[string]string{"rule": "x1", "type": "node-affinity", "resources": "vm:300"}}}}}, &e); code != 400 || !strings.Contains(e.Error, "nodes") {
+		t.Fatalf("rule without nodes accepted: %d %+v", code, e)
+	}
+}
+
+// A container sharing the host's NVIDIA GPU: devN entries pass schema
+// validation, and the fake cluster keeps the created config for reading back.
+func TestContainerGPUShare(t *testing.T) {
+	h := newHarness(t)
+	h.setup()
+	root := h.login("root@pam", "secret")
+	body := map[string]string{"vmid": "410", "hostname": "cuda01", "ostemplate": "local:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst",
+		"dev0": "/dev/nvidia0", "dev1": "/dev/nvidiactl", "dev2": "/dev/nvidia-uvm", "dev3": "/dev/nvidia-uvm-tools"}
+	if e := root.runAndWait("api.call", map[string]any{"calls": []map[string]any{{"method": "POST", "path": "/nodes/pve1/lxc", "body": body}}}, ""); !e.OK {
+		t.Fatalf("create: %+v", e)
+	}
+	var cfg struct{ Data map[string]any }
+	if code := root.do("GET", "/api/clusters/pve-lab/pve/nodes/pve1/lxc/410/config", nil, &cfg); code != 200 || cfg.Data["dev0"] != "/dev/nvidia0" || cfg.Data["dev3"] != "/dev/nvidia-uvm-tools" || cfg.Data["hostname"] != "cuda01" {
+		t.Fatalf("config: %d %+v", code, cfg.Data)
+	}
+}
+
+// The fake cluster keeps config edits: later reads see them, with a new digest.
+func TestFakeConfigEditsPersist(t *testing.T) {
+	h := newHarness(t)
+	h.setup()
+	root := h.login("root@pam", "secret")
+	if e := root.runAndWait("api.call", map[string]any{"calls": []map[string]any{
+		{"method": "PUT", "path": "/nodes/pve1/qemu/120/config", "body": map[string]string{"cores": "6", "delete": "onboot", "digest": "f00d120"}}}}, "confirm 120/config"); !e.OK {
+		t.Fatalf("edit: %+v", e)
+	}
+	var cfg struct{ Data map[string]any }
+	if code := root.do("GET", "/api/clusters/pve-lab/pve/nodes/pve1/qemu/120/config", nil, &cfg); code != 200 || cfg.Data["cores"] != "6" || cfg.Data["onboot"] != nil || cfg.Data["digest"] == "f00d120" || cfg.Data["name"] != "web01" {
+		t.Fatalf("config after edit: %d %+v", code, cfg.Data)
 	}
 }

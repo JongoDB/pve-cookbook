@@ -1,11 +1,23 @@
 /**
  * Small subsequence scorer: every query character must appear in order.
  * Rewards prefix and consecutive matches. Returns -1 when there is no match.
+ * Several words ("qemu config") each have to match, in any order.
  */
 export function score(query: string, text: string): number {
   const q = query.toLowerCase().trim();
   const t = text.toLowerCase();
   if (!q) return 0;
+  if (t === q) return 1000;
+  const words = q.split(/\s+/);
+  if (words.length > 1 && !t.includes(q)) {
+    let sum = 0;
+    for (const w of words) {
+      const s = score(w, t);
+      if (s < 0) return -1;
+      sum += s;
+    }
+    return sum / words.length;
+  }
   if (t === q) return 1000;
   if (t.startsWith(q)) return 500 - t.length;
   const idx = t.indexOf(q);

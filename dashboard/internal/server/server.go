@@ -1,10 +1,13 @@
 // Package server exposes galley's HTTP API (docs/api.md), live events, and the SPA.
 //
-// Security model: galley holds no authority of its own over clusters. Each
-// human logs in with their PVE identity; galley keeps that user's PVE ticket
-// (encrypted, renewed in the background) and every read shown to the user and
-// every change is checked or executed with it. The per-cluster service token
-// only feeds the shared cache, which is filtered per user before display.
+// Security model (docs/security.md): galley holds no authority of its own over
+// clusters. Each human logs in with their PVE identity; galley keeps that
+// user's PVE ticket (or a short-lived per-session API token) sealed under a
+// per-session secret that only the user's cookie carries, and every read shown
+// to the user and every change is checked or executed with it. The secret is
+// kept in memory only while the session is in use, so stored credentials of
+// idle sessions cannot be decrypted (or renewed) by anyone. The per-cluster
+// service token only feeds the shared cache, which is filtered per user.
 package server
 
 import (
@@ -31,14 +34,15 @@ import (
 )
 
 // Version is set at build time.
-var Version = "0.1.0-dev"
+var Version = "0.2.0-dev"
 
 const (
-	cookieName      = "galley_session"
-	sessionIdle     = 8 * time.Hour
-	sessionAbsolute = 24 * time.Hour
-	viewTTL         = 30 * time.Second
-	maxSSEPerSess   = 4
+	cookieName    = "galley_session"
+	viewTTL       = 30 * time.Second
+	maxSSEPerSess = 4
+	// Default session lifetimes (flags --session-idle, --session-max).
+	DefaultSessionIdle = 4 * time.Hour
+	DefaultSessionMax  = 12 * time.Hour
 )
 
 // Options configures a Server.
@@ -53,6 +57,11 @@ type Options struct {
 	// PublicURL is galley's external base URL (for OpenID redirects). When
 	// empty it is derived from the request's Host header.
 	PublicURL string
+	// SessionIdle ends a session after this long without requests (default 4h).
+	SessionIdle time.Duration
+	// SessionMax ends a session this long after login, however active (default
+	// 12h). Per-session API tokens (credentialMode "token") expire with it.
+	SessionMax time.Duration
 }
 
 // Server wires the API.
@@ -82,8 +91,10 @@ type Server struct {
 	sseCount   map[string]int
 	lastTouch  map[string]time.Time
 	oidc       map[string]oidcPending
+	consoles   map[string]consoleTicket
 	limiter    *limiter
 	auditSubs  map[chan store.AuditEntry]*session
+	keys       map[string]*heldKey // session hash -> session secret, while in use
 
 	// newClient is swappable in tests.
 	newClient func(eps []pve.Endpoint, a pve.Auth) *pve.Client
@@ -91,11 +102,18 @@ type Server struct {
 
 // New creates a server and starts its background maintenance.
 func New(st *store.Store, f *fleet.Poller, static fs.FS, log *slog.Logger, opt Options) *Server {
+	if opt.SessionIdle <= 0 {
+		opt.SessionIdle = DefaultSessionIdle
+	}
+	if opt.SessionMax <= 0 {
+		opt.SessionMax = DefaultSessionMax
+	}
+	opt.SessionIdle = min(opt.SessionIdle, opt.SessionMax)
 	ctx, cancel := context.WithCancel(context.Background())
-	s := &Server{store: st, fleet: f, plans: plan.NewManager(f), static: static, log: log, opt: opt,
+	s := &Server{keys: map[string]*heldKey{}, store: st, fleet: f, plans: plan.NewManager(f), static: static, log: log, opt: opt,
 		base: ctx, cancel: cancel,
 		clients: map[string]*pve.Client{}, views: map[string]*userView{}, renewing: map[string]*sync.Mutex{},
-		sseCount: map[string]int{}, lastTouch: map[string]time.Time{}, oidc: map[string]oidcPending{},
+		sseCount: map[string]int{}, lastTouch: map[string]time.Time{}, oidc: map[string]oidcPending{}, consoles: map[string]consoleTicket{},
 		limiter: newLimiter(), auditSubs: map[chan store.AuditEntry]*session{}, newClient: pve.New}
 	if n, err := st.InterruptRunning(); err != nil {
 		log.Error("could not mark interrupted changes", "err", err)
@@ -103,6 +121,7 @@ func New(st *store.Store, f *fleet.Poller, static fs.FS, log *slog.Logger, opt O
 		log.Warn("marked interrupted changes as failed", "count", n)
 	}
 	s.streams, s.stopStreams = context.WithCancel(ctx)
+	s.plans.Schema = s.clusterSchema
 	s.initSetupToken()
 	go s.maintain()
 	return s
@@ -184,6 +203,34 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/plans/{id}", s.authed(s.discardPlan))
 	mux.HandleFunc("POST /api/plans/{id}/run", s.authed(s.runPlan))
 	mux.HandleFunc("GET /api/audit", s.authed(s.audit))
+	mux.HandleFunc("GET /api/metrics", s.authed(s.metrics))
+	mux.HandleFunc("POST /api/metrics", s.authed(s.metricsBatch))
+	mux.HandleFunc("GET /api/clusters/{id}/pve/{path...}", s.authed(s.pveGet))
+	mux.HandleFunc("GET /api/clusters/{id}/schema", s.authed(s.schemaInfo))
+	mux.HandleFunc("POST /api/clusters/{id}/console", s.authed(s.openConsole))
+	mux.HandleFunc("GET /api/console/{token}", s.authed(s.consoleSocket))
+	mux.HandleFunc("GET /api/clusters/{id}/hosts", s.authed(s.listHosts))
+	mux.HandleFunc("POST /api/clusters/{id}/hosts/{node}/scan", s.authed(s.scanHost))
+	mux.HandleFunc("PUT /api/clusters/{id}/hosts/{node}", s.authed(s.pinHost))
+	mux.HandleFunc("DELETE /api/clusters/{id}/hosts/{node}", s.authed(s.unpinHost))
+	mux.HandleFunc("GET /api/whats-new", s.authed(s.whatsNew))
+	mux.HandleFunc("GET /api/feedback", s.authed(s.getFeedback))
+	mux.HandleFunc("PUT /api/settings/feedback", s.authed(s.putFeedback))
+	mux.HandleFunc("GET /api/agent-tokens", s.authed(s.listAgentTokens))
+	mux.HandleFunc("POST /api/agent-tokens", s.authed(s.createAgentToken))
+	mux.HandleFunc("DELETE /api/agent-tokens/{id}", s.authed(s.deleteAgentToken))
+	mux.HandleFunc("GET /api/docs", s.authed(s.docsIndex))
+	mux.HandleFunc("GET /api/docs/{slug}", s.authed(s.docsPage))
+	mux.HandleFunc("GET /api/plans", s.authed(s.listPlans))
+	mux.HandleFunc("POST /mcp", s.authed(s.mcp))
+	mux.HandleFunc("GET /mcp", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Allow", "POST")
+		apiError(w, 405, "method_not_allowed", "galley's MCP endpoint is stateless: POST JSON-RPC requests")
+	})
+	mux.HandleFunc("GET /api/assistant", s.authed(s.assistantStatus))
+	mux.HandleFunc("POST /api/assistant/chat", s.authed(s.assistantChat))
+	mux.HandleFunc("GET /api/settings/assistant", s.authed(s.getAssistantSettings))
+	mux.HandleFunc("PUT /api/settings/assistant", s.authed(s.putAssistantSettings))
 	mux.HandleFunc("GET /api/prefs/{key}", s.authed(s.getPref))
 	mux.HandleFunc("PUT /api/prefs/{key}", s.authed(s.putPref))
 	mux.HandleFunc("GET /api/events", s.authed(s.events))
@@ -295,6 +342,10 @@ func (s *Server) baseClient(cid string) (*pve.Client, *store.Cluster, error) {
 }
 
 func (s *Server) dropClient(cid string) {
+	mcache.forget(cid)
+	schemas.mu.Lock()
+	delete(schemas.m, cid)
+	schemas.mu.Unlock()
 	s.mu.Lock()
 	if cl := s.clients[cid]; cl != nil {
 		cl.CloseIdle()
@@ -308,15 +359,14 @@ func (s *Server) dropClient(cid string) {
 	s.mu.Unlock()
 }
 
-// maintain renews user tickets before they expire and purges dead sessions.
+// maintain renews the tickets of sessions in use before they expire and
+// purges dead sessions.
 func (s *Server) maintain() {
 	t := time.NewTicker(5 * time.Minute)
 	defer t.Stop()
 	for {
 		s.renewDue()
-		if creds, err := s.store.PurgeExpiredSessions(time.Now().Unix()); err == nil && len(creds) > 0 {
-			s.log.Info("expired sessions purged", "credentials", len(creds))
-		}
+		s.purgeExpired()
 		s.plansGC()
 		select {
 		case <-s.base.Done():
@@ -340,11 +390,17 @@ func (s *Server) plansGC() {
 			delete(s.oidc, k)
 		}
 	}
+	for k, c := range s.consoles {
+		if now.After(c.exp) {
+			delete(s.consoles, k)
+		}
+	}
 	for k, t := range s.lastTouch {
-		if now.Sub(t) > sessionIdle {
+		if now.Sub(t) > s.opt.SessionIdle {
 			delete(s.lastTouch, k)
 		}
 	}
+	s.gcKeysLocked(now)
 	s.limiter.gc(now)
 }
 

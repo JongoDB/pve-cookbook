@@ -20,6 +20,7 @@ import (
 
 	"github.com/JongoDB/pve-cookbook/dashboard/internal/fleet"
 	"github.com/JongoDB/pve-cookbook/dashboard/internal/pve"
+	"github.com/JongoDB/pve-cookbook/dashboard/internal/schema"
 )
 
 // Step is one API call.
@@ -41,8 +42,10 @@ type Plan struct {
 	Destructive bool   `json:"destructive"`
 	ConfirmText string `json:"confirmText,omitempty"`
 	Steps       []Step `json:"steps"`
-	CreatedAt   int64  `json:"createdAt"`
-	ExpiresAt   int64  `json:"expiresAt"`
+	// Source is "assistant" when the assistant drafted the plan.
+	Source    string `json:"source,omitempty"`
+	CreatedAt int64  `json:"createdAt"`
+	ExpiresAt int64  `json:"expiresAt"`
 
 	owner string
 	used  bool
@@ -57,6 +60,65 @@ type Result struct {
 	UPID       string `json:"upid,omitempty"`
 	ExitStatus string `json:"exitstatus,omitempty"`
 	Error      string `json:"error,omitempty"`
+	// Output of a host command (Method "SSH").
+	Output string `json:"output,omitempty"`
+}
+
+// HostRunner runs a shell command on a cluster node (see package hosts).
+type HostRunner func(ctx context.Context, node, command string) (output string, exit int, err error)
+
+// MethodSSH marks a step that runs Body["command"] on node Path over SSH.
+const MethodSSH = "SSH"
+
+// MethodGalley marks a step that changes galley's own configuration: Path is
+// the action (e.g. "galley.cluster.update") and Body its parameters.
+const MethodGalley = "GALLEY"
+
+// GalleyRunner applies a galley-level step with the requesting user's rights.
+type GalleyRunner func(ctx context.Context, action string, body map[string]string) (string, error)
+
+type draftKey struct{}
+
+type draftLabel struct{ source, label string }
+
+// WithDraft marks plans built with ctx as drafted by an AI (source, label):
+// they are labelled and require typed confirmation from the moment they exist.
+func WithDraft(ctx context.Context, source, label string) context.Context {
+	return context.WithValue(ctx, draftKey{}, draftLabel{source, label})
+}
+
+// IsDraft reports whether ctx builds AI drafts.
+func IsDraft(ctx context.Context) bool {
+	_, ok := ctx.Value(draftKey{}).(draftLabel)
+	return ok
+}
+
+func applyDraft(ctx context.Context, p *Plan) {
+	if d, ok := ctx.Value(draftKey{}).(draftLabel); ok {
+		MarkDraft(p, d.source, d.label)
+	}
+}
+
+// Register stores a plan built outside Build (galley-level actions) for user.
+func (m *Manager) Register(ctx context.Context, user string, p *Plan) error {
+	applyDraft(ctx, p)
+	p.ID, p.owner = newID(), user
+	p.CreatedAt = time.Now().Unix()
+	p.ExpiresAt = p.CreatedAt + int64(TTL.Seconds())
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.gc()
+	n := 0
+	for _, q := range m.plans {
+		if q.owner == user && !q.used {
+			n++
+		}
+	}
+	if n >= MaxPendingPerUser {
+		return ErrTooMany
+	}
+	m.plans[p.ID] = p
+	return nil
 }
 
 // Target identifies a guest.
@@ -98,6 +160,9 @@ type Visible func(vmid int) bool
 
 // Manager builds and stores pending plans.
 type Manager struct {
+	// Schema returns the cluster's API schema (for generic api.call plans).
+	Schema func(ctx context.Context, cluster string) (*schema.Schema, error)
+
 	fleet *fleet.Poller
 	mu    sync.Mutex
 	plans map[string]*Plan
@@ -119,7 +184,7 @@ func tool(t string) string {
 	return "qm"
 }
 
-func (m *Manager) resolve(cluster string, ts []Target, vis Visible) ([]Target, []fleet.Guest, error) {
+func (m *Manager) resolve(ctx context.Context, cluster string, ts []Target, vis Visible, reader *pve.Client) ([]Target, []fleet.Guest, error) {
 	if len(ts) == 0 || len(ts) > 100 {
 		return nil, nil, fmt.Errorf("%w: 1–100 targets required", ErrBadRequest)
 	}
@@ -127,7 +192,16 @@ func (m *Manager) resolve(cluster string, ts []Target, vis Visible) ([]Target, [
 	gs := make([]fleet.Guest, 0, len(ts))
 	for _, t := range ts {
 		g, ok := m.fleet.Guest(cluster, t.VMID)
-		if !ok || (vis != nil && !vis(t.VMID)) {
+		if ok && vis != nil && !vis(t.VMID) {
+			ok = false
+		}
+		if !ok {
+			// Not in galley's cache (or the user's cached view) yet: a guest
+			// created moments ago — PVE reports it up to ~10 s late — is
+			// looked up live, as the user, so PVE decides visibility.
+			g, ok = liveGuest(ctx, reader, cluster, t.VMID)
+		}
+		if !ok {
 			return nil, nil, fmt.Errorf("%w: guest %d not found in cluster", ErrBadRequest, t.VMID)
 		}
 		// Authoritative node/type come from the cache, not the client.
@@ -137,6 +211,45 @@ func (m *Manager) resolve(cluster string, ts []Target, vis Visible) ([]Target, [
 	sort.Slice(out, func(i, j int) bool { return out[i].VMID < out[j].VMID })
 	return out, gs, nil
 }
+
+// liveGuest reads one guest from PVE as the user (nil reader: not found).
+func liveGuest(ctx context.Context, reader *pve.Client, cluster string, vmid int) (fleet.Guest, bool) {
+	if reader == nil {
+		return fleet.Guest{}, false
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	var rs []struct {
+		VMID     int    `json:"vmid"`
+		Name     string `json:"name"`
+		Type     string `json:"type"`
+		Node     string `json:"node"`
+		Status   string `json:"status"`
+		Template int    `json:"template"`
+	}
+	if err := reader.Do(ctx, http.MethodGet, "/cluster/resources", url.Values{"type": {"vm"}}, &rs); err != nil {
+		return fleet.Guest{}, false
+	}
+	for _, r := range rs {
+		if r.VMID != vmid || (r.Type != "qemu" && r.Type != "lxc") {
+			continue
+		}
+		g := fleet.Guest{ClusterID: cluster, VMID: r.VMID, Name: r.Name, Type: r.Type, Node: r.Node, Status: r.Status, Template: r.Template == 1}
+		// the resource list's status can lag too; the guest's own status is current
+		var st struct {
+			Status string `json:"status"`
+		}
+		if err := reader.Do(ctx, http.MethodGet, "/nodes/"+r.Node+"/"+r.Type+"/"+strconv.Itoa(vmid)+"/status/current", nil, &st); err == nil && st.Status != "" {
+			g.Status = st.Status
+		}
+		return g, true
+	}
+	return fleet.Guest{}, false
+}
+
+// titleIDs lists VMIDs for people ("120, 121"); vmids keeps the compact
+// form used in typed confirmations ("destroy 120,121").
+func titleIDs(ts []Target) string { return strings.ReplaceAll(vmids(ts), ",", ", ") }
 
 func vmids(ts []Target) string {
 	s := make([]string, len(ts))
@@ -162,7 +275,7 @@ func (m *Manager) Build(ctx context.Context, user string, req Request, vis Visib
 		if err := json.Unmarshal(req.Params, &prm); err != nil {
 			return nil, fmt.Errorf("%w: %v", ErrBadRequest, err)
 		}
-		ts, _, err := m.resolve(req.ClusterID, prm.Targets, vis)
+		ts, _, err := m.resolve(ctx, req.ClusterID, prm.Targets, vis, reader)
 		if err != nil {
 			return nil, err
 		}
@@ -174,7 +287,7 @@ func (m *Manager) Build(ctx context.Context, user string, req Request, vis Visib
 				Body: map[string]string{}, CLI: fmt.Sprintf("%s %s %d", tool(t.Type), verb, t.VMID),
 			})
 		}
-		p.Title = fmt.Sprintf("%s %s", strings.ToUpper(verb[:1])+verb[1:], vmids(ts))
+		p.Title = fmt.Sprintf("%s %s", strings.ToUpper(verb[:1])+verb[1:], titleIDs(ts))
 		p.Summary = fmt.Sprintf("%d guest(s), one task each.", len(ts))
 		if verb == "stop" {
 			p.Destructive = true
@@ -192,7 +305,7 @@ func (m *Manager) Build(ctx context.Context, user string, req Request, vis Visib
 		if !nodeRegexp.MatchString(prm.Target) || !contains(m.fleet.OnlineNodes(req.ClusterID), prm.Target) {
 			return nil, fmt.Errorf("%w: target node %q is not an online node of this cluster", ErrBadRequest, prm.Target)
 		}
-		ts, gs, err := m.resolve(req.ClusterID, prm.Targets, vis)
+		ts, gs, err := m.resolve(ctx, req.ClusterID, prm.Targets, vis, reader)
 		if err != nil {
 			return nil, err
 		}
@@ -219,7 +332,7 @@ func (m *Manager) Build(ctx context.Context, user string, req Request, vis Visib
 				Method:      http.MethodPost, Path: fmt.Sprintf("/nodes/%s/%s/%d/migrate", t.Node, t.Type, t.VMID), Body: body, CLI: cli,
 			})
 		}
-		p.Title = fmt.Sprintf("Migrate %s to %s", vmids(ts), prm.Target)
+		p.Title = fmt.Sprintf("Migrate %s to %s", titleIDs(ts), prm.Target)
 		p.Summary = "Running VMs migrate live; running containers restart on the target."
 	case "guest.snapshot":
 		var prm struct {
@@ -233,7 +346,7 @@ func (m *Manager) Build(ctx context.Context, user string, req Request, vis Visib
 		if !snapNameRegexp.MatchString(prm.Name) {
 			return nil, fmt.Errorf("%w: snapshot name must start with a letter, 2–40 chars of [A-Za-z0-9_-]", ErrBadRequest)
 		}
-		ts, _, err := m.resolve(req.ClusterID, prm.Targets, vis)
+		ts, _, err := m.resolve(ctx, req.ClusterID, prm.Targets, vis, reader)
 		if err != nil {
 			return nil, err
 		}
@@ -247,14 +360,14 @@ func (m *Manager) Build(ctx context.Context, user string, req Request, vis Visib
 			p.Steps = append(p.Steps, Step{Description: fmt.Sprintf("Snapshot %d as %q", t.VMID, prm.Name), Method: http.MethodPost,
 				Path: fmt.Sprintf("/nodes/%s/%s/%d/snapshot", t.Node, t.Type, t.VMID), Body: body, CLI: cli})
 		}
-		p.Title = fmt.Sprintf("Snapshot %s as %s", vmids(ts), prm.Name)
+		p.Title = fmt.Sprintf("Snapshot %s as %s", titleIDs(ts), prm.Name)
 		p.Summary = "Snapshots need snapshot-capable storage (Ceph RBD, ZFS, LVM-thin, qcow2)."
 	case "guest.destroy":
 		var prm struct{ Targets []Target }
 		if err := json.Unmarshal(req.Params, &prm); err != nil {
 			return nil, fmt.Errorf("%w: %v", ErrBadRequest, err)
 		}
-		ts, gs, err := m.resolve(req.ClusterID, prm.Targets, vis)
+		ts, gs, err := m.resolve(ctx, req.ClusterID, prm.Targets, vis, reader)
 		if err != nil {
 			return nil, err
 		}
@@ -269,7 +382,7 @@ func (m *Manager) Build(ctx context.Context, user string, req Request, vis Visib
 		}
 		p.Destructive = true
 		p.ConfirmText = "destroy " + vmids(ts)
-		p.Title = "Destroy " + vmids(ts)
+		p.Title = "Destroy " + titleIDs(ts)
 		p.Summary = "Permanently deletes the guest(s) and all their disks. Backups are not touched."
 	case "backup.protect":
 		var prm struct {
@@ -331,9 +444,46 @@ func (m *Manager) Build(ctx context.Context, user string, req Request, vis Visib
 			Path: "/cluster/backup/" + url.PathEscape(prm.Job), Body: body, CLI: cli})
 		p.Title = fmt.Sprintf("Protect %s with %s", joinIDs(prm.VMIDs), prm.Job)
 		p.Summary = "Takes effect from the job's next scheduled run."
+	case "api.call":
+		if err := m.buildAPICall(ctx, p, req); err != nil {
+			return nil, err
+		}
+	case "host.exec":
+		var prm struct {
+			Node    string `json:"node"`
+			Command string `json:"command"`
+			Reason  string `json:"reason"`
+		}
+		if err := json.Unmarshal(req.Params, &prm); err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrBadRequest, err)
+		}
+		prm.Command = strings.TrimSpace(prm.Command)
+		if !nodeRegexp.MatchString(prm.Node) || !contains(m.fleet.OnlineNodes(req.ClusterID), prm.Node) {
+			return nil, fmt.Errorf("%w: %q is not an online node of this cluster", ErrBadRequest, prm.Node)
+		}
+		if prm.Command == "" || len(prm.Command) > 8000 || strings.ContainsRune(prm.Command, 0) {
+			return nil, fmt.Errorf("%w: command required (max 8000 characters)", ErrBadRequest)
+		}
+		first, _, _ := strings.Cut(prm.Command, "\n")
+		if len(first) > 60 {
+			first = first[:60] + "…"
+		}
+		p.Steps = []Step{{Description: "Run as root on " + prm.Node, Method: MethodSSH, Path: prm.Node,
+			Body: map[string]string{"command": prm.Command}, CLI: "ssh root@" + prm.Node + " " + schema.Quote(prm.Command)}}
+		p.Title = "Run on " + prm.Node + ": " + first
+		if r := strings.TrimSpace(prm.Reason); r != "" && len(r) <= 500 {
+			if !strings.ContainsAny(r[len(r)-1:], ".!?") {
+				r += "."
+			}
+			p.Summary = r
+		}
+		p.Summary = strings.TrimSpace(p.Summary + " Runs as root outside the PVE API; PVE permissions do not limit it.")
+		p.Destructive = true
+		p.ConfirmText = "run on " + prm.Node
 	default:
 		return nil, fmt.Errorf("%w: unknown action %q", ErrBadRequest, req.Action)
 	}
+	applyDraft(ctx, p)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.gc()
@@ -418,7 +568,7 @@ var TaskPoll = time.Second
 // Execute runs the steps in order with the user's client, waiting for each
 // step's PVE task to finish and stopping at the first failure. progress is
 // called (if non-nil) whenever a result changes, with a copy of all results.
-func Execute(ctx context.Context, cl *pve.Client, p *Plan, progress func([]Result)) ([]Result, bool) {
+func Execute(ctx context.Context, cl *pve.Client, p *Plan, progress func([]Result), host HostRunner, galley GalleyRunner) ([]Result, bool) {
 	res := make([]Result, 0, len(p.Steps))
 	emit := func() {
 		if progress != nil {
@@ -426,6 +576,47 @@ func Execute(ctx context.Context, cl *pve.Client, p *Plan, progress func([]Resul
 		}
 	}
 	for i, s := range p.Steps {
+		if s.Method == MethodGalley {
+			r := Result{Step: i, Status: "ok", OK: true}
+			if galley == nil {
+				r.Status, r.OK, r.Error = "error", false, "galley actions are not available"
+			} else if msg, err := galley(ctx, s.Path, s.Body); err != nil {
+				r.Status, r.OK, r.Error = "error", false, err.Error()
+			} else {
+				r.Output = msg
+			}
+			res = append(res, r)
+			emit()
+			if !r.OK {
+				return res, false
+			}
+			continue
+		}
+		if s.Method == MethodSSH {
+			r := Result{Step: i, Status: "running"}
+			res = append(res, r)
+			emit()
+			if host == nil {
+				r.Status, r.Error = "error", "host commands are not available"
+			} else {
+				out, code, err := host(ctx, s.Path, s.Body["command"])
+				r.Output, r.ExitStatus = out, fmt.Sprintf("exit %d", code)
+				switch {
+				case err != nil:
+					r.Status, r.Error = "error", err.Error()
+				case code != 0:
+					r.Status, r.Error = "error", fmt.Sprintf("command exited with status %d", code)
+				default:
+					r.Status, r.OK, r.ExitStatus = "ok", true, "OK"
+				}
+			}
+			res[len(res)-1] = r
+			emit()
+			if !r.OK {
+				return res, false
+			}
+			continue
+		}
 		form := url.Values{}
 		for k, v := range s.Body {
 			form.Set(k, v)
@@ -537,3 +728,184 @@ func removeIDs(a, rm []int) []int {
 }
 
 func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
+
+// Call is one raw PVE API call in an api.call plan.
+type Call struct {
+	Method string            `json:"method"`
+	Path   string            `json:"path"`
+	Body   map[string]string `json:"body"`
+}
+
+var (
+	// Canonical paths only: no trailing slash, no percent-encoding, no empty segments.
+	apiPathRe = regexp.MustCompile(`^(/[A-Za-z0-9_.:@!+=,-]+)+$`)
+	// Matched schema templates whose calls disrupt service or destroy data.
+	destructiveTemplates = regexp.MustCompile(`/status/(stop|reset|suspend)$|/rollback$|/stopall$|/wipedisk$|/initgpt$|/disks/(lvm|lvmthin|zfs|directory)(/\{name\})?$|/ceph/osd(/\{osdid\})?$|/access/password$|/move_disk$|/move_volume$|/remote_migrate$`)
+	destructiveKeys      = map[string]bool{"delete": true, "purge": true, "destroy-unreferenced-disks": true, "force": true, "cleanup-disks": true, "skiplock": true}
+)
+
+// isDestructive decides from the matched template, method and body, not the raw path.
+func isDestructive(method, template string, body map[string]string) bool {
+	if method == http.MethodDelete || destructiveTemplates.MatchString(template) {
+		return true
+	}
+	for k, v := range body {
+		if destructiveKeys[k] && v != "" && v != "0" {
+			return true
+		}
+	}
+	switch {
+	case template == "/nodes/{node}/status" && (body["command"] == "reboot" || body["command"] == "shutdown"):
+		return true
+	case template == "/access/acl" && body["delete"] != "" && body["delete"] != "0":
+		return true
+	case strings.HasSuffix(template, "/firewall/options") && body["enable"] != "":
+		return true
+	case strings.HasPrefix(template, "/cluster/ha/resources") && (body["state"] == "stopped" || body["state"] == "disabled" || body["state"] == "ignored"):
+		return true
+	}
+	return false
+}
+
+// haAddKeepsStopped reports whether a call adds a new HA resource as
+// "stopped" (or disabled/ignored) for a guest that is not running: nothing
+// is stopped, e.g. a VM created in the same change and pinned to its GPU
+// nodes. Adding a running guest that way stops it, so that stays destructive.
+func (m *Manager) haAddKeepsStopped(cluster, method, template string, body map[string]string) bool {
+	if method != http.MethodPost || template != "/cluster/ha/resources" || m.fleet == nil {
+		return false
+	}
+	sid := body["sid"]
+	id, err := strconv.Atoi(sid[strings.LastIndexByte(sid, ':')+1:])
+	if err != nil {
+		return false
+	}
+	g, ok := m.fleet.Guest(cluster, id)
+	return !ok || (g.Status != "running" && g.Status != "paused")
+}
+
+// buildAPICall turns arbitrary API calls into a reviewable plan. Every call is
+// validated against the cluster's own API schema; PVE checks permissions when
+// it runs as the user.
+func (m *Manager) buildAPICall(ctx context.Context, p *Plan, req Request) error {
+	var prm struct {
+		Calls   []Call `json:"calls"`
+		Title   string `json:"title"`
+		Summary string `json:"summary"`
+	}
+	if err := json.Unmarshal(req.Params, &prm); err != nil {
+		return fmt.Errorf("%w: %v", ErrBadRequest, err)
+	}
+	if len(prm.Calls) == 0 || len(prm.Calls) > 20 {
+		return fmt.Errorf("%w: 1–20 calls required", ErrBadRequest)
+	}
+	if m.Schema == nil {
+		return fmt.Errorf("%w: API schema unavailable", ErrBadRequest)
+	}
+	sc, err := m.Schema(ctx, req.ClusterID)
+	if err != nil {
+		return fmt.Errorf("%w: could not load the cluster's API schema: %v", ErrBadRequest, err)
+	}
+	deletes := 0
+	for i, c := range prm.Calls {
+		c.Method = strings.ToUpper(c.Method)
+		if c.Method != http.MethodPost && c.Method != http.MethodPut && c.Method != http.MethodDelete {
+			return fmt.Errorf("%w: call %d: method must be POST, PUT or DELETE (reads need no change)", ErrBadRequest, i+1)
+		}
+		if !apiPathRe.MatchString(c.Path) || strings.Contains(c.Path, "..") {
+			return fmt.Errorf("%w: call %d: invalid path (no trailing slash or percent-encoding)", ErrBadRequest, i+1)
+		}
+		if c.Body == nil {
+			c.Body = map[string]string{}
+		}
+		meth, err := sc.Validate(c.Method, c.Path, c.Body)
+		if err != nil {
+			return fmt.Errorf("%w: call %d (%s %s): %v", ErrBadRequest, i+1, c.Method, c.Path, err)
+		}
+		node, _, _ := sc.Match(c.Path)
+		desc := plainDescription(meth.Description)
+		if desc == "" {
+			desc = c.Method + " " + c.Path
+		}
+		if isDestructive(c.Method, node.Path, c.Body) && !m.haAddKeepsStopped(req.ClusterID, c.Method, node.Path, c.Body) {
+			p.Destructive = true
+			deletes++
+		}
+		p.Steps = append(p.Steps, Step{Description: desc + " (" + c.Path + ")", Method: c.Method, Path: c.Path, Body: c.Body,
+			CLI: schema.CLI(c.Method, c.Path, c.Body)})
+	}
+	p.Title = strings.TrimSpace(prm.Title)
+	if p.Title == "" || len(p.Title) > 120 {
+		p.Title = p.Steps[0].Description
+		if len(p.Steps) > 1 {
+			p.Title = fmt.Sprintf("%d API changes", len(p.Steps))
+		}
+	}
+	if len(prm.Summary) <= 500 {
+		p.Summary = prm.Summary
+	}
+	if p.Destructive {
+		if len(prm.Calls) == 1 {
+			segs := strings.Split(strings.Trim(prm.Calls[0].Path, "/"), "/")
+			p.ConfirmText = "delete " + strings.Join(segs[max(0, len(segs)-2):], "/")
+			if prm.Calls[0].Method != http.MethodDelete {
+				p.ConfirmText = "confirm " + strings.Join(segs[max(0, len(segs)-2):], "/")
+			}
+		} else {
+			p.ConfirmText = fmt.Sprintf("apply %d changes", len(prm.Calls))
+		}
+	}
+	return nil
+}
+
+// MarkAssistantDraft labels a plan drafted by the assistant and always
+// requires typed confirmation, so data the model read (VM notes, names) can
+// never turn into a one-click change.
+func MarkAssistantDraft(p *Plan) { MarkDraft(p, "assistant", "Assistant draft") }
+
+// MarkDraft labels a plan drafted by an AI (the assistant, or an external
+// agent via MCP) and always requires typed confirmation to apply it.
+func MarkDraft(p *Plan, source, label string) {
+	p.Source = source
+	if !strings.HasPrefix(p.Title, label+": ") {
+		p.Title = label + ": " + p.Title
+	}
+	if p.ConfirmText == "" {
+		p.ConfirmText = fmt.Sprintf("apply %d step", len(p.Steps))
+		if len(p.Steps) != 1 {
+			p.ConfirmText += "s"
+		}
+	}
+}
+
+// List returns user's pending (not yet run, unexpired) plans, newest first.
+func (m *Manager) List(user string) []*Plan {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.gc()
+	var out []*Plan
+	for _, p := range m.plans {
+		if p.owner == user && !p.used {
+			out = append(out, p)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt > out[j].CreatedAt })
+	return out
+}
+
+// apiNotes trims PVE's notes for API developers from method descriptions
+// ("Set virtual machine options (synchronous API) - You should consider using
+// the POST method instead…"), keeping the plain first sentence for people.
+var apiNotes = regexp.MustCompile(`(?i)\s*\((a)?synchronous API\)`)
+
+func plainDescription(d string) string {
+	d, _, _ = strings.Cut(strings.TrimSpace(d), "\n")
+	d = apiNotes.ReplaceAllString(d, "")
+	if i := strings.Index(d, " - "); i > 0 {
+		d = d[:i]
+	}
+	if i := strings.Index(d, ". "); i > 0 {
+		d = d[:i]
+	}
+	return strings.TrimSuffix(strings.TrimSpace(d), ".")
+}

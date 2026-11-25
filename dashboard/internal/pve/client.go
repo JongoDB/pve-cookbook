@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptrace"
+	"net/http/httputil"
 	"net/url"
 	"strings"
 	"sync"
@@ -492,5 +493,64 @@ type DynamicAuth struct{ Get func() Auth }
 func (d DynamicAuth) apply(r *http.Request) {
 	if a := d.Get(); a != nil {
 		a.apply(r)
+	}
+}
+
+// GetStatic fetches a non-API file served by pveproxy (e.g. the API schema at
+// /pve-docs/api-viewer/apidoc.js), with the same TLS pinning and failover.
+func (c *Client) GetStatic(ctx context.Context, path string, max int64) ([]byte, error) {
+	var lastErr error
+	for _, ep := range c.endpoints {
+		u := "https://" + HostPort(ep.Host) + path
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := c.http.Do(req)
+		if err != nil {
+			lastErr = err
+			if ctx.Err() != nil {
+				return nil, err
+			}
+			continue
+		}
+		b, err := io.ReadAll(io.LimitReader(resp.Body, max))
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("pve: GET %s: %s", path, resp.Status)
+		}
+		return b, err
+	}
+	return nil, lastErr
+}
+
+// WebsocketProxy returns a handler that forwards a browser websocket (console)
+// to path on the cluster's active endpoint, authenticated with this client's
+// credentials (the user's ticket or token), over the same pinned TLS. Byte
+// streams are passed through unchanged.
+func (c *Client) WebsocketProxy(path string, q url.Values) http.Handler {
+	c.mu.Lock()
+	ep := c.endpoints[*c.active]
+	c.mu.Unlock()
+	target := "https://" + HostPort(ep.Host) + "/api2/json" + path
+	return &httputil.ReverseProxy{
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			u, _ := url.Parse(target)
+			u.RawQuery = q.Encode()
+			pr.Out.URL = u
+			pr.Out.Host = u.Host
+			pr.Out.Header.Del("Cookie")
+			pr.Out.Header.Del("Authorization")
+			pr.Out.Header.Del("Origin")
+			pr.Out.Header.Del("X-Galley-CSRF")
+			if c.auth != nil {
+				c.auth.apply(pr.Out) // GET: ticket cookie or token header, no CSRF needed
+			}
+		},
+		Transport:     c.http.Transport,
+		FlushInterval: -1,
+		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+			http.Error(w, "console connection to the node failed", http.StatusBadGateway)
+		},
 	}
 }

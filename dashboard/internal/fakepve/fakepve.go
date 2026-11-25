@@ -3,11 +3,16 @@
 package fakepve
 
 import (
+	"crypto/sha1"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -20,7 +25,19 @@ type Call struct {
 	Method, Path string
 	Form         map[string]string
 	User         string
+	Token        string // user API token id the call was made with ("" = ticket)
 }
+
+// UserToken is a user API token created through /access/users/{user}/token.
+type UserToken struct {
+	ID, User, Secret, Comment string
+	Expire                    int64
+	Privsep                   bool
+}
+
+// termTicket is a termproxy ticket: a node shell, or a container's console
+// when guest (the container's hostname) is set.
+type termTicket struct{ user, node, guest string }
 
 // Server is a fake cluster API endpoint.
 type Server struct {
@@ -46,7 +63,9 @@ type Server struct {
 	// TaskExit forces a task's exit status, keyed by mutation path.
 	TaskExit map[string]string
 	tasks    map[string]*fakeTask
-	Down     bool // respond 595 to everything (simulates pveproxy failure)
+	// NodeIP is the "ip" of each node in /cluster/status (host:port allowed in tests).
+	NodeIP map[string]string
+	Down   bool // respond 595 to everything (simulates pveproxy failure)
 	// Fail makes authenticated requests to these API paths (without the
 	// /api2/json prefix, e.g. "/cluster/status") answer 500. Mutate it with
 	// SetFail while the server is in use.
@@ -60,6 +79,27 @@ type Server struct {
 	StorageConfig []map[string]any
 	// HAServices are the "service" entries of /cluster/ha/status/current.
 	HAServices []map[string]any
+	// HARules are the PVE 9 HA rules (GET/POST /cluster/ha/rules): rule,
+	// type, resources, nodes, strict, ...
+	HARules []map[string]any
+	// created holds the create parameters of guests made through POST
+	// /nodes/{node}/{qemu,lxc} (by vmid), so their config can be read back.
+	// They do not join Guests (other tests count those).
+	created map[string]map[string]string
+	// edits are config changes made through PUT/POST .../config, by vmid
+	// (nil value = key deleted); configSeq makes the digest change.
+	edits     map[string]map[string]any
+	configSeq int
+	// TokenSelfRevoke lets a user token delete itself (otherwise only the
+	// user's ticket can delete it).
+	TokenSelfRevoke bool
+	// HostRun answers commands run through a node terminal (see TermShell).
+	HostRun func(cmd string) (string, int)
+
+	userTokens  map[string]*UserToken // full id -> token
+	termTickets map[string]termTicket
+	hostCmds    []string
+	tokenSeq    int
 }
 
 // New starts a fake cluster with three nodes and a few guests.
@@ -98,6 +138,9 @@ func New() *Server {
 	f.TokenPerms = map[string]int{"Sys.Audit": 1}
 	f.TaskExit = map[string]string{}
 	f.tasks = map[string]*fakeTask{}
+	f.userTokens = map[string]*UserToken{}
+	f.termTickets = map[string]termTicket{}
+	f.NodeIP = map[string]string{"pve1": "192.0.2.11", "pve2": "192.0.2.12", "pve3": "192.0.2.13"}
 	f.Server = httptest.NewUnstartedServer(http.HandlerFunc(f.serve))
 	f.Server.TLS = &tls.Config{MinVersion: tls.VersionTLS12}
 	f.StartTLS()
@@ -131,6 +174,25 @@ func (f *Server) guestLocked(vmid string) map[string]any {
 		}
 	}
 	return nil
+}
+
+// AddGuest adds a guest, as if it had just been created (tests).
+func (f *Server) AddGuest(g map[string]any) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Guests = append(f.Guests, g)
+}
+
+// removeGuestLocked deletes a guest, as a finished destroy task does.
+func (f *Server) removeGuestLocked(vmid string) {
+	out := f.Guests[:0]
+	for _, g := range f.Guests {
+		if fmt.Sprint(g["vmid"]) != vmid {
+			out = append(out, g)
+		}
+	}
+	f.Guests = out
+	delete(f.edits, vmid)
 }
 
 // Endpoint returns this server as a pinned galley endpoint.
@@ -188,9 +250,39 @@ func write(w http.ResponseWriter, code int, data any) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"data": data})
 }
 
+// UserTokens returns the user API tokens that currently exist.
+func (f *Server) UserTokens() []UserToken {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := []UserToken{}
+	for _, t := range f.userTokens {
+		out = append(out, *t)
+	}
+	return out
+}
+
+// tokenOf returns the user token a request authenticates with (nil if none).
+func (f *Server) tokenOf(r *http.Request) *UserToken {
+	a, ok := strings.CutPrefix(r.Header.Get("Authorization"), "PVEAPIToken=")
+	if !ok {
+		return nil
+	}
+	id, sec, _ := strings.Cut(a, "=")
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	t := f.userTokens[id]
+	if t == nil || t.Secret != sec || (t.Expire > 0 && time.Now().Unix() >= t.Expire) {
+		return nil
+	}
+	return t
+}
+
 func (f *Server) who(r *http.Request) string {
 	if a := r.Header.Get("Authorization"); a == "PVEAPIToken="+f.TokenID+"="+f.Secret {
 		return f.TokenID
+	}
+	if t := f.tokenOf(r); t != nil {
+		return t.User // privsep=0: the token acts with its user's permissions
 	}
 	if c, err := r.Cookie("PVEAuthCookie"); err == nil {
 		f.mu.Lock()
@@ -208,6 +300,11 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 	f.mu.Unlock()
 	if down {
 		w.WriteHeader(595)
+		return
+	}
+	if r.URL.Path == "/pve-docs/api-viewer/apidoc.js" {
+		w.Header().Set("Content-Type", "application/javascript")
+		_, _ = w.Write([]byte(APIDoc))
 		return
 	}
 	p := strings.TrimPrefix(r.URL.Path, "/api2/json")
@@ -263,6 +360,56 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"data":null,"message":"injected failure"}`))
 		return
 	}
+	if strings.HasSuffix(p, "/vncwebsocket") && r.Method == http.MethodGet {
+		if seg := strings.Split(strings.Trim(p, "/"), "/"); (len(seg) == 3 || len(seg) == 5) && strings.HasPrefix(r.URL.Query().Get("vncticket"), "PVETERM:") {
+			f.termSocket(w, r, seg[1], user)
+			return
+		}
+		f.consoleEcho(w, r)
+		return
+	}
+	if r.Method == http.MethodPost && (strings.HasSuffix(p, "/vncproxy") || strings.HasSuffix(p, "/termproxy")) && user != f.TokenID {
+		if _, restricted := f.Restricted[user]; restricted {
+			write(w, 403, nil)
+			return
+		}
+		seg := strings.Split(strings.Trim(p, "/"), "/")
+		if len(seg) == 3 && seg[2] == "termproxy" { // node shell
+			if !f.Admins[user] {
+				write(w, 403, nil) // Sys.Console on /nodes/{node}
+				return
+			}
+			f.mu.Lock()
+			f.tokenSeq++
+			t := fmt.Sprintf("PVETERM:%d:%s", f.tokenSeq, user)
+			f.termTickets[t] = termTicket{user: user, node: seg[1]}
+			f.mu.Unlock()
+			write(w, 200, map[string]any{"port": 5900 + f.tokenSeq, "ticket": t, "user": user, "upid": "UPID:" + seg[1] + ":termproxy"})
+			return
+		}
+		if len(seg) == 5 && seg[2] == "lxc" && seg[4] == "termproxy" { // container console
+			f.mu.Lock()
+			g := f.guestLocked(seg[3])
+			if g == nil || g["node"] != seg[1] {
+				f.mu.Unlock()
+				write(w, 500, nil)
+				return
+			}
+			f.tokenSeq++
+			t := fmt.Sprintf("PVETERM:%d:%s", f.tokenSeq, user)
+			f.termTickets[t] = termTicket{user: user, node: seg[1], guest: fmt.Sprint(g["name"])}
+			port := 5900 + f.tokenSeq
+			f.mu.Unlock()
+			write(w, 200, map[string]any{"port": port, "ticket": t, "user": user, "upid": "UPID:" + seg[1] + ":vncproxy"})
+			return
+		}
+		write(w, 200, map[string]any{"port": 5900, "ticket": "PVEVNC:fake:" + user, "user": user})
+		return
+	}
+	if strings.HasPrefix(p, "/access/users/") && strings.Contains(p, "/token/") && (r.Method == http.MethodPost || r.Method == http.MethodDelete) {
+		f.userToken(w, r, p, user)
+		return
+	}
 	if r.Method != http.MethodGet {
 		if user == f.TokenID {
 			write(w, 403, nil) // poller token is read-only
@@ -272,9 +419,17 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 		for k := range r.Form {
 			form[k] = r.Form.Get(k)
 		}
+		tokID := ""
+		if t := f.tokenOf(r); t != nil {
+			tokID = t.ID
+		}
 		f.mu.Lock()
-		f.Calls = append(f.Calls, Call{Method: r.Method, Path: p, Form: form, User: user})
+		f.Calls = append(f.Calls, Call{Method: r.Method, Path: p, Form: form, User: user, Token: tokID})
 		f.mu.Unlock()
+		if r.Method == http.MethodPost && (p == "/cluster/ha/resources" || p == "/cluster/ha/rules") {
+			f.haCreate(w, p, form, user)
+			return
+		}
 		if p == "/cluster/backup/nightly-all" && r.Method == http.MethodPut {
 			write(w, 200, nil)
 			return
@@ -292,6 +447,10 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 				_, _ = w.Write([]byte(`{"data":null,"message":"VM ` + parts[3] + ` is running - destroy failed"}`))
 				return
 			}
+			if g != nil && len(parts) == 4 && r.Method == http.MethodDelete {
+				vmid := parts[3]
+				effect = func() { f.removeGuestLocked(vmid) } // runs under f.mu (settle)
+			}
 			if g != nil && len(parts) == 6 && parts[4] == "status" {
 				st := map[string]string{"start": "running", "stop": "stopped", "shutdown": "stopped"}[parts[5]]
 				if st != "" {
@@ -299,6 +458,22 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			f.mu.Unlock()
+		}
+		if len(parts) == 5 && parts[0] == "nodes" && (parts[2] == "qemu" || parts[2] == "lxc") && parts[4] == "config" && (r.Method == http.MethodPut || r.Method == http.MethodPost) {
+			f.editConfig(parts[3], form) // the synchronous config API: in effect at once
+		}
+		if len(parts) == 3 && parts[0] == "nodes" && r.Method == http.MethodPost && (parts[2] == "qemu" || parts[2] == "lxc") && form["vmid"] != "" {
+			cfg := map[string]string{"node": parts[1], "type": parts[2]}
+			for k, v := range form {
+				cfg[k] = v
+			}
+			effect = func() { // runs under f.mu (settle)
+				if f.created == nil {
+					f.created = map[string]map[string]string{}
+				}
+				f.created[cfg["vmid"]] = cfg
+				delete(f.edits, cfg["vmid"])
+			}
 		}
 		f.mu.Lock()
 		upid := fmt.Sprintf("UPID:%s:0000ABCD:%08X:%08X:fake:%s:%s:", nodeOf(p), len(f.Calls), time.Now().Unix(), strings.ReplaceAll(p, "/", "_"), user)
@@ -329,12 +504,15 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 			write(w, 200, map[string]any{"status": "stopped", "exitstatus": t.exit, "upid": upid})
 		}
 		return
+	case strings.HasPrefix(p, "/nodes/") && strings.HasSuffix(p, "/rrddata"):
+		write(w, 200, fakeRRD(p, r.URL.Query().Get("timeframe")))
+		return
 	case p == "/version":
 		write(w, 200, map[string]any{"version": "9.2.32", "release": "9.2"})
 	case p == "/cluster/status":
 		write(w, 200, []map[string]any{
 			{"type": "cluster", "name": "pve-lab", "quorate": 1, "nodes": 3},
-			{"type": "node", "name": "pve1", "online": 1}, {"type": "node", "name": "pve2", "online": 1}, {"type": "node", "name": "pve3", "online": 1},
+			{"type": "node", "name": "pve1", "online": 1, "ip": f.NodeIP["pve1"]}, {"type": "node", "name": "pve2", "online": 1, "ip": f.NodeIP["pve2"]}, {"type": "node", "name": "pve3", "online": 1, "ip": f.NodeIP["pve3"]},
 		})
 	case p == "/cluster/resources":
 		res := []map[string]any{}
@@ -359,6 +537,9 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 			for k, v := range g {
 				x[k] = v
 			}
+			if st := f.haStateOf(g); st != "" {
+				x["hastate"] = st
+			}
 			res = append(res, x)
 		}
 		write(w, 200, res)
@@ -382,6 +563,15 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 		out = append(out, f.HAServices...)
 		f.mu.Unlock()
 		write(w, 200, out)
+	case p == "/cluster/ha/resources" || p == "/cluster/ha/rules":
+		f.haList(w, r, p, user)
+	case p == "/cluster/nextid":
+		write(w, 200, "301")
+	case p == "/cluster/mapping/pci":
+		write(w, 200, []map[string]any{{"id": "gpu-a2-0", "description": "NVIDIA A2 #0", "map": []string{"node=pve1,path=0000:16:00.0,id=10de:25b6,iommugroup=10"}},
+			{"id": "gpu-a2-1", "description": "NVIDIA A2 #1", "map": []string{"node=pve1,path=0000:91:00.0,id=10de:25b6,iommugroup=1"}}})
+	case p == "/cluster/sdn/vnets":
+		write(w, 200, []map[string]any{{"vnet": "servers", "zone": "evpn1", "tag": 10000}, {"vnet": "lab", "zone": "evpn1", "tag": 10010}})
 	case p == "/cluster/backup":
 		write(w, 200, []map[string]any{f.BackupJob})
 	case p == "/cluster/backup/nightly-all":
@@ -413,6 +603,8 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 		write(w, 200, map[string]any{"enable": 1, "policy_in": "DROP"})
 	case p == "/cluster/tasks":
 		write(w, 200, []map[string]any{{"upid": "UPID:pve1:1:2:3:vzdump::root@pam:", "node": "pve1", "type": "vzdump", "id": "120", "user": "root@pam", "starttime": 1700000000, "endtime": 1700000100, "status": "OK"}})
+	case strings.HasPrefix(p, "/nodes/") && f.demoGet(w, p, user):
+		// handled by demoGet (detail-page reads)
 	case strings.HasSuffix(p, "/status") && strings.HasPrefix(p, "/nodes/"):
 		write(w, 200, map[string]any{"kversion": "Linux 7.0.14-30-pve #1 SMP PREEMPT_DYNAMIC", "pveversion": "pve-manager/9.2.32"})
 	case strings.HasSuffix(p, "/apt/update"):
@@ -434,13 +626,66 @@ func (f *Server) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		f.mu.Unlock()
 		if f.Admins[user] {
-			perms["Sys.Modify"] = 1
+			perms["Sys.Modify"], perms["Sys.Console"], perms["Permissions.Modify"] = 1, 1, 1
 		}
 		write(w, 200, map[string]any{"/": perms})
 	default:
 		w.WriteHeader(404)
 		_, _ = w.Write([]byte(`{"data":null,"message":"no such path"}`))
 	}
+}
+
+// userToken creates (POST) or deletes (DELETE) /access/users/{user}/token/{name}.
+// A user manages their own tokens with a ticket; tokens cannot create tokens.
+func (f *Server) userToken(w http.ResponseWriter, r *http.Request, p, caller string) {
+	rest := strings.TrimPrefix(p, "/access/users/")
+	user, name, _ := strings.Cut(rest, "/token/")
+	tok := f.tokenOf(r)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	full := user + "!" + name
+	f.Calls = append(f.Calls, Call{Method: r.Method, Path: p, User: caller, Token: tok.idOrEmpty()})
+	if caller != user {
+		write(w, 403, nil)
+		return
+	}
+	switch r.Method {
+	case http.MethodPost:
+		if tok != nil {
+			write(w, 403, nil)
+			return
+		}
+		if _, exists := f.userTokens[full]; exists {
+			write(w, 400, nil)
+			return
+		}
+		exp, _ := strconv.ParseInt(r.Form.Get("expire"), 10, 64)
+		f.tokenSeq++
+		t := &UserToken{ID: full, User: user, Secret: fmt.Sprintf("%08d-0000-4000-8000-%012d", f.tokenSeq, f.tokenSeq), Comment: r.Form.Get("comment"),
+			Expire: exp, Privsep: r.Form.Get("privsep") != "0"}
+		f.userTokens[full] = t
+		write(w, 200, map[string]any{"full-tokenid": full, "value": t.Secret, "info": map[string]any{"expire": exp, "privsep": 0}})
+	case http.MethodDelete:
+		if tok != nil && !(f.TokenSelfRevoke && tok.ID == full) {
+			write(w, 403, nil)
+			return
+		}
+		if _, ok := f.userTokens[full]; !ok {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(500)
+			_, _ = w.Write([]byte(`{"data":null,"message":"no such token '` + name + `' for user '` + user + `'"}`))
+			return
+		}
+		delete(f.userTokens, full)
+		write(w, 200, nil)
+	}
+}
+
+func (t *UserToken) idOrEmpty() string {
+	if t == nil {
+		return ""
+	}
+	return t.ID
 }
 
 func (f *Server) ticket(w http.ResponseWriter, r *http.Request) {
@@ -494,4 +739,422 @@ func containsInt(xs []int, v any) bool {
 		}
 	}
 	return false
+}
+
+// fakeRRD returns 70 deterministic samples shaped like PVE's rrddata.
+func fakeRRD(path, timeframe string) []map[string]any {
+	step := map[string]int64{"hour": 60, "day": 1200, "week": 8400, "month": 36000, "year": 432000}[timeframe]
+	if step == 0 {
+		step = 1200
+	}
+	now := time.Now().Unix() / step * step
+	guest := strings.Contains(path, "/qemu/") || strings.Contains(path, "/lxc/")
+	storage := strings.Contains(path, "/storage/")
+	out := make([]map[string]any, 0, 70)
+	for i := 0; i < 70; i++ {
+		t := now - int64(69-i)*step
+		x := float64(i)
+		phase := float64(len(path)%7) + float64(strings.Count(path, "2"))*1.7 + float64(strings.Count(path, "3"))*3.1
+		wave := 0.5 + 0.4*math.Sin(x/7+phase)
+		m := map[string]any{"time": t}
+		switch {
+		case storage:
+			m["used"], m["total"] = 1e12+x*1e9, 10e12
+		case guest:
+			m["cpu"], m["maxcpu"] = 0.1*wave, 2.0
+			m["mem"], m["maxmem"] = 1e9+2e8*wave, 4e9
+			m["netin"], m["netout"] = 2e5*wave, 1e5*wave
+			m["diskread"], m["diskwrite"] = 1e6*wave, 5e5*wave
+			m["pressurecpusome"] = 0.3 * wave
+		default:
+			m["cpu"], m["maxcpu"] = 0.2*wave, 40.0
+			m["memused"], m["memtotal"] = 5e10+1e10*wave, 5.4e11
+			m["netin"], m["netout"] = 3e7*wave, 1e7*wave
+			m["iowait"], m["loadavg"] = 0.01*wave, 3*wave
+			m["rootused"], m["roottotal"] = 8e9, 1e11
+		}
+		if i == 69 {
+			delete(m, "cpu") // the newest sample is often incomplete
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+// consoleEcho accepts a websocket upgrade (handshake only) and echoes raw bytes.
+// A client that asks for the "binary" websocket subprotocol (noVNC in a
+// browser, like with real PVE) gets a framed websocket and a minimal VNC
+// server instead (see vncServer).
+func (f *Server) consoleEcho(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("vncticket") == "" || !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+		write(w, 400, nil)
+		return
+	}
+	if strings.Contains(r.Header.Get("Sec-WebSocket-Protocol"), "binary") {
+		f.vncServer(w, r)
+		return
+	}
+	hj, ok := w.(http.Hijacker)
+	if !ok {
+		write(w, 500, nil)
+		return
+	}
+	h := sha1.Sum([]byte(r.Header.Get("Sec-WebSocket-Key") + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
+	conn, rw, err := hj.Hijack()
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	fmt.Fprintf(rw, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n", base64.StdEncoding.EncodeToString(h[:]))
+	_ = rw.Flush()
+	buf := make([]byte, 4096)
+	for {
+		n, err := rw.Read(buf)
+		if n > 0 {
+			_, _ = conn.Write(buf[:n])
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+// demoGet answers the per-node reads used by galley's detail pages, so the
+// demo mode is complete. It returns false for paths it does not handle.
+func (f *Server) demoGet(w http.ResponseWriter, p, user string) bool {
+	seg := strings.Split(strings.Trim(p, "/"), "/")
+	if len(seg) < 2 {
+		return false
+	}
+	node := seg[1]
+	f.mu.Lock()
+	allowed, restricted := f.Restricted[user]
+	guests := make([]map[string]any, len(f.Guests))
+	copy(guests, f.Guests)
+	f.mu.Unlock()
+	guestOK := func(id string) map[string]any {
+		for _, g := range guests {
+			if fmt.Sprint(g["vmid"]) == id && g["node"] == node && (!restricted || containsInt(allowed, g["vmid"])) {
+				return g
+			}
+		}
+		return nil
+	}
+	switch {
+	case len(seg) == 3 && seg[2] == "status":
+		if restricted {
+			write(w, 403, nil)
+			return true
+		}
+		write(w, 200, map[string]any{
+			"kversion": "Linux 7.0.14-30-pve #1 SMP PREEMPT_DYNAMIC", "pveversion": "pve-manager/9.2.32", "uptime": 47000,
+			"cpuinfo": map[string]any{"model": "Intel(R) Xeon(R) Gold 6338 CPU @ 2.00GHz", "cpus": 40, "sockets": 1, "cores": 20},
+			"loadavg": []string{"1.20", "1.05", "0.98"}, "cpu": 0.12, "wait": 0.002,
+			"memory":    map[string]any{"used": 52 << 30, "total": 503 << 30, "free": 451 << 30},
+			"swap":      map[string]any{"used": 0, "total": 8 << 30, "free": 8 << 30},
+			"rootfs":    map[string]any{"used": 8 << 30, "total": 100 << 30, "avail": 92 << 30},
+			"boot-info": map[string]any{"mode": "efi"}, "current-kernel": map[string]any{"release": "7.0.14-30-pve"},
+		})
+	case len(seg) == 3 && seg[2] == "network":
+		write(w, 200, []map[string]any{
+			{"iface": "vmbr0", "type": "bridge", "active": 1, "autostart": 1, "cidr": "192.0.2.1" + node[len(node)-1:] + "/24", "gateway": "192.0.2.1", "bridge_ports": "enp1s0f0"},
+			{"iface": "enp1s0f0", "type": "eth", "active": 1},
+			{"iface": "enp65s0f0", "type": "eth", "active": 1, "cidr": "10.15.15.1" + node[len(node)-1:] + "/24", "comments": "corosync / ceph mesh"},
+		})
+	case len(seg) == 4 && seg[2] == "disks" && seg[3] == "list":
+		write(w, 200, []map[string]any{
+			{"devpath": "/dev/nvme0n1", "model": "SAMSUNG MZQL2960HCJR", "size": 960 << 30, "health": "PASSED", "used": "BIOS boot", "type": "nvme", "wearout": 98},
+			{"devpath": "/dev/nvme1n1", "model": "SAMSUNG MZQL23T8HCLS", "size": 3840 << 30, "health": "PASSED", "used": "LVM", "type": "nvme", "wearout": 99},
+		})
+	case len(seg) == 4 && seg[2] == "hardware" && seg[3] == "pci":
+		out := []map[string]any{{"id": "0000:00:1f.6", "class": "0x020000", "vendor_name": "Intel Corporation", "device_name": "Ethernet Connection", "iommugroup": 14}}
+		if node == "pve1" {
+			out = append(out,
+				map[string]any{"id": "0000:16:00.0", "class": "0x030200", "vendor": "0x10de", "device": "0x25b6", "vendor_name": "NVIDIA Corporation", "device_name": "GA107GL [A2 / A16]", "iommugroup": 10, "mdev": 0},
+				map[string]any{"id": "0000:91:00.0", "class": "0x030200", "vendor": "0x10de", "device": "0x25b6", "vendor_name": "NVIDIA Corporation", "device_name": "GA107GL [A2 / A16]", "iommugroup": 1, "mdev": 0})
+		}
+		if node == "pve2" { // a GPU without a PCI mapping yet (Hardware offers to create one)
+			out = append(out, map[string]any{"id": "0000:41:00.0", "class": "0x030200", "vendor": "0x10de", "device": "0x27b8", "vendor_name": "NVIDIA Corporation", "device_name": "AD104GL [L4]", "iommugroup": 22, "mdev": 0})
+		}
+		write(w, 200, out)
+	case len(seg) == 3 && seg[2] == "storage":
+		write(w, 200, []map[string]any{
+			{"storage": "vm-pool", "type": "rbd", "content": "images,rootdir", "active": 1, "enabled": 1, "shared": 1, "used": 1 << 40, "total": 10 << 40, "avail": 9 << 40},
+			{"storage": "local", "type": "dir", "content": "iso,vztmpl,backup", "active": 1, "enabled": 1, "used": 85 << 30, "total": 100 << 30, "avail": 15 << 30},
+		})
+	case len(seg) == 5 && seg[2] == "storage" && seg[4] == "content":
+		var out []map[string]any
+		switch seg[3] {
+		case "local":
+			out = []map[string]any{
+				{"volid": "local:iso/debian-13.1.0-amd64-netinst.iso", "content": "iso", "format": "iso", "size": 754 << 20, "ctime": 1790000000},
+				{"volid": "local:vztmpl/debian-13-standard_13.1-2_amd64.tar.zst", "content": "vztmpl", "format": "tzst", "size": 123 << 20, "ctime": 1790000000},
+				{"volid": "local:backup/vzdump-qemu-120-2026_11_24-01_30_00.vma.zst", "content": "backup", "format": "vma.zst", "size": 9 << 30, "vmid": 120, "ctime": 1795483800},
+			}
+		default:
+			for _, g := range guests {
+				if g["template"] == nil {
+					out = append(out, map[string]any{"volid": fmt.Sprintf("%s:vm-%v-disk-0", seg[3], g["vmid"]), "content": "images", "format": "raw", "size": 32 << 30, "vmid": g["vmid"]})
+				}
+			}
+		}
+		write(w, 200, out)
+	case len(seg) == 3 && seg[2] == "tasks":
+		write(w, 200, []map[string]any{{"upid": "UPID:" + node + ":1:2:3:qmstart:120:root@pam:", "node": node, "type": "qmstart", "id": "120", "user": "root@pam", "starttime": 1795480000, "endtime": 1795480004, "status": "OK"}})
+	case len(seg) == 5 && (seg[2] == "qemu" || seg[2] == "lxc") && seg[4] == "config":
+		g := guestOK(seg[3])
+		if c := f.createdConfig(seg[3], node, seg[2]); g == nil && c != nil && !restricted {
+			write(w, 200, f.withEdits(seg[3], c))
+			return true
+		}
+		if g == nil {
+			write(w, 403, nil)
+			return true
+		}
+		name := fmt.Sprint(g["name"])
+		if seg[2] == "lxc" {
+			write(w, 200, f.withEdits(seg[3], map[string]any{"hostname": name, "arch": "amd64", "cores": 2, "memory": 2048, "swap": 512, "ostype": "debian", "unprivileged": 1, "features": "nesting=1",
+				"rootfs": "vm-pool:vm-" + seg[3] + "-disk-0,size=8G", "net0": "name=eth0,bridge=servers,ip=dhcp,type=veth", "onboot": 1, "digest": "f00d" + seg[3]}))
+			return true
+		}
+		cfg := map[string]any{"name": name, "cores": 4, "sockets": 1, "cpu": "host", "memory": "8192", "balloon": 0, "machine": "q35", "bios": "ovmf", "ostype": "l26",
+			"scsihw": "virtio-scsi-single", "scsi0": "vm-pool:vm-" + seg[3] + "-disk-0,iothread=1,discard=on,ssd=1,size=64G", "efidisk0": "vm-pool:vm-" + seg[3] + "-disk-1,efitype=4m,size=528K",
+			"net0": "virtio=BC:24:11:00:01:" + fmt.Sprintf("%02X", len(seg[3])) + ",bridge=servers,firewall=1", "boot": "order=scsi0", "agent": "1", "onboot": 1, "digest": "f00d" + seg[3]}
+		if seg[3] == "300" {
+			cfg["cores"], cfg["memory"] = 16, "65536"
+			cfg["hostpci0"] = "mapping=gpu-a2-0,pcie=1"
+		}
+		write(w, 200, f.withEdits(seg[3], cfg))
+	case len(seg) == 5 && (seg[2] == "qemu" || seg[2] == "lxc") && seg[4] == "snapshot":
+		if guestOK(seg[3]) == nil {
+			write(w, 403, nil)
+			return true
+		}
+		write(w, 200, []map[string]any{
+			{"name": "pre-upgrade", "description": "before 9.2", "snaptime": 1795300000},
+			{"name": "current", "parent": "pre-upgrade", "description": "You are here!", "running": 1},
+		})
+	default:
+		return false
+	}
+	return true
+}
+
+// DeleteUserTokens removes every user API token (as an administrator could in the GUI).
+func (f *Server) DeleteUserTokens() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.userTokens = map[string]*UserToken{}
+}
+
+// haStateOf is a guest's requested HA state ("" when HA does not manage it).
+func (f *Server) haStateOf(g map[string]any) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	sid := haSID(g)
+	for _, h := range f.HAServices {
+		if h["sid"] == sid || h["id"] == sid {
+			return fmt.Sprint(h["state"])
+		}
+	}
+	return ""
+}
+
+func haSID(g map[string]any) string {
+	if g["type"] == "lxc" {
+		return fmt.Sprint("ct:", g["vmid"])
+	}
+	return fmt.Sprint("vm:", g["vmid"])
+}
+
+// haList answers GET /cluster/ha/resources and GET /cluster/ha/rules
+// (Sys.Audit on /: restricted users get 403, like PVE).
+func (f *Server) haList(w http.ResponseWriter, r *http.Request, p, user string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, restricted := f.Restricted[user]; restricted {
+		write(w, 403, nil)
+		return
+	}
+	out := []map[string]any{}
+	q := r.URL.Query()
+	if p == "/cluster/ha/resources" {
+		for _, h := range f.HAServices {
+			sid := fmt.Sprint(h["sid"])
+			typ, _, _ := strings.Cut(sid, ":")
+			if t := q.Get("type"); t != "" && t != typ {
+				continue
+			}
+			m := map[string]any{"sid": sid, "state": h["state"], "type": typ, "digest": "fakeha"}
+			if c, ok := h["comment"]; ok {
+				m["comment"] = c
+			}
+			out = append(out, m)
+		}
+		write(w, 200, out)
+		return
+	}
+	for i, rule := range f.HARules {
+		if t := q.Get("type"); t != "" && rule["type"] != t {
+			continue
+		}
+		if res := q.Get("resource"); res != "" && !containsStr(strings.Split(fmt.Sprint(rule["resources"]), ","), res) {
+			continue
+		}
+		m := map[string]any{"order": i + 1, "digest": "fakeha"}
+		for k, v := range rule {
+			m[k] = v
+		}
+		out = append(out, m)
+	}
+	write(w, 200, out)
+}
+
+var configIDRe = regexp.MustCompile(`^[a-z][a-z0-9_-]+$`)
+
+// haCreate handles POST /cluster/ha/resources and POST /cluster/ha/rules like
+// PVE 9: synchronous (no task), Sys.Console on / required, ids unique. A
+// resource requested "started" starts its guest (the HA manager would).
+func (f *Server) haCreate(w http.ResponseWriter, p string, form map[string]string, user string) {
+	fail := func(msg string) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(500)
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": nil, "message": msg + "\n"})
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.Admins[user] {
+		write(w, 403, nil)
+		return
+	}
+	if p == "/cluster/ha/resources" {
+		sid := form["sid"]
+		if _, err := strconv.Atoi(sid); err == nil {
+			sid = "vm:" + sid
+		}
+		for _, h := range f.HAServices {
+			if h["sid"] == sid {
+				fail("resource ID '" + sid + "' already defined")
+				return
+			}
+		}
+		state := form["state"]
+		if state == "" {
+			state = "started"
+		}
+		node := "pve1"
+		_, id, _ := strings.Cut(sid, ":")
+		if g := f.guestLocked(id); g != nil {
+			node = fmt.Sprint(g["node"])
+			if state == "started" {
+				g["status"] = "running"
+			}
+		}
+		h := map[string]any{"type": "service", "id": sid, "sid": sid, "node": node, "state": state}
+		if c := form["comment"]; c != "" {
+			h["comment"] = c
+		}
+		f.HAServices = append(f.HAServices, h)
+		write(w, 200, nil)
+		return
+	}
+	id := form["rule"]
+	if !configIDRe.MatchString(id) {
+		fail("invalid configuration ID '" + id + "'")
+		return
+	}
+	for _, rule := range f.HARules {
+		if rule["rule"] == id {
+			fail("HA rule '" + id + "' already defined")
+			return
+		}
+	}
+	rule := map[string]any{"rule": id, "type": form["type"], "resources": form["resources"]}
+	for _, k := range []string{"nodes", "comment", "affinity"} {
+		if v := form[k]; v != "" {
+			rule[k] = v
+		}
+	}
+	for _, k := range []string{"strict", "disable"} {
+		if v := form[k]; v != "" {
+			b := 0
+			if v == "1" || v == "true" {
+				b = 1
+			}
+			rule[k] = b
+		}
+	}
+	f.HARules = append(f.HARules, rule)
+	write(w, 200, nil)
+}
+
+func containsStr(xs []string, v string) bool {
+	for _, x := range xs {
+		if strings.TrimSpace(x) == v {
+			return true
+		}
+	}
+	return false
+}
+
+// createdConfig is the config of a guest created through the API (nil if none):
+// its create parameters, minus the ones that are not config keys.
+func (f *Server) createdConfig(vmid, node, typ string) map[string]any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	c := f.created[vmid]
+	if c == nil || c["node"] != node || c["type"] != typ {
+		return nil
+	}
+	out := map[string]any{"digest": "c0ffee" + vmid}
+	for k, v := range c {
+		switch k {
+		case "node", "type", "vmid", "start", "password", "ssh-public-keys", "storage", "pool", "ostemplate":
+			continue
+		}
+		out[k] = v
+	}
+	return out
+}
+
+// editConfig records a config change: body keys are set, `delete` removes
+// keys, digest and the path variables are not config.
+func (f *Server) editConfig(vmid string, form map[string]string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.edits == nil {
+		f.edits = map[string]map[string]any{}
+	}
+	e := f.edits[vmid]
+	if e == nil {
+		e = map[string]any{}
+		f.edits[vmid] = e
+	}
+	for k, v := range form {
+		switch k {
+		case "digest", "node", "vmid", "skiplock", "force":
+		case "delete", "revert":
+			for _, d := range strings.FieldsFunc(v, func(r rune) bool { return r == ',' || r == ';' || r == ' ' }) {
+				e[d] = nil
+			}
+		default:
+			e[k] = v
+		}
+	}
+	f.configSeq++
+	e["digest"] = fmt.Sprintf("e%03d%s", f.configSeq, vmid)
+}
+
+// withEdits applies recorded config changes to a base config.
+func (f *Server) withEdits(vmid string, cfg map[string]any) map[string]any {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for k, v := range f.edits[vmid] {
+		if v == nil {
+			delete(cfg, k)
+		} else {
+			cfg[k] = v
+		}
+	}
+	return cfg
 }

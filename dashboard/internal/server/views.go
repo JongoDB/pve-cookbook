@@ -27,6 +27,7 @@ type userView struct {
 	storage   map[string]bool // "node/storage"
 	sysAudit  bool            // Sys.Audit on / (cluster-wide state, all tasks)
 	sysModify bool            // Sys.Modify on / (cluster admin)
+	privs     map[string]bool // all privileges on /
 	err       error
 }
 
@@ -93,6 +94,11 @@ func (s *Server) view(ctx context.Context, ss *session, cid string) *userView {
 		if !denied {
 			return nil
 		}
+		if errors.As(rerr, &ae) && ae.Status == 401 || errors.As(perr, &ae) && ae.Status == 401 {
+			// PVE no longer accepts this login (ticket expired, token revoked in
+			// PVE): drop it so the user is asked to log in to this cluster again.
+			_ = s.store.DeleteCred(ss.id, cid)
+		}
 	} else {
 		for _, r := range res {
 			switch r.Type {
@@ -104,7 +110,7 @@ func (s *Server) view(ctx context.Context, ss *session, cid string) *userView {
 				nv.storage[r.Node+"/"+r.Storage] = true
 			}
 		}
-		nv.sysAudit, nv.sysModify = perms["Sys.Audit"], perms["Sys.Modify"]
+		nv.sysAudit, nv.sysModify, nv.privs = perms["Sys.Audit"], perms["Sys.Modify"], perms
 	}
 	s.mu.Lock()
 	s.views[key] = nv
@@ -117,7 +123,7 @@ func (s *Server) view(ctx context.Context, ss *session, cid string) *userView {
 
 // views returns the user's views for every cluster they are logged in to.
 func (s *Server) userViews(ctx context.Context, ss *session) map[string]*userView {
-	creds, _ := s.store.Creds(ss.id)
+	creds, _ := s.store.Creds(ss.id, ss.key)
 	out := map[string]*userView{}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -442,11 +448,26 @@ func (s *Server) addCluster(w http.ResponseWriter, r *http.Request, ss *session)
 	writeJSON(w, 201, s.clusterView(c, true))
 }
 
+func defaultMode(m string) string {
+	if m == "" {
+		return "ticket"
+	}
+	return m
+}
+
+func defaultTransport(t string) string {
+	if t == "" {
+		return "pve"
+	}
+	return t
+}
+
 func (s *Server) clusterView(c store.Cluster, detail bool) map[string]any {
-	m := map[string]any{"id": c.ID, "name": c.Name}
+	m := map[string]any{"id": c.ID, "name": c.Name, "credentialMode": defaultMode(c.CredentialMode)}
 	if detail {
 		m["status"] = s.fleet.Status(c.ID)
 		m["endpoints"], m["tokenId"], m["shareLogin"], m["brokenSecret"] = c.Endpoints, c.TokenID, c.ShareLogin, c.BrokenSecret
+		m["hostTransport"] = defaultTransport(c.HostTransport)
 	}
 	return m
 }
@@ -462,7 +483,9 @@ func (s *Server) listClusters(w http.ResponseWriter, r *http.Request, ss *sessio
 	for _, c := range cs {
 		v := vs[c.ID]
 		m := s.clusterView(c, v != nil && v.sysAudit)
-		if v != nil && !v.sysAudit {
+		// Without Sys.Audit, or without a login to this cluster yet, the user still
+		// gets its reachability (the Clusters page shows every cluster).
+		if v == nil || !v.sysAudit {
 			st := s.fleet.Status(c.ID)
 			m["status"] = map[string]any{"reachable": st.Reachable, "quorate": st.Quorate, "lastPoll": st.LastPoll}
 		}
@@ -487,9 +510,11 @@ func (s *Server) updateCluster(w http.ResponseWriter, r *http.Request, ss *sessi
 		return
 	}
 	var req struct {
-		Name       *string        `json:"name"`
-		Endpoints  []pve.Endpoint `json:"endpoints"`
-		ShareLogin *bool          `json:"shareLogin"`
+		Name           *string        `json:"name"`
+		Endpoints      []pve.Endpoint `json:"endpoints"`
+		ShareLogin     *bool          `json:"shareLogin"`
+		CredentialMode *string        `json:"credentialMode"`
+		HostTransport  *string        `json:"hostTransport"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		apiError(w, 400, "bad_request", err.Error())
@@ -507,6 +532,28 @@ func (s *Server) updateCluster(w http.ResponseWriter, r *http.Request, ss *sessi
 		// receive passwords typed for another. Both affect more than this cluster.
 		apiError(w, 403, "forbidden", "changing endpoints or enabling shared login requires a galley admin")
 		return
+	}
+	if (req.CredentialMode != nil || req.HostTransport != nil) && !s.galleyAdmin(r.Context(), ss) {
+		// How galley holds user logins and whether it holds a root SSH key are
+		// instance-wide security decisions.
+		apiError(w, 403, "forbidden", "changing the credential mode or host transport requires a galley admin")
+		return
+	}
+	if req.CredentialMode != nil {
+		if *req.CredentialMode != "ticket" && *req.CredentialMode != "token" {
+			apiError(w, 400, "bad_request", `credentialMode must be "ticket" or "token"`)
+			return
+		}
+		c.CredentialMode = *req.CredentialMode
+	}
+	dropSSHKey := false
+	if req.HostTransport != nil {
+		if *req.HostTransport != "pve" && *req.HostTransport != "ssh" {
+			apiError(w, 400, "bad_request", `hostTransport must be "pve" or "ssh"`)
+			return
+		}
+		dropSSHKey = *req.HostTransport == "pve" && defaultTransport(c.HostTransport) == "ssh"
+		c.HostTransport = *req.HostTransport
 	}
 	if req.ShareLogin != nil {
 		c.ShareLogin = *req.ShareLogin
@@ -532,9 +579,21 @@ func (s *Server) updateCluster(w http.ResponseWriter, r *http.Request, ss *sessi
 		apiError(w, 409, "conflict", err.Error())
 		return
 	}
-	s.securityEvent(ss.user, c.ID, "cluster.update", "Updated cluster "+c.Name, true, map[string]any{"name": c.Name, "endpoints": c.Endpoints, "shareLogin": c.ShareLogin})
+	if dropSSHKey {
+		// galley no longer needs root SSH access to this cluster: destroy the key.
+		hostMu.Lock()
+		err := s.store.DeleteSetting(hostKeySetting + "." + c.ID)
+		hostMu.Unlock()
+		if err != nil {
+			s.log.Error("delete SSH key", "cluster", c.ID, "err", err)
+		}
+	}
+	s.securityEvent(ss.user, c.ID, "cluster.update", "Updated cluster "+c.Name, true, map[string]any{"name": c.Name, "endpoints": c.Endpoints,
+		"shareLogin": c.ShareLogin, "credentialMode": defaultMode(c.CredentialMode), "hostTransport": defaultTransport(c.HostTransport), "sshKeyDeleted": dropSSHKey})
 	s.dropClient(id)
-	s.fleet.Forget(id) // rebuilt with the new endpoints on the next scan
+	if req.Endpoints != nil || req.Name != nil {
+		s.fleet.Forget(id) // rebuilt with the new endpoints on the next scan
+	}
 	s.fleet.Trigger(id)
 	writeJSON(w, 200, s.clusterView(c, true))
 }
@@ -554,6 +613,9 @@ func (s *Server) deleteCluster(w http.ResponseWriter, r *http.Request, ss *sessi
 		apiError(w, 500, "store", err.Error())
 		return
 	}
+	hostMu.Lock()
+	_ = s.store.DeleteSetting(hostKeySetting + "." + id) // its SSH key, if any
+	hostMu.Unlock()
 	s.securityEvent(ss.user, id, "cluster.delete", "Removed cluster "+c.Name, true, nil)
 	s.fleet.Forget(id)
 	s.dropClient(id)
@@ -580,9 +642,21 @@ func (s *Server) securityEvent(user, cid, action, title string, ok bool, detail 
 func (s *Server) auditVisible(ctx context.Context, ss *session, e store.AuditEntry, vs map[string]*userView) bool {
 	v := vs[e.ClusterID]
 	if v == nil {
+		// A removed cluster's history (who added, changed and removed it) stays
+		// readable for galley admins; nobody else can be checked against it any more.
+		if _, err := s.store.Cluster(e.ClusterID); err != nil && e.ClusterID != "" {
+			return s.galleyAdmin(ctx, ss)
+		}
 		return false
 	}
-	return v.sysAudit || e.ActorUser == v.pveUser
+	if e.ActorUser == v.pveUser {
+		return true
+	}
+	// Root command output can reveal anything on the node: administrators only.
+	if e.Action == "host.exec" {
+		return hostAdmin(v)
+	}
+	return v.sysAudit
 }
 
 func (s *Server) audit(w http.ResponseWriter, r *http.Request, ss *session) {

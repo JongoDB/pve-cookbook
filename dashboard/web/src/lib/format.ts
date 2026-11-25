@@ -1,11 +1,9 @@
-const GiB = 1024 ** 3;
-const TiB = 1024 ** 4;
+import { formatBytes } from './units';
 
+/** Sizes everywhere use binary units (KiB, MiB, GiB, TiB). */
 export function bytes(n: number): string {
-  if (!Number.isFinite(n) || n <= 0) return '0';
-  if (n >= TiB) return `${(n / TiB).toFixed(n >= 10 * TiB ? 0 : 1)} TiB`;
-  if (n >= GiB) return `${Math.round(n / GiB)} G`;
-  return `${Math.round(n / 1024 ** 2)} M`;
+  if (!Number.isFinite(n) || n <= 0) return '0 B';
+  return formatBytes(n);
 }
 
 export const pct = (used: number, total: number) => (total > 0 ? Math.min(100, Math.max(0, (used / total) * 100)) : 0);
@@ -16,13 +14,13 @@ export function pctLabel(used: number, total: number): string {
 }
 
 export function uptime(s: number): string {
-  if (!s) return '—';
+  if (!s) return 'not running';
   const d = Math.floor(s / 86400);
   const h = Math.floor((s % 86400) / 3600);
   const m = Math.floor((s % 3600) / 60);
-  if (d) return `${d}d ${h}h`;
-  if (h) return `${h}h ${m}m`;
-  return `${m}m`;
+  if (d) return `${d} d ${h} h`;
+  if (h) return `${h} h ${m} min`;
+  return `${m} min`;
 }
 
 export function ago(ts: number, now = Date.now() / 1000): string {

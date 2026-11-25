@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"time"
 
@@ -18,19 +20,68 @@ import (
 // maxRun bounds a whole change; each PVE task is also bounded by plan.TaskTimeout.
 const maxRun = 4 * time.Hour
 
+// maxAgentPending caps one agent's waiting drafts, so an agent cannot fill
+// its user's queue.
+const maxAgentPending = 10
+
 func (s *Server) createPlan(w http.ResponseWriter, r *http.Request, ss *session) {
 	var req plan.Request
 	if err := readJSON(r, &req); err != nil {
 		apiError(w, 400, "bad_request", err.Error())
 		return
 	}
-	v := s.view(r.Context(), ss, req.ClusterID)
-	cl, _, cerr := s.userClient(r.Context(), ss, req.ClusterID)
+	ctx := r.Context()
+	if ss.agent {
+		// galley administration is never available to agent tokens, not even
+		// wrapped in a change; and every agent change is a labelled draft.
+		if strings.HasPrefix(req.Action, "galley.") {
+			apiError(w, 403, "agent_scope", "agent tokens cannot change galley's own configuration")
+			return
+		}
+		n := 0
+		for _, q := range s.plans.List(planOwner(ss)) {
+			if q.Source == "agent:"+ss.agentName {
+				n++
+			}
+		}
+		if n >= maxAgentPending {
+			apiError(w, 429, "too_many_plans", "this agent already has "+strconv.Itoa(n)+" changes waiting for review")
+			return
+		}
+		ctx = draftCtx(ctx, ss)
+	}
+	if strings.HasPrefix(req.Action, "galley.") {
+		p, err := s.buildGalleyPlan(ctx, ss, req)
+		if errors.Is(err, plan.ErrTooMany) {
+			apiError(w, 429, "too_many_plans", err.Error())
+			return
+		}
+		if err != nil {
+			apiError(w, 400, "bad_plan", err.Error())
+			return
+		}
+		writeJSON(w, 201, p)
+		return
+	}
+	v := s.view(ctx, ss, req.ClusterID)
+	cl, _, cerr := s.userClient(ctx, ss, req.ClusterID)
 	if v == nil || cerr != nil {
 		apiError(w, 409, "cluster_login_required", "log in to this cluster first")
 		return
 	}
-	p, err := s.plans.Build(r.Context(), ss.user, req, func(id int) bool { return v.guests[id] }, cl)
+	if req.Action == "host.exec" && plan.IsDraft(ctx) {
+		var prm struct{ Command string }
+		_ = json.Unmarshal(req.Params, &prm)
+		if msg := aiHostCommandProblem(prm.Command); msg != "" {
+			apiError(w, 403, "forbidden", msg)
+			return
+		}
+	}
+	if req.Action == "host.exec" && !hostAdmin(v) {
+		apiError(w, 403, "forbidden", hostAdminMsg)
+		return
+	}
+	p, err := s.plans.Build(ctx, planOwner(ss), req, func(id int) bool { return v.guests[id] }, cl)
 	switch {
 	case errors.Is(err, plan.ErrTooMany):
 		apiError(w, 429, "too_many_plans", err.Error())
@@ -43,7 +94,7 @@ func (s *Server) createPlan(w http.ResponseWriter, r *http.Request, ss *session)
 }
 
 func (s *Server) discardPlan(w http.ResponseWriter, r *http.Request, ss *session) {
-	s.plans.Discard(r.PathValue("id"), ss.user)
+	s.plans.Discard(r.PathValue("id"), planOwner(ss))
 	w.WriteHeader(204)
 }
 
@@ -59,7 +110,7 @@ func (s *Server) runPlan(w http.ResponseWriter, r *http.Request, ss *session) {
 		return
 	}
 	id := r.PathValue("id")
-	p, err := s.plans.Peek(id, ss.user)
+	p, err := s.plans.Peek(id, planOwner(ss))
 	if err != nil {
 		apiError(w, 404, "plan_not_found", err.Error())
 		return
@@ -70,7 +121,22 @@ func (s *Server) runPlan(w http.ResponseWriter, r *http.Request, ss *session) {
 		apiError(w, 409, "cluster_login_required", err.Error())
 		return
 	}
-	p, err = s.plans.Take(id, ss.user, req.Confirm)
+	if hasHostSteps(p) {
+		s.dropView(ss.id, p.ClusterID) // re-check rights now, not from the 30 s cache
+		if v := s.view(r.Context(), ss, p.ClusterID); v == nil || !hostAdmin(v) {
+			apiError(w, 403, "forbidden", hostAdminMsg)
+			return
+		}
+	}
+	if ss.agent {
+		for _, st := range p.Steps {
+			if st.Method == plan.MethodGalley {
+				apiError(w, 403, "agent_scope", "agent tokens cannot change galley's own configuration")
+				return
+			}
+		}
+	}
+	p, err = s.plans.Take(id, planOwner(ss), req.Confirm)
 	switch {
 	case errors.Is(err, plan.ErrNotFound):
 		apiError(w, 404, "plan_not_found", err.Error())
@@ -82,7 +148,11 @@ func (s *Server) runPlan(w http.ResponseWriter, r *http.Request, ss *session) {
 		apiError(w, 409, "plan_unavailable", err.Error())
 		return
 	}
-	entry, err := s.store.AddAudit(store.AuditEntry{User: ss.user, ActorUser: cr.PVEUser, ClusterID: p.ClusterID, Action: p.Action,
+	via := ""
+	if ss.agent {
+		via = "agent:" + ss.agentName
+	}
+	entry, err := s.store.AddAudit(store.AuditEntry{User: ss.user, ActorUser: cr.PVEUser, Via: via, ClusterID: p.ClusterID, Action: p.Action,
 		Title: p.Title, CLI: p.CLI(), Status: "running", Results: json.RawMessage("[]")})
 	if err != nil {
 		// Never change a cluster without an audit record.
@@ -92,9 +162,14 @@ func (s *Server) runPlan(w http.ResponseWriter, r *http.Request, ss *session) {
 	s.broadcastAudit(entry)
 	s.log.Info("change started", "audit", entry.ID, "user", ss.user, "as", cr.PVEUser, "action", p.Action, "title", p.Title)
 
+	// The run keeps the session secret (and so the ability to renew its
+	// ticket) until it finishes, even if the user goes idle or galley's cache
+	// would otherwise drop it.
+	release := s.holdKey(store.HashID(ss.id), ss.key)
 	s.inflight.Add(1)
 	go func() {
 		defer s.inflight.Done()
+		defer release()
 		ctx, cancel := context.WithTimeout(s.base, maxRun)
 		defer cancel()
 		results, ok := plan.Execute(ctx, cl, p, func(rs []plan.Result) {
@@ -102,7 +177,7 @@ func (s *Server) runPlan(w http.ResponseWriter, r *http.Request, ss *session) {
 			if e, err := s.store.UpdateAudit(entry.ID, "running", false, raw); err == nil {
 				s.broadcastAudit(e)
 			}
-		})
+		}, s.hostRunner(p.ClusterID, cl), s.galleyRunner(ss, p.ClusterID))
 		if !ok && s.base.Err() != nil && len(results) > 0 {
 			results[len(results)-1].Error = "galley stopped while this step was running; check the PVE task log for the outcome"
 		}
@@ -149,6 +224,10 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request, ss *session) {
 	au := make(chan store.AuditEntry, 16)
 	s.auditSubs[au] = ss
 	s.mu.Unlock()
+	// An open stream (a tab showing galley) keeps the session in use: its
+	// tickets keep being renewed until the stream closes or the session ends.
+	release := s.holdKey(store.HashID(ss.id), ss.key)
+	defer release()
 	defer func() {
 		s.mu.Lock()
 		delete(s.auditSubs, au)

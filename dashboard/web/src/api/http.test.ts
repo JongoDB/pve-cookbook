@@ -31,7 +31,7 @@ describe('HttpApi', () => {
     const cb = vi.fn();
     api.onUnauthorized(cb);
     await expect(api.login({ clusterId: 'c', username: 'u', realm: 'pam', password: 'x' })).rejects.toMatchObject({ code: 'auth_failed' });
-    await expect(api.clusterLogin('c', { username: 'u', realm: 'pam', password: 'x' })).rejects.toMatchObject({ status: 401 });
+    await expect(api.clusterLogin('c', { password: 'x' })).rejects.toMatchObject({ status: 401 });
     expect(cb).not.toHaveBeenCalled();
   });
 
