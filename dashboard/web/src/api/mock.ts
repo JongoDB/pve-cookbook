@@ -282,7 +282,7 @@ export class MockApi implements Api {
     { id: '3f9a1c0b7d2e4a51', name: 'ci-runner', scope: 'draft', created: now() - 86400 * 6, lastSeen: now() - 3600 * 2, expires: now() + 86400 * 24 },
   ];
   private seededAgentDraft = false;
-  private agentPolicyCfg: AgentPolicy = { approval: 'hosts' };
+  private agentPolicyCfg: AgentPolicy = { approval: 'risky' };
   private feedbackCfg: FeedbackConfig = { enabled: true, repo: 'JongoDB/pve-cookbook' };
   private mappings: MockMapping[] = seedMappings();
   /** PVE 9 HA rules (GET/POST /cluster/ha/rules), per cluster */
@@ -1353,7 +1353,7 @@ export class MockApi implements Api {
   async putAgentPolicy(p: AgentPolicy): Promise<AgentPolicy> {
     await wait(120); this.requireAuth();
     if (!this.session!.galleyAdmin) throw new ApiError(403, 'forbidden', 'agent approval settings require a galley admin');
-    if (!['hosts', 'all', 'always'].includes(p.approval)) throw new ApiError(400, 'bad_request', 'approval must be "hosts", "all" or "always"');
+    if (!['all', 'risky', 'hosts', 'always'].includes(p.approval)) throw new ApiError(400, 'bad_request', 'approval must be "all", "risky", "hosts" or "always"');
     this.agentPolicyCfg = { approval: p.approval };
     return { ...this.agentPolicyCfg };
   }

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -13,8 +14,9 @@ import (
 // What agent tokens with scope apply may apply without a person. A person is a
 // browser login; agent tokens can never change this setting.
 const (
-	approvalHosts  = "hosts"  // host commands and access changes need a person (default)
 	approvalAll    = "all"    // every change needs a person
+	approvalRisky  = "risky"  // everything but routine guest work needs a person (default)
+	approvalHosts  = "hosts"  // host commands and access changes need a person
 	approvalAlways = "always" // an admin opted out: agents apply everything themselves
 
 	agentPolicyKey = "agents"
@@ -25,7 +27,7 @@ type agentPolicy struct {
 }
 
 func validApproval(v string) bool {
-	return v == approvalHosts || v == approvalAll || v == approvalAlways
+	return v == approvalAll || v == approvalRisky || v == approvalHosts || v == approvalAlways
 }
 
 // agentPolicy fails closed: anything unreadable is the default, never "always".
@@ -35,7 +37,7 @@ func (s *Server) agentPolicy() agentPolicy {
 		_ = json.Unmarshal([]byte(v), &p)
 	}
 	if !validApproval(p.Approval) {
-		p.Approval = approvalHosts
+		p.Approval = approvalRisky
 	}
 	return p
 }
@@ -53,7 +55,7 @@ func (s *Server) putAgentPolicy(w http.ResponseWriter, r *http.Request, ss *sess
 	}
 	var p agentPolicy
 	if err := readJSON(r, &p); err != nil || !validApproval(p.Approval) {
-		apiError(w, 400, "bad_request", `approval must be "hosts", "all" or "always"`)
+		apiError(w, 400, "bad_request", `approval must be "all", "risky", "hosts" or "always"`)
 		return
 	}
 	old := s.agentPolicy()
@@ -94,6 +96,63 @@ func hostAccess(p *plan.Plan) string {
 	return ""
 }
 
+// routine lists what an agent may apply alone by default: reversible day-to-day
+// guest work. It is an allowlist of method, path and parameters, so anything
+// new or unforeseen needs a person.
+var routine = []struct {
+	method string
+	path   *regexp.Regexp
+	keys   string // space-separated parameters that may be set
+}{
+	{"POST", regexp.MustCompile(guestPath + `/status/(start|resume)$`), ""},
+	{"POST", regexp.MustCompile(guestPath + `/status/(shutdown|reboot)$`), "timeout"},
+	{"POST", regexp.MustCompile(guestPath + `/snapshot$`), "snapname description vmstate"},
+	{"POST", regexp.MustCompile(guestPath + `/migrate$`), "target online restart with-local-disks"},
+	{"PUT", regexp.MustCompile(guestPath + `/config$`), routineConfig},
+	{"POST", regexp.MustCompile(`^/nodes/[^/]+/qemu/[0-9]+/config$`), routineConfig},
+	{"POST", regexp.MustCompile(`^/nodes/[^/]+/vzdump$`), "vmid storage compress notes-template remove"},
+}
+
+const (
+	guestPath     = `^/nodes/[^/]+/(qemu|lxc)/[0-9]+`
+	routineConfig = "cores sockets vcpus memory balloon swap cpulimit cpuunits name hostname description tags onboot startup digest"
+)
+
+func routineStep(st plan.Step) bool {
+	for _, r := range routine {
+		if st.Method != r.method || !r.path.MatchString(st.Path) {
+			continue
+		}
+		for k := range st.Body {
+			if !slices.Contains(strings.Fields(r.keys), k) {
+				return false
+			}
+		}
+		// Without remove=0 a backup also prunes older ones.
+		return !strings.HasSuffix(st.Path, "/vzdump") || (st.Body["remove"] == "0" && st.Body["vmid"] != "")
+	}
+	return false
+}
+
+// risky says why a change is more than routine guest work ("" = it is routine).
+func risky(p *plan.Plan) string {
+	if why := hostAccess(p); why != "" {
+		return why
+	}
+	if p.Destructive {
+		return "it is destructive: it can lose data or stop guests"
+	}
+	if p.Action == "backup.protect" {
+		return "" // galley builds it: only ever adds guests to a job
+	}
+	for _, st := range p.Steps {
+		if !routineStep(st) {
+			return "it is more than routine guest work (" + st.Method + " " + st.Path + ")"
+		}
+	}
+	return ""
+}
+
 // needsPerson says why ss may not apply p itself ("" = it may).
 func (s *Server) needsPerson(ss *session, p *plan.Plan) string {
 	if !ss.agent {
@@ -104,8 +163,10 @@ func (s *Server) needsPerson(ss *session, p *plan.Plan) string {
 		return ""
 	case approvalAll:
 		return "this galley requires a person to apply every agent change"
+	case approvalHosts:
+		return hostAccess(p)
 	}
-	return hostAccess(p)
+	return risky(p)
 }
 
 const needsPersonHint = ". The draft is waiting in the Changes tab: ask the user to review and apply it there, then follow it with get_change and its changeId. Do not work around this"

@@ -496,7 +496,7 @@ export interface Api {
 
 export interface Release { version: string; date: string; markdown: string }
 export interface WhatsNew { version: string; releases: Release[] }
-/** hosts: host commands and access changes need a person (default); all: every change does; always: none do. */
-export type AgentApproval = 'hosts' | 'all' | 'always';
+/** What needs a person, strictest first. all: every change; risky: all but routine guest work (default); hosts: host commands and access changes; always: nothing. */
+export type AgentApproval = 'all' | 'risky' | 'hosts' | 'always';
 export interface AgentPolicy { approval: AgentApproval }
 export interface FeedbackConfig { enabled: boolean; repo: string }

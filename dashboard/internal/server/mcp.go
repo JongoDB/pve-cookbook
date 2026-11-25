@@ -46,7 +46,7 @@ type rpcResp struct {
 
 const mcpInstructions = `galley is a cockpit for Proxmox VE clusters. Everything you do runs as the user who created your token, with their PVE permissions.
 Read state with list_resources, get_findings, list_tasks, get_metrics, pve_get and api_schema. Learn how galley works with search_docs / read_doc.
-Changes are never applied implicitly: propose_action / propose_change / propose_host_command draft a change that a human reviews in galley's Changes tab. Only tokens with scope "apply" can apply_change, and must then poll get_change. Unless a galley admin allowed it, a person must apply host commands and changes to who can get in (users, roles, tokens, node shells): a draft with needsPerson stays in Changes for the user, so tell them and stop there.`
+Changes are never applied implicitly: propose_action / propose_change / propose_host_command draft a change that a human reviews in galley's Changes tab. Only tokens with scope "apply" can apply_change, and must then poll get_change. Unless a galley admin allowed it, a person must apply everything beyond routine guest work (start, shutdown, reboot, snapshot, migrate, back up, resize CPU and memory, rename): a draft with needsPerson stays in Changes for the user, so tell them and stop there.`
 
 func (s *Server) mcp(w http.ResponseWriter, r *http.Request, ss *session) {
 	if !ss.agent {

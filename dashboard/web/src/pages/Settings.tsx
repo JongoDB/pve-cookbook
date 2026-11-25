@@ -197,11 +197,18 @@ function AssistantSettingsForm() {
   );
 }
 
+/** Strictest first: choosing a later one than the saved one lifts a guardrail. */
 const APPROVALS: { id: AgentApproval; label: string; short: string; text: string }[] = [
-  { id: 'hosts', label: 'Host commands and access changes', short: 'For host commands and access changes', text: 'a person applies root commands on nodes and changes to users, roles, tokens, node shells, package sources and cluster membership. Agents apply everything else. This is the default.' },
   { id: 'all', label: 'Every change', short: 'For every change', text: 'apply tokens work like draft tokens.' },
+  { id: 'risky', label: 'Everything but routine guest work', short: 'For everything but routine guest work', text: 'agents start, shut down, reboot, snapshot, migrate and back up guests, add them to backup jobs, and change their CPU, memory, name, notes and tags. A person applies the rest. This is the default.' },
+  { id: 'hosts', label: 'Host commands and access changes', short: 'For host commands and access changes', text: 'a person applies root commands on nodes and changes to users, roles, tokens, node shells, package sources and cluster membership. Agents apply the rest, including destroying guests.' },
   { id: 'always', label: 'Nothing, always allow', short: 'Off, always allow', text: 'agents apply every change themselves, limited only by their user\u2019s PVE permissions.' },
 ];
+const rank = (id: AgentApproval) => APPROVALS.findIndex((a) => a.id === id);
+const LIFT: Partial<Record<AgentApproval, { text: string; tick: string }>> = {
+  hosts: { text: 'Agents would create, change and destroy guests, storage and networks with nobody reviewing it.', tick: 'I understand, let agents apply these' },
+  always: { text: 'Agents would also run root commands on nodes and change who has access, with nobody reviewing it. An agent misled by text in a VM note could do the same.', tick: 'I understand, let agents apply everything' },
+};
 
 function AgentApprovalForm() {
   const { api } = useApp();
@@ -219,11 +226,11 @@ function AgentApprovalForm() {
   if (!saved.data || !pick) return <div className="panel"><div className="muted panel-body" role="status">Loading the agent approval setting</div></div>;
 
   const orig = saved.data.approval;
-  const loosening = pick === 'always' && orig !== 'always';
+  const lift = rank(pick) > rank(orig) ? LIFT[pick] : undefined;
   const choose = (v: AgentApproval) => { setPick(v); setSure(false); setOk(null); setErr(null); };
   const save = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (loosening && !sure) return;
+    if (lift && !sure) return;
     setBusy(true); setErr(null); setOk(null);
     try {
       await api.putAgentPolicy({ approval: pick });
@@ -248,13 +255,13 @@ function AgentApprovalForm() {
           ))}
           <span className="hint">What an agent may not apply waits in Changes for its user, for 24 hours. Agents can never change this setting.</span>
         </fieldset>
-        {loosening && (
+        {lift && (
           <div className="notice notice-warn" role="note">
             <div className="grow">
-              Agents would run root commands on nodes and change who has access, with nobody reviewing them. An agent misled by text in a VM note could do the same.
+              {lift.text}
               <label className="check" style={{ marginTop: 8 }}>
                 <input type="checkbox" checked={sure} onChange={(e) => setSure(e.target.checked)} />
-                I understand, let agents apply everything
+                {lift.tick}
               </label>
             </div>
           </div>
@@ -262,7 +269,7 @@ function AgentApprovalForm() {
         {err && <div className="notice notice-error" role="alert"><div className="grow">{err}</div></div>}
         {ok && <div className="notice notice-ok" role="status"><div className="grow">{ok}</div></div>}
         <div className="row-actions">
-          <button type="submit" className="btn btn-primary" disabled={busy || pick === orig || (loosening && !sure)}>{busy ? 'Saving' : 'Save agent approval'}</button>
+          <button type="submit" className="btn btn-primary" disabled={busy || pick === orig || (!!lift && !sure)}>{busy ? 'Saving' : 'Save agent approval'}</button>
           <button type="button" className="btn" disabled={busy || pick === orig} onClick={() => choose(orig)}>Undo changes</button>
         </div>
       </div>

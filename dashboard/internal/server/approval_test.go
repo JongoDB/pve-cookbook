@@ -129,7 +129,7 @@ func TestAgentApprovalSetting(t *testing.T) {
 		root.do("GET", "/api/agent-policy", nil, &p)
 		return p.Approval
 	}
-	if get() != "hosts" {
+	if get() != "risky" {
 		t.Fatalf("default %q", get())
 	}
 	set := map[string]string{"approval": "always"}
@@ -148,15 +148,15 @@ func TestAgentApprovalSetting(t *testing.T) {
 			t.Fatalf("%v: %d", bad, code)
 		}
 	}
-	if get() != "hosts" {
+	if get() != "risky" {
 		t.Fatalf("changed to %q", get())
 	}
 	// unreadable values fail closed
-	for _, raw := range []string{`{"approval":"Always"}`, `garbage`, `{"approval":"always"`} {
+	for _, raw := range []string{`{"approval":"Always"}`, `{}`, `garbage`, `{"approval":"always"`} {
 		if err := h.st.PutSetting("agents", raw); err != nil {
 			t.Fatal(err)
 		}
-		if get() != "hosts" {
+		if get() != "risky" {
 			t.Fatalf("%s -> %q", raw, get())
 		}
 	}
@@ -168,6 +168,21 @@ func TestAgentApprovalSetting(t *testing.T) {
 	}
 	if text, isErr := ag.apply(ag.draft("propose_action", start)); !isErr {
 		t.Fatalf("all: guest.start applied: %s", text)
+	}
+	destroy := map[string]any{"cluster": "pve-lab", "action": "guest.destroy", "params": map[string]any{"targets": []any{map[string]any{"vmid": 300}}}}
+	for level, want := range map[string]bool{"risky": true, "hosts": false} {
+		if code := root.do("PUT", "/api/settings/agents", map[string]string{"approval": level}, nil); code != 200 {
+			t.Fatalf("%s: %d", level, code)
+		}
+		if d := ag.draft("propose_action", destroy); d.NeedsPerson != want {
+			t.Fatalf("%s: destroy needs a person = %v", level, d.NeedsPerson)
+		}
+		if d := ag.draft("propose_host_command", host); !d.NeedsPerson {
+			t.Fatalf("%s: host command not flagged", level)
+		}
+		if d := ag.draft("propose_action", start); d.NeedsPerson {
+			t.Fatalf("%s: guest.start flagged", level)
+		}
 	}
 	if code := root.do("PUT", "/api/settings/agents", set, nil); code != 200 {
 		t.Fatalf("always: %d", code)

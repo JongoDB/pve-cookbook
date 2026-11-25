@@ -28,17 +28,20 @@ Host commands drafted or applied by an agent follow the same rules as yours: the
 
 ## What needs a person
 
-By default an agent with the **apply** scope cannot apply these changes itself:
+By default an agent with the **apply** scope applies only routine guest work itself:
 
-- host commands (root commands on a node);
-- changes under `/access`: users, groups, roles, permissions, API tokens, passwords and realms;
-- node shells and PVE's batch call (`termproxy`, `vncshell`, `spiceshell`, `execute`), package sources and updates (`apt`), and cluster membership (`/cluster/config`).
+- start, resume, shut down and reboot guests (not a hard stop);
+- take snapshots and migrate guests;
+- back up a guest without pruning older backups (`remove=0`), and add guests to a backup job;
+- change a guest's cores, memory, CPU limits, name, notes, tags and start-at-boot settings.
+
+Everything else needs a person: host commands, users and permissions, anything destructive, creating guests, disks, networks, firewalls, storage, cloud-init passwords and keys, commands through the guest agent, and any API call galley does not know as routine.
 
 The agent drafts the change and is told that it needs a person. The draft waits in your **Changes** tab for 24 hours; you review and apply it like any other. The agent can follow it with `get_change` and the change's id: waiting, running, its result, or gone (discarded or expired). This holds for every change of this kind, also one you drafted yourself.
 
-A galley admin can require a person for every change, or for none (**always allow**), in [Settings](settings.md#agent-approval).
+A galley admin can lift or tighten this in [Settings](settings.md#agent-approval): a person for every change, only for host commands and access changes, or for nothing (**always allow**). Host commands and access changes are root commands on nodes, everything under `/access`, node shells and PVE's batch call (`termproxy`, `vncshell`, `spiceshell`, `execute`), package sources and updates (`apt`), and cluster membership (`/cluster/config`).
 
-This is a checkpoint, not a sandbox: within your other PVE permissions, an apply agent acts alone. It can, for example, destroy guests or run commands inside a guest through the guest agent.
+An agent can still disrupt work by what it may apply alone, such as rebooting or migrating guests. PVE permissions are the boundary: give agents a user with only the privileges they need.
 
 With the default **PVE node terminal** transport, PVE gives API tokens no root shell, so a host command an agent applies fails even with **always allow**. It works with the **SSH** transport. A person who applies the agent's draft uses their own login.
 

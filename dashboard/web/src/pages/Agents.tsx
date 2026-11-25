@@ -13,6 +13,7 @@ const SCOPES: { id: AgentScope; label: string; text: string }[] = [
   { id: 'apply', label: 'apply', text: 'also applies changes itself. Use with care: it acts as you.' },
 ];
 const APPLY_NOTE: Record<AgentApproval, string> = {
+  risky: 'An apply token applies routine guest work without anyone reviewing it, such as reboots and migrations. You still apply the rest yourself, in Changes.',
   hosts: 'An apply token can change your clusters without anyone reviewing the change. You still apply its host commands and access changes yourself, in Changes.',
   all: 'This galley requires a person to apply every agent change, so an apply token works like a draft token.',
   always: 'An apply token can change your clusters without anyone reviewing the change, including root commands on nodes: a galley admin turned approval off.',
@@ -119,7 +120,7 @@ function CreateToken({ onCreated }: { onCreated: (c: CreatedAgentToken) => void 
           <span className="hint">Whatever the scope, the agent acts as you: PVE checks your permissions on every call, and the audit log shows the agent&apos;s name. Agents can never change clusters, galley settings or agent tokens.</span>
         </fieldset>
         {scope === 'apply' && (
-          <div className="notice notice-warn" role="note"><div className="grow">{APPLY_NOTE[policy.data?.approval ?? 'hosts']} Give it a short lifetime and keep it secret.</div></div>
+          <div className="notice notice-warn" role="note"><div className="grow">{APPLY_NOTE[policy.data?.approval ?? 'risky']} Give it a short lifetime and keep it secret.</div></div>
         )}
         <ErrorBox message={error} />
         <div className="row-actions">

@@ -95,7 +95,7 @@ func (s *Server) extraToolSpecs() []assistant.ToolSpec {
 			"- api.call: {\"title\":\"…\",\"calls\":[{\"method\":\"PUT\",\"path\":\"/nodes/pve1/qemu/120/config\",\"body\":{\"cores\":\"4\"}}]} (any PVE create/update/delete; check api_schema first)\n" +
 			"- galley.cluster.update: {\"name\"?,\"shareLogin\"?,\"credentialMode\"?: ticket|token,\"hostTransport\"?: pve|ssh}\n" +
 			"- galley.cluster.remove: {} · galley.host.pin: {\"node\",\"fingerprint\"} · galley.host.unpin: {\"node\"} · galley.prefs.set: {\"key\":\"dashboard\",\"value\":\"<JSON>\"}\n" +
-			"- galley.agents.update: {\"approval\": hosts|all|always} (what apply-scope agent tokens need a person for: host commands and access changes, every change, or nothing; galley admins)",
+			"- galley.agents.update: {\"approval\": all|risky|hosts|always} (what apply-scope agent tokens need a person for: every change, everything but routine guest work, host commands and access changes, or nothing; galley admins)",
 			Properties: map[string]any{"cluster": str("cluster id"), "action": map[string]any{"type": "string", "enum": actions},
 				"params": map[string]any{"type": "object", "description": "action parameters (see description)"}},
 			Required: []string{"cluster", "action", "params"}},

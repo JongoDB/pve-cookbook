@@ -16,7 +16,7 @@ test.describe('agents and MCP @fast', () => {
     await create.getByLabel('Name').fill('e2e-agent');
     await create.getByLabel('Days valid').fill('2');
     await create.getByRole('radio', { name: /^apply:/ }).check();
-    await expect(create.getByRole('note')).toContainText('An apply token can change your clusters');
+    await expect(create.getByRole('note')).toContainText('An apply token applies routine guest work');
     await create.getByRole('radio', { name: /^read:/ }).check();
     await create.getByRole('button', { name: 'Create token' }).click();
 
@@ -76,7 +76,7 @@ test.describe('agents and MCP @fast', () => {
     const create = page.getByRole('region', { name: 'Create a token' });
     await create.getByLabel('Name').fill('e2e-apply');
     await create.getByRole('radio', { name: /^apply:/ }).check();
-    await expect(create.getByRole('note')).toContainText('You still apply its host commands');
+    await expect(create.getByRole('note')).toContainText('You still apply the rest yourself');
     await create.getByRole('button', { name: 'Create token' }).click();
     const fresh = page.getByRole('region', { name: 'Token for e2e-apply' });
     const token = (await fresh.getByLabel('Agent token').innerText()).trim();
@@ -107,7 +107,7 @@ test.describe('agents and MCP @fast', () => {
     await settle(page);
     const form = page.locator('form').filter({ has: page.getByRole('heading', { name: 'Agent approval' }) });
     const save = form.getByRole('button', { name: 'Save agent approval' });
-    await expect(form.getByRole('radio', { name: /^Host commands and access changes:/ })).toBeChecked();
+    await expect(form.getByRole('radio', { name: /^Everything but routine guest work:/ })).toBeChecked();
     await expect(save).toBeDisabled();
     await form.getByRole('radio', { name: /^Nothing, always allow:/ }).check();
     await expect(save).toBeDisabled();
@@ -120,9 +120,9 @@ test.describe('agents and MCP @fast', () => {
     expect((await tool('apply_change', { changeId: d2.changeId, confirm: d2.confirmText })).isError).toBe(false);
 
     // back to the default, which applies at once
-    await form.getByRole('radio', { name: /^Host commands and access changes:/ }).check();
+    await form.getByRole('radio', { name: /^Everything but routine guest work:/ }).check();
     await save.click();
-    await expect(form.locator('.panel-head')).toContainText('For host commands and access changes');
+    await expect(form.locator('.panel-head')).toContainText('For everything but routine guest work');
     expect((await tool('apply_change', { changeId: d.changeId, confirm: d.confirmText })).isError).toBe(true);
     const csrf = (await (await page.request.get('/api/me')).json()).csrf;
     for (const t of await (await page.request.get('/api/agent-tokens')).json()) {

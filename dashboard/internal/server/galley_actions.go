@@ -89,12 +89,14 @@ var galleyActions = map[string]galleyAction{
 				return "Let apply-scope agents apply every change without a person, including root commands on nodes"
 			case approvalAll:
 				return "Require a person to apply every change agents draft"
+			case approvalHosts:
+				return "Let apply-scope agents apply everything except host commands and access changes, including destroying guests"
 			}
-			return "Require a person to apply agents' host commands and access changes"
+			return "Require a person to apply everything agents draft beyond routine guest work"
 		},
 		payload: func(b map[string]string) ([]byte, error) {
 			if len(b) != 1 || !validApproval(b["approval"]) {
-				return nil, fmt.Errorf("approval must be hosts, all or always")
+				return nil, fmt.Errorf("approval must be all, risky, hosts or always")
 			}
 			return json.Marshal(agentPolicy{Approval: b["approval"]})
 		},
