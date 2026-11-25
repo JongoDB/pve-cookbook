@@ -3,7 +3,7 @@ import { Link, useParams } from 'react-router-dom';
 import { ApiError } from '../api/http';
 import type { Timeframe } from '../api/types';
 import { useApp, useCrumbs } from '../state/app';
-import { usePve } from '../lib/hooks';
+import { useChangeKey, usePve } from '../lib/hooks';
 import { clock, pctLabel } from '../lib/format';
 import { formatBytes } from '../lib/units';
 import { guestPath, nodePath } from '../lib/links';
@@ -31,7 +31,8 @@ export function StorageDetail() {
   const entries = (summary?.storage ?? []).filter((s) => s.id === sid && (!onlyNode || s.node === onlyNode));
   const first = entries.find((s) => s.active) ?? entries[0];
   const authed = !!me.clusters.find((c) => c.id === cluster)?.authed;
-  const content = usePve<Volume[]>(authed && first && !storageUnavailable(first) ? cluster : null, first ? `nodes/${first.node}/storage/${sid}/content` : null);
+  const changed = useChangeKey(cluster);
+  const content = usePve<Volume[]>(authed && first && !storageUnavailable(first) ? cluster : null, first ? `nodes/${first.node}/storage/${sid}/content` : null, {}, changed);
   const res = useMemo(() => [{ cluster, kind: 'storage' as const, id: storage, label: sid }], [cluster, storage, sid]);
 
   const groups = useMemo(() => {

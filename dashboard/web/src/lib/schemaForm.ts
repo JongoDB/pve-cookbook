@@ -209,3 +209,15 @@ export function fillPath(template: string, vars: Record<string, string>): string
 }
 
 export const pathVars = (template: string) => [...template.matchAll(/\{([^}]+)\}/g)].map((m) => m[1]);
+
+/**
+ * PVE's method descriptions are written for API developers ("Set virtual
+ * machine options (synchronous API) - You should consider using the POST
+ * method instead…"). Keep the first plain sentence for people.
+ */
+export function plainDescription(d: string | undefined): string {
+  let s = (d ?? '').split('\n')[0].trim();
+  s = s.replace(/\s*\((a)?synchronous API\)/i, '');
+  s = s.split(/\s+-\s+|\.\s+/)[0].trim();
+  return s.replace(/\.$/, '');
+}

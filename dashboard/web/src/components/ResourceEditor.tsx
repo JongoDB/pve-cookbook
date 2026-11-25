@@ -3,6 +3,7 @@ import type { SchemaParam } from '../api/types';
 import { useApp } from '../state/app';
 import { useAsync } from '../lib/hooks';
 import {
+  plainDescription,
   checkValue, diffBody, isRequired, joinProps, keyOrder, methodParams, nextFreeIndex, paramFor, propFormat,
   pveshCli, splitProps, toFormValue, type Body, type MethodParams, type PropFormat,
 } from '../lib/schemaForm';
@@ -141,7 +142,7 @@ function EditorForm(p: FormProps) {
   return (
     <form className="editor" onSubmit={submit} noValidate>
       {p.heading && <h3 className="editor-heading">{p.heading}</h3>}
-      <p className="explain">{p.description.split('\n')[0]} <span className="mono">{p.method} {path}</span></p>
+      <p className="explain">{plainDescription(p.description)}. <span className="mono">{p.method} {path}</span></p>
       {shown.length === 0 && <p className="muted small">No fields yet. Add a setting below.</p>}
       {shown.map((k) => {
         const prm = paramFor(mp, k)!;

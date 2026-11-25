@@ -34,6 +34,18 @@ export function useAsync<T>(load: (() => Promise<T>) | null, key: string): Async
 }
 
 /** A read through the user's own PVE session (GET /api/clusters/{id}/pve/{path}). */
+/**
+ * A key that changes whenever a change on this cluster finishes, so views of
+ * PVE state (configs, snapshots, node network…) reload after the user applied
+ * something instead of showing what was true before.
+ */
+export function useChangeKey(clusterId: string | null): string {
+  const { lastAudit } = useApp();
+  const last = useRef<Record<string, string>>({});
+  if (lastAudit && lastAudit.status !== 'running') last.current[lastAudit.clusterId] = `${lastAudit.id}:${lastAudit.status}`;
+  return clusterId ? last.current[clusterId] ?? '' : '';
+}
+
 export function usePve<T>(clusterId: string | null, path: string | null, query: Record<string, string | number | undefined> = {}, refreshKey = ''): AsyncState<T> {
   const { api, me } = useApp();
   const authed = !!me.clusters.find((c) => c.id === clusterId)?.authed;

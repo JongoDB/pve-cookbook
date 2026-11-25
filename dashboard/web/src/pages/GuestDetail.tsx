@@ -3,7 +3,7 @@ import { ApiError } from '../api/http';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import type { Guest, GuestTarget } from '../api/types';
 import { useApp, useCrumbs, errMsg } from '../state/app';
-import { usePve } from '../lib/hooks';
+import { useChangeKey, usePve } from '../lib/hooks';
 import { clock, uptime } from '../lib/format';
 import { formatBytes, formatPct } from '../lib/units';
 import { describeDisk, describeNic, describePci, parseGuestConfig, type RawConfig } from '../lib/guestConfig';
@@ -139,7 +139,8 @@ export function GuestDetail() {
   useCrumbs([{ label: 'Guests', to: '/guests' }, { label: clusterName(cluster), to: `/guests?cluster=${encodeURIComponent(cluster)}` }, { label: g?.name ?? vmid }]);
 
   const cfgPath = g ? `nodes/${g.node}/${g.type}/${g.vmid}/config` : null;
-  const cfg = usePve<RawConfig>(authed && g ? cluster : null, cfgPath);
+  const changed = useChangeKey(cluster);
+  const cfg = usePve<RawConfig>(authed && g ? cluster : null, cfgPath, {}, changed);
 
   if (!guests) {
     return <div className="page"><h1>Guest {vmid}</h1>{guestsError ? <ApiErrorView error={new Error(guestsError)} what="guests" /> : <div className="muted" role="status">Loading guest</div>}</div>;

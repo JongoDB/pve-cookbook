@@ -3,7 +3,7 @@ import { Link, useParams } from 'react-router-dom';
 import { ApiError } from '../api/http';
 import type { Timeframe } from '../api/types';
 import { useApp, useCrumbs } from '../state/app';
-import { usePve } from '../lib/hooks';
+import { useChangeKey, usePve } from '../lib/hooks';
 import { pctLabel, uptime } from '../lib/format';
 import { formatBytes, formatPct } from '../lib/units';
 import { consolePath, guestPath, storagePath } from '../lib/links';
@@ -33,9 +33,10 @@ export function NodeDetail() {
   const summary = fleet?.clusters.find((c) => c.id === cluster);
   const n = summary?.nodes.find((x) => x.name === node);
   const authed = !!me.clusters.find((c) => c.id === cluster)?.authed;
-  const st = usePve<NodeStatus>(authed ? cluster : null, `nodes/${node}/status`);
-  const net = usePve<Iface[]>(authed ? cluster : null, `nodes/${node}/network`);
-  const disks = usePve<Disk[]>(authed ? cluster : null, `nodes/${node}/disks/list`);
+  const changed = useChangeKey(cluster);
+  const st = usePve<NodeStatus>(authed ? cluster : null, `nodes/${node}/status`, {}, changed);
+  const net = usePve<Iface[]>(authed ? cluster : null, `nodes/${node}/network`, {}, changed);
+  const disks = usePve<Disk[]>(authed ? cluster : null, `nodes/${node}/disks/list`, {}, changed);
   const res = useMemo(() => [{ cluster, kind: 'node' as const, id: node, label: node }], [cluster, node]);
 
   if (fleet && !n) {

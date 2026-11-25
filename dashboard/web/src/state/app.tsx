@@ -69,6 +69,8 @@ function writeStore(k: string, v: string) {
 
 /** The guest list is shared by several views; refetch on fleet ticks at most this often. */
 const GUEST_REFRESH_MS = 15_000;
+/** After a change finishes, every cluster update refetches guests for this long. */
+const AFTER_CHANGE_MS = 30_000;
 const hidden = () => typeof document !== 'undefined' && document.visibilityState === 'hidden';
 
 export function AppProvider({ api, me, setMe, children }: { api: Api; me: Me; setMe: (m: Me | null) => void; children: ReactNode }) {
@@ -131,17 +133,14 @@ export function AppProvider({ api, me, setMe, children }: { api: Api; me: Me; se
       .then((g) => { if (n === seq.current) { setGuests(g); setGuestsError(null); } })
       .catch((e) => { if (n === seq.current) setGuestsError(errMsg(e)); });
   }, [api]);
-  // A finished change is announced before galley re-polls the cluster, so
-  // the first refetch can still see the old state: force one more refetch on
-  // the next cluster update after a change (e.g. a destroyed guest vanishes
-  // at once instead of after the refresh throttle).
-  const afterChange = useRef(false);
-  useEffect(() => { afterChange.current = true; fetchGuests(true); }, [fetchGuests, lastAudit?.id, lastAudit?.status]);
-  useEffect(() => {
-    const force = afterChange.current;
-    afterChange.current = false;
-    fetchGuests(force);
-  }, [fetchGuests, fleet?.updatedAt]);
+  // A finished change is announced before galley re-polls the cluster, and
+  // PVE itself reports new guest states up to ~10 s late (pvestatd), so for a
+  // while after a change every cluster update refetches guests instead of
+  // waiting for the refresh throttle (a started guest shows as running, a
+  // destroyed one disappears, within seconds).
+  const afterChangeUntil = useRef(0);
+  useEffect(() => { afterChangeUntil.current = Date.now() + AFTER_CHANGE_MS; fetchGuests(true); }, [fetchGuests, lastAudit?.id, lastAudit?.status]);
+  useEffect(() => { fetchGuests(Date.now() < afterChangeUntil.current); }, [fetchGuests, fleet?.updatedAt]);
   useEffect(() => {
     const onVis = () => { if (!hidden()) fetchGuests(false); };
     document.addEventListener('visibilitychange', onVis);

@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { SchemaMethod } from '../api/types';
 import {
   checkValue, diffBody, familyKeys, fillPath, joinProps, methodParams, nextFreeIndex, paramFor, pathVars, propFormat, pveshCli,
-  splitProps, toFormValue, type PropFormat,
+  plainDescription, splitProps, toFormValue, type PropFormat,
 } from './schemaForm';
 
 const PUT: SchemaMethod = {
@@ -116,5 +116,13 @@ describe('paths and pvesh', () => {
     expect(pveshCli('PUT', '/nodes/pve1/qemu/300/config', { hostpci1: 'mapping=gpu-a2-1,pcie=1', description: "it's new", cipassword: 'hunter2' }))
       .toBe("pvesh set /nodes/pve1/qemu/300/config --cipassword '<redacted>' --description 'it'\\''s new' --hostpci1 mapping=gpu-a2-1,pcie=1");
     expect(pveshCli('POST', '/cluster/mapping/pci', {})).toBe('pvesh create /cluster/mapping/pci');
+  });
+});
+
+describe('plainDescription', () => {
+  it('drops API-developer notes', () => {
+    expect(plainDescription('Set virtual machine options (synchronous API) - You should consider using the POST method instead for any actions involving hotplug or storage allocation.')).toBe('Set virtual machine options');
+    expect(plainDescription('Create a new hardware mapping.')).toBe('Create a new hardware mapping');
+    expect(plainDescription('')).toBe('');
   });
 });
